@@ -1,15 +1,15 @@
 @import "tailwindcss";
 
 :root {
-  --md-primary: #6b7de8;
-  --md-primary-container: #dfe4ff;
-  --md-secondary: #4f7f77;
-  --md-secondary-container: #d7f0ea;
-  --md-tertiary: #7b6fb2;
-  --md-surface: #f7f8fe;
-  --md-surface-container: #eef1fb;
-  --md-outline: #c4cae8;
-  --md-on-surface: #1a1b24;
+  --md-primary: #e11672;
+  --md-primary-container: #ffe2f0;
+  --md-secondary: #3a0f45;
+  --md-secondary-container: #efe7f6;
+  --md-tertiary: #c01366;
+  --md-surface: #fff7fb;
+  --md-surface-container: #fdf2f9;
+  --md-outline: #e8cedf;
+  --md-on-surface: #2a1a24;
   --md-on-primary: #ffffff;
 }
 
@@ -21,16 +21,37 @@
 
 body {
   font-family: "Google Sans", "Google Sans Text", "Inter", "Segoe UI", Roboto, Arial, sans-serif;
+  color: var(--md-on-surface);
+  background: radial-gradient(circle at top right, #fff0f8, #fff7fb 36%, #ffffff 100%);
 }
 
 .md-card {
   @apply rounded-3xl border p-6 shadow-sm;
   background: var(--md-surface-container);
   border-color: var(--md-outline);
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.md-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 24px rgba(58, 15, 69, 0.08);
 }
 
 .md-chip {
   @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-medium;
   background: var(--md-primary-container);
   color: var(--md-primary);
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  transition: all 180ms ease;
+}
+
+button:enabled:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(58, 15, 69, 0.12);
 }

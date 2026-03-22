@@ -52,15 +52,17 @@ export default async function ReportsPage({
       <p className="text-slate-600">
         Account: <span className="font-semibold">{account.name}</span>
       </p>
-      <ReportWorkbench
-        account={{
-          id: account.id,
-          name: account.name,
-          currency: account.currency,
-          vat_rate: account.vat_rate,
-        }}
-        canProcess={canProcess}
-      />
+      {canProcess ? (
+        <ReportWorkbench
+          account={{
+            id: account.id,
+            name: account.name,
+            currency: account.currency,
+            vat_rate: account.vat_rate,
+          }}
+          canProcess={canProcess}
+        />
+      ) : null}
       <SavedReportsPanel accountId={account.id} canEdit={canProcess} currency={account.currency} vatRate={account.vat_rate} />
     </div>
   );

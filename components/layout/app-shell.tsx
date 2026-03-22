@@ -1,10 +1,12 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import AccountSwitcher from "@/components/layout/account-switcher";
 import { createClient } from "@/lib/supabase/client";
+import type { UserRole } from "@/lib/types/auth";
 
 type NavItem = { href: string; label: string; emoji: string };
 
@@ -21,7 +23,32 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const accountId = searchParams.get("accountId");
-  const currentTab = navItems.find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`));
+  const [role, setRole] = useState<UserRole>("client");
+
+  useEffect(() => {
+    let mounted = true;
+    const loadRole = async () => {
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user || !mounted) return;
+      const { data } = await supabase.from("users").select("role").eq("id", user.id).maybeSingle();
+      if (!mounted) return;
+      setRole(((data?.role as UserRole) || "client") as UserRole);
+    };
+    void loadRole();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const visibleNavItems = useMemo(() => {
+    if (role === "admin") return navItems;
+    return navItems.filter((item) => item.href !== "/settings");
+  }, [role]);
+
+  const currentTab = visibleNavItems.find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`));
 
   const withAccount = (href: string) => {
     if (!accountId) return href;
@@ -53,7 +80,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             <p className="mt-2 text-sm text-slate-600">Amazon & Temu insights</p>
           </div>
           <nav className="space-y-2">
-            {navItems.map((item) => {
+            {visibleNavItems.map((item) => {
               const active = pathname === item.href;
               return (
                 <Link

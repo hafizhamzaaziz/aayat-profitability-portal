@@ -94,6 +94,32 @@ const styles = StyleSheet.create({
   c3: { width: "14%", textAlign: "right" },
   c4: { width: "14%", textAlign: "right" },
   c5: { width: "12%", textAlign: "right" },
+  twoCol: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginTop: 14,
+  },
+  col: {
+    width: "50%",
+  },
+  colLeft: {
+    paddingRight: 5,
+  },
+  colRight: {
+    paddingLeft: 5,
+  },
+  tightSection: {
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
+    borderRadius: 8,
+    padding: 10,
+  },
+  colStack: {
+    marginTop: 0,
+  },
+  sectionGap: {
+    marginTop: 10,
+  },
   footer: {
     position: "absolute",
     left: 28,
@@ -162,8 +188,9 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
         </View>
 
         {data.breakdown ? (
-          <>
-            <View style={styles.section}>
+          <View style={styles.twoCol} wrap={false}>
+            <View style={{ ...styles.col, ...styles.colLeft }}>
+              <View style={styles.tightSection}>
               <Text style={styles.sectionTitle}>
                 {data.breakdown.platform === "amazon" ? "Amazon Report Summary" : "Temu Report Summary"}
               </Text>
@@ -182,33 +209,41 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
                   {m(data.currency, data.breakdown.transferValue)}
                 </Text>
               </View>
-            </View>
-
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Profit & Loss (excl. VAT)</Text>
-              <MetricRow currency={data.currency} label="Settlement (excl. VAT)" value={data.breakdown.pnl.settlementNet} />
-              <MetricRow currency={data.currency} label="Your Purchase Cost (excl. VAT)" value={-Math.abs(data.breakdown.pnl.purchaseCost)} />
-              <View style={{ ...styles.row, borderBottomWidth: 0 }}>
-                <Text style={{ ...styles.label, fontWeight: 700 }}>Total Net Profit</Text>
-                <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.breakdown.pnl.netProfit) }}>
-                  {m(data.currency, data.breakdown.pnl.netProfit)}
-                </Text>
               </View>
             </View>
 
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>VAT Summary</Text>
-              <MetricRow currency={data.currency} label="VAT on Sales (Output)" value={data.breakdown.vat.outputVat} />
-              <MetricRow currency={data.currency} label="VAT on Fees/Inputs (Input)" value={-Math.abs(data.breakdown.vat.inputVatFees)} />
-              <MetricRow currency={data.currency} label="VAT on Purchases (Input)" value={-Math.abs(data.breakdown.vat.inputVatPurchases)} />
-              <View style={{ ...styles.row, borderBottomWidth: 0 }}>
-                <Text style={{ ...styles.label, fontWeight: 700 }}>Final VAT to Pay / Reclaim</Text>
-                <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.breakdown.vat.finalVat) }}>
-                  {m(data.currency, data.breakdown.vat.finalVat)}
-                </Text>
+            <View style={{ ...styles.col, ...styles.colRight }}>
+              <View style={styles.colStack}>
+                <View style={styles.tightSection}>
+                  <Text style={styles.sectionTitle}>Profit & Loss (excl. VAT)</Text>
+                  <MetricRow currency={data.currency} label="Settlement (excl. VAT)" value={data.breakdown.pnl.settlementNet} />
+                  <MetricRow
+                    currency={data.currency}
+                    label="Your Purchase Cost (excl. VAT)"
+                    value={-Math.abs(data.breakdown.pnl.purchaseCost)}
+                  />
+                  <View style={{ ...styles.row, borderBottomWidth: 0 }}>
+                    <Text style={{ ...styles.label, fontWeight: 700 }}>Total Net Profit</Text>
+                    <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.breakdown.pnl.netProfit) }}>
+                      {m(data.currency, data.breakdown.pnl.netProfit)}
+                    </Text>
+                  </View>
+                </View>
+                <View style={{ ...styles.tightSection, ...styles.sectionGap }}>
+                  <Text style={styles.sectionTitle}>VAT Summary</Text>
+                  <MetricRow currency={data.currency} label="VAT on Sales (Output)" value={data.breakdown.vat.outputVat} />
+                  <MetricRow currency={data.currency} label="VAT on Fees/Inputs (Input)" value={-Math.abs(data.breakdown.vat.inputVatFees)} />
+                  <MetricRow currency={data.currency} label="VAT on Purchases (Input)" value={-Math.abs(data.breakdown.vat.inputVatPurchases)} />
+                  <View style={{ ...styles.row, borderBottomWidth: 0 }}>
+                    <Text style={{ ...styles.label, fontWeight: 700 }}>Final VAT to Pay / Reclaim</Text>
+                    <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.breakdown.vat.finalVat) }}>
+                      {m(data.currency, data.breakdown.vat.finalVat)}
+                    </Text>
+                  </View>
+                </View>
               </View>
             </View>
-          </>
+          </View>
         ) : (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Financial Summary</Text>

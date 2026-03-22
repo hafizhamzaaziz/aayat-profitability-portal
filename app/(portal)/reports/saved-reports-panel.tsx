@@ -14,6 +14,9 @@ type SavedReport = {
   output_vat: number;
   input_vat: number;
   net_profit: number;
+  breakdown: {
+    summaryLines?: Array<{ label: string; value: number }>;
+  } | null;
 };
 
 type Expense = {
@@ -52,6 +55,16 @@ function computeExpenseTotals(rows: Expense[], vatRatePct: number) {
   return { net: money(net), vat: money(vat) };
 }
 
+function primarySalesLabel(platform: SavedReport["platform"]) {
+  return platform === "amazon" ? "Product Sales" : "Order Payments";
+}
+
+function getPrimarySales(report: SavedReport) {
+  const targetLabel = primarySalesLabel(report.platform);
+  const line = report.breakdown?.summaryLines?.find((item) => item.label === targetLabel);
+  return Number(line?.value ?? report.gross_sales ?? 0);
+}
+
 export default function SavedReportsPanel({ accountId, canEdit, currency, vatRate }: Props) {
   const [reports, setReports] = useState<SavedReport[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
@@ -85,7 +98,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
     let query = supabase
       .from("reports")
       .select(
-        "id, platform, period_start, period_end, gross_sales, total_cogs, total_fees, output_vat, input_vat, net_profit"
+        "id, platform, period_start, period_end, gross_sales, total_cogs, total_fees, output_vat, input_vat, net_profit, breakdown"
       )
       .eq("account_id", accountId)
       .order("period_start", { ascending: false });
@@ -136,7 +149,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
   useEffect(() => {
     if (!selected) return;
     setForm({
-      gross_sales: String(selected.gross_sales ?? 0),
+      gross_sales: String(getPrimarySales(selected)),
       total_cogs: String(selected.total_cogs ?? 0),
       total_fees: String(selected.total_fees ?? 0),
       payable_vat: String((selected.output_vat ?? 0) - (selected.input_vat ?? 0)),
