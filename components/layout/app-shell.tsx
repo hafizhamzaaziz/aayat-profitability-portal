@@ -45,11 +45,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               alt="Aayat logo"
               width={160}
               height={160}
-              className="mb-3 h-auto w-28 rounded-xl bg-white p-1"
+              className="mb-3 h-auto w-28"
               priority
             />
             <p className="md-chip mb-2">Aayat.co</p>
-            <h1 className="text-xl font-semibold tracking-tight">Aayat Profitability Portal</h1>
+            <h1 className="text-xl font-semibold tracking-tight">Profitability Portal</h1>
             <p className="mt-2 text-sm text-slate-600">Amazon & Temu insights</p>
           </div>
           <nav className="space-y-2">

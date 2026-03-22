@@ -59,7 +59,7 @@ type Input = {
 const styles = StyleSheet.create({
   page: { fontSize: 11, paddingTop: 28, paddingLeft: 28, paddingRight: 28, paddingBottom: 72, color: "#1f2937", fontFamily: "Helvetica" },
   topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
-  logo: { width: 90, height: 42, objectFit: "contain" as const },
+  logo: { width: 56, height: 56, objectFit: "contain" as const },
   heading: { fontSize: 18, fontWeight: 700, maxWidth: "78%" },
   sub: { color: "#6b7280", fontSize: 10, marginTop: 2 },
   section: { marginTop: 14, borderWidth: 1, borderColor: "#e5e7eb", borderRadius: 8, padding: 10 },
@@ -141,6 +141,8 @@ function MetricRow({ currency, label, value }: { currency: string; label: string
 }
 
 function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl: string | null }) {
+  const perf = data.performance.slice(0, 8);
+
   return (
     <Document>
       <Page size="A4" style={styles.page}>
@@ -223,6 +225,49 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
             </View>
           </View>
         )}
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>External Expenses Snapshot</Text>
+          {data.expenses.length === 0 ? (
+            <Text style={styles.sub}>No manual expenses recorded.</Text>
+          ) : (
+            data.expenses.slice(0, 10).map((e, idx) => (
+              <View key={`${e.description}-${idx}`} style={styles.row}>
+                <Text style={styles.label}>{e.description || "Expense"}</Text>
+                <Text style={{ ...styles.value, color: valueColor(e.amount) }}>
+                  {m(data.currency, e.amount)}
+                  {e.includes_vat ? " (inc VAT)" : ""}
+                </Text>
+              </View>
+            ))
+          )}
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Performance Metrics Snapshot</Text>
+          {perf.length === 0 ? (
+            <Text style={styles.sub}>No performance metrics available.</Text>
+          ) : (
+            <>
+              <View style={styles.tableHead}>
+                <Text style={styles.c1}>Date</Text>
+                <Text style={styles.c2}>Product</Text>
+                <Text style={styles.c3}>BSR</Text>
+                <Text style={styles.c4}>Reviews</Text>
+                <Text style={styles.c5}>Rating</Text>
+              </View>
+              {perf.map((p, idx) => (
+                <View key={`${p.product_name}-${idx}`} style={styles.tr}>
+                  <Text style={styles.c1}>{dateUk(p.recorded_date)}</Text>
+                  <Text style={styles.c2}>{p.product_name}</Text>
+                  <Text style={styles.c3}>{p.bsr ?? "-"}</Text>
+                  <Text style={styles.c4}>{p.review_count ?? "-"}</Text>
+                  <Text style={styles.c5}>{p.rating ?? "-"}</Text>
+                </View>
+              ))}
+            </>
+          )}
+        </View>
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Manual Notes</Text>

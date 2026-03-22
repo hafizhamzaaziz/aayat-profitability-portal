@@ -73,8 +73,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
     gross_sales: "0",
     total_cogs: "0",
     total_fees: "0",
-    output_vat: "0",
-    input_vat: "0",
+    payable_vat: "0",
     net_profit: "0",
   });
 
@@ -140,8 +139,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
       gross_sales: String(selected.gross_sales ?? 0),
       total_cogs: String(selected.total_cogs ?? 0),
       total_fees: String(selected.total_fees ?? 0),
-      output_vat: String(selected.output_vat ?? 0),
-      input_vat: String(selected.input_vat ?? 0),
+      payable_vat: String((selected.output_vat ?? 0) - (selected.input_vat ?? 0)),
       net_profit: String(selected.net_profit ?? 0),
     });
     setExportNotes("");
@@ -177,8 +175,8 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
         gross_sales: money(Number(form.gross_sales)),
         total_cogs: money(Number(form.total_cogs)),
         total_fees: money(Number(form.total_fees)),
-        output_vat: money(Number(form.output_vat)),
-        input_vat: money(Number(form.input_vat)),
+        output_vat: money(Number(selected.output_vat || 0)),
+        input_vat: money(Number(selected.output_vat || 0) - Number(form.payable_vat)),
         net_profit: money(Number(form.net_profit)),
       };
 
@@ -337,13 +335,19 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
               <h5 className="text-sm font-semibold text-slate-800">Report Detail</h5>
 
               <div className="grid gap-2 md:grid-cols-2">
-                {Object.entries(form).map(([key, value]) => (
+                {[
+                  { key: "gross_sales", label: "Product Sales" },
+                  { key: "total_cogs", label: "Total COGS" },
+                  { key: "total_fees", label: "Total Fees" },
+                  { key: "payable_vat", label: "Payable VAT" },
+                  { key: "net_profit", label: "Net Profit" },
+                ].map(({ key, label }) => (
                   <label key={key} className="text-xs text-slate-600">
-                    <span className="mb-1 block uppercase tracking-wide text-slate-500">{key.replaceAll("_", " ")}</span>
+                    <span className="mb-1 block uppercase tracking-wide text-slate-500">{label}</span>
                     <input
                       type="number"
                       step="0.01"
-                      value={value}
+                      value={form[key as keyof typeof form]}
                       onChange={(e) => setForm((prev) => ({ ...prev, [key]: e.target.value }))}
                       disabled={!canEdit}
                       className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100"
