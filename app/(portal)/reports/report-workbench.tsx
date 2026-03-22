@@ -25,6 +25,25 @@ type CalculationPreview = {
   netProfit: number;
   unitsSold: number;
   missingSkus: string[];
+  breakdown: {
+    platform: Platform;
+    summaryLines: Array<{ label: string; value: number }>;
+    settlementLabel: string;
+    settlementValue: number;
+    transferLabel: string;
+    transferValue: number;
+    pnl: {
+      settlementNet: number;
+      purchaseCost: number;
+      netProfit: number;
+    };
+    vat: {
+      outputVat: number;
+      inputVatFees: number;
+      inputVatPurchases: number;
+      finalVat: number;
+    };
+  };
 };
 
 type CogsEntry = {
@@ -110,6 +129,8 @@ function processTemu(
     other: 0,
     purchaseCost: 0,
     chargebacks: 0,
+    sellerRepayment: 0,
+    transfers: 0,
     unitsSold: 0,
     purchaseVatFromCogs: 0,
   };
@@ -157,6 +178,8 @@ function processTemu(
     else if (type.includes("shipping label") || type.includes("shippinglabel")) summary.shippingLabels += amount;
     else if (type.includes("chargeback")) summary.chargebacks += amount;
     else if (type.includes("deduction") || type.includes("penalty")) summary.penalties += amount;
+    else if (type.includes("seller repayment")) summary.sellerRepayment += amount;
+    else if (type.includes("transfer")) summary.transfers += amount;
     else summary.other += amount;
   }
 
@@ -178,7 +201,7 @@ function processTemu(
 
   const purchaseVat = summary.purchaseVatFromCogs || summary.purchaseCost * vatRate;
   const inputVat = purchaseVat + expenses.vat;
-
+  const finalVat = outputVat - inputVat;
   const netProfit = settlementNet - summary.purchaseCost - expenses.net;
 
   const totalFees =
@@ -196,6 +219,34 @@ function processTemu(
     netProfit,
     unitsSold: summary.unitsSold,
     missingSkus: Array.from(missingSkus),
+    breakdown: {
+      platform: "temu",
+      summaryLines: [
+        { label: "Order Payments", value: summary.orders },
+        { label: "Return Shipping Credit", value: summary.shippingCredits },
+        { label: "Refunds", value: summary.refunds },
+        { label: "Service Fees", value: summary.serviceFees },
+        { label: "Shipping Labels & Adjustments", value: summary.shippingLabels },
+        { label: "Chargebacks", value: summary.chargebacks },
+        { label: "Penalties", value: summary.penalties },
+        { label: "Seller Repayment", value: summary.sellerRepayment },
+      ],
+      settlementLabel: "Gross Settlement (Cash)",
+      settlementValue: grossSettlement,
+      transferLabel: "Transfers",
+      transferValue: summary.transfers,
+      pnl: {
+        settlementNet,
+        purchaseCost: summary.purchaseCost,
+        netProfit,
+      },
+      vat: {
+        outputVat,
+        inputVatFees: 0,
+        inputVatPurchases: purchaseVat + expenses.vat,
+        finalVat,
+      },
+    },
   };
 }
 
@@ -222,9 +273,12 @@ function processAmazon(
     fbaFeesNet: 0,
     otherTransFeesNet: 0,
     adCostNet: 0,
+    serviceFeesNet: 0,
     deliveryNet: 0,
     adjustments: 0,
     refunds: 0,
+    transfersToBank: 0,
+    fbaInventoryFeeNet: 0,
     purchaseCost: 0,
     inputVatFees: 0,
     netTaxCollected: 0,
@@ -291,21 +345,23 @@ function processAmazon(
       summary.fbaFeesNet += fba.net;
       summary.inputVatFees -= fba.tax;
     } else if (type === "service fee") {
-      summary.adCostNet += getVal("other transaction fees");
+      summary.serviceFeesNet += getVal("other transaction fees");
       summary.inputVatFees += Math.abs(getVal("other"));
     } else if (type === "delivery services") {
       const del = extractTax(getVal("other"));
       summary.deliveryNet += del.net;
       summary.inputVatFees -= del.tax;
     } else if (type === "fba inventory fee") {
-      summary.otherTransFeesNet += getVal("other transaction fees");
-      summary.otherTransFeesNet += getVal("other");
+      summary.fbaInventoryFeeNet += getVal("other transaction fees");
+      summary.fbaInventoryFeeNet += getVal("other");
     } else if (type === "adjustment") {
       summary.adjustments += getVal("shipping credits");
       summary.adjustments += getVal("gift wrap credits");
       summary.adjustments += getVal("promotional rebates");
       summary.adjustments += getVal("other");
       summary.adjustments += getVal("other transaction fees");
+    } else if (type === "transfer") {
+      summary.transfersToBank += total;
     }
 
     summary.netTaxCollected += getVal("product sales tax");
@@ -315,13 +371,15 @@ function processAmazon(
   const purchaseVat = summary.purchaseVatFromCogs || summary.purchaseCost * vatRate;
   const outputVat = summary.netTaxCollected;
   const inputVat = summary.inputVatFees + purchaseVat + expenses.vat;
+  const finalVat = outputVat - inputVat;
   const netProfit = settlementNet - summary.purchaseCost - expenses.net;
 
   const totalFees =
     Math.abs(summary.sellingFeesNet) +
     Math.abs(summary.fbaFeesNet) +
     Math.abs(summary.otherTransFeesNet) +
-    Math.abs(summary.adCostNet) +
+    Math.abs(summary.fbaInventoryFeeNet) +
+    Math.abs(summary.serviceFeesNet) +
     Math.abs(summary.deliveryNet);
 
   return {
@@ -333,6 +391,35 @@ function processAmazon(
     netProfit,
     unitsSold: summary.unitsSold,
     missingSkus: Array.from(missingSkus),
+    breakdown: {
+      platform: "amazon",
+      summaryLines: [
+        { label: "Product Sales", value: summary.salesNet },
+        { label: "Refunds on Sales", value: summary.refunds },
+        { label: "Adjustments & Credits", value: summary.adjustments },
+        { label: "Selling Fees", value: summary.sellingFeesNet },
+        { label: "FBA Fees", value: summary.fbaFeesNet },
+        { label: "FBA Inventory Fee", value: summary.fbaInventoryFeeNet },
+        { label: "Other Transaction Fees", value: summary.otherTransFeesNet },
+        { label: "Delivery Services", value: summary.deliveryNet },
+        { label: "Service Fees", value: summary.serviceFeesNet },
+      ],
+      settlementLabel: "Net Amazon Settlement",
+      settlementValue: settlementNet,
+      transferLabel: "Transfers to Bank",
+      transferValue: summary.transfersToBank,
+      pnl: {
+        settlementNet,
+        purchaseCost: summary.purchaseCost,
+        netProfit,
+      },
+      vat: {
+        outputVat,
+        inputVatFees: summary.inputVatFees,
+        inputVatPurchases: purchaseVat + expenses.vat,
+        finalVat,
+      },
+    },
   };
 }
 
@@ -498,6 +585,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
         output_vat: Number(preview.outputVat.toFixed(2)),
         input_vat: Number(preview.inputVat.toFixed(2)),
         net_profit: Number(preview.netProfit.toFixed(2)),
+        breakdown: preview.breakdown,
       };
 
       const { data: reportRow, error: reportError } = await supabase

@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import html2canvas from "html2canvas";
+import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 type SavedReport = {
@@ -67,7 +66,6 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
   const [filterStart, setFilterStart] = useState("");
   const [filterEnd, setFilterEnd] = useState("");
   const [exportNotes, setExportNotes] = useState("");
-  const reportExportRef = useRef<HTMLDivElement | null>(null);
 
   const selected = useMemo(() => reports.find((r) => r.id === selectedId) || null, [reports, selectedId]);
 
@@ -274,29 +272,6 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
     }
   };
 
-  const downloadPng = async () => {
-    if (!selected || !reportExportRef.current) return;
-    setDownloading(true);
-    setError(null);
-    try {
-      const canvas = await html2canvas(reportExportRef.current, {
-        backgroundColor: "#ffffff",
-        scale: 2,
-        useCORS: true,
-      });
-      const objectUrl = canvas.toDataURL("image/png");
-      const a = document.createElement("a");
-      a.href = objectUrl;
-      a.download = `profitability-${selected.platform}-${selected.period_start}.png`;
-      a.click();
-      setMessage("PNG exported.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to export PNG.");
-    } finally {
-      setDownloading(false);
-    }
-  };
-
   const missingForSelectedPeriod = Boolean(filterStart && filterEnd && reports.length === 0);
 
   return (
@@ -358,7 +333,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
           </div>
 
           {selected ? (
-            <div ref={reportExportRef} className="space-y-3 rounded-2xl border border-slate-200 p-3">
+            <div className="space-y-3 rounded-2xl border border-slate-200 p-3">
               <h5 className="text-sm font-semibold text-slate-800">Report Detail</h5>
 
               <div className="grid gap-2 md:grid-cols-2">
@@ -439,13 +414,6 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
                   className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
                 >
                   {downloading ? "Generating PDF..." : "Download PDF"}
-                </button>
-                <button
-                  onClick={downloadPng}
-                  disabled={downloading}
-                  className="ml-2 rounded-xl bg-slate-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                >
-                  {downloading ? "Generating PNG..." : "Download PNG"}
                 </button>
               </div>
 

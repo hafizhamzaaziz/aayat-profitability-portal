@@ -15,7 +15,6 @@
     "@supabase/ssr": "^0.9.0",
     "@supabase/supabase-js": "^2.99.1",
     "@types/papaparse": "^5.5.2",
-    "html2canvas": "^1.4.1",
     "next": "^14.2.35",
     "papaparse": "^5.5.3",
     "react": "^18.2.0",

@@ -23,9 +23,7 @@ export async function GET(
 
   const { data: report, error: reportError } = await supabase
     .from("reports")
-    .select(
-      "id, account_id, platform, period_start, period_end, gross_sales, total_cogs, total_fees, output_vat, input_vat, net_profit"
-    )
+    .select("*")
     .eq("id", reportId)
     .single();
 
@@ -71,6 +69,7 @@ export async function GET(
       input_vat: Number(report.input_vat || 0),
       net_profit: Number(report.net_profit || 0),
     },
+    breakdown: report.breakdown ?? null,
     expenses: (expenses || []).map((e) => ({
       description: e.description,
       amount: Number(e.amount || 0),

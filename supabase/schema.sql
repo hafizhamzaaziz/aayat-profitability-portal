@@ -80,10 +80,12 @@ create table if not exists public.reports (
   output_vat numeric(14,2) not null default 0,
   input_vat numeric(14,2) not null default 0,
   net_profit numeric(14,2) not null default 0,
+  breakdown jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(account_id, period_start, period_end, platform)
 );
+alter table public.reports add column if not exists breakdown jsonb;
 -- 5) expenses
 create table if not exists public.expenses (
   id uuid primary key default gen_random_uuid(),
