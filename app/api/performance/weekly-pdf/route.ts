@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
     const previousWeekStart = addDays(weekStart, -7);
     const previousWeekEnd = addDays(weekStart, -1);
 
-    const { data: account } = await supabase.from("accounts").select("id, name").eq("id", accountId).maybeSingle();
+    const { data: account } = await supabase.from("accounts").select("id, name, logo_url").eq("id", accountId).maybeSingle();
     if (!account) return new Response("Account not found", { status: 404 });
 
     const { data: rows, error: rowsError } = await supabase
@@ -45,6 +45,7 @@ export async function GET(request: NextRequest) {
 
     const pdfBytes = await renderWeeklyPerformancePdfBuffer({
       accountName: account.name,
+      accountLogoUrl: account.logo_url,
       weekStart,
       weekEnd,
       rows: (rows || []) as never[],

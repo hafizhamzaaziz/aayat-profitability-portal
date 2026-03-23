@@ -1,5 +1,7 @@
 import React from "react";
-import { Document, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { Document, Image, Link, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
 import { formatUkDate } from "@/lib/utils/date";
 
 type Metric = {
@@ -16,6 +18,7 @@ type Metric = {
 
 type Input = {
   accountName: string;
+  accountLogoUrl: string | null;
   weekStart: string;
   weekEnd: string;
   rows: Metric[];
@@ -23,15 +26,17 @@ type Input = {
 };
 
 const styles = StyleSheet.create({
-  page: { fontSize: 10, padding: 28, color: "#1f2937", fontFamily: "Helvetica" },
-  title: { fontSize: 16, fontWeight: 700 },
-  sub: { fontSize: 10, color: "#6b7280", marginTop: 2, marginBottom: 10 },
+  page: { fontSize: 9, paddingTop: 20, paddingLeft: 20, paddingRight: 20, paddingBottom: 58, color: "#1f2937", fontFamily: "Helvetica" },
+  topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  title: { fontSize: 15, fontWeight: 700, maxWidth: "80%" },
+  sub: { fontSize: 9, color: "#6b7280", marginTop: 2 },
+  logo: { width: 56, height: 56, objectFit: "contain" as const },
   tableHead: {
     flexDirection: "row",
     borderBottomWidth: 1,
     borderBottomColor: "#d1d5db",
     backgroundColor: "#f8fafc",
-    paddingVertical: 4,
+    paddingVertical: 3,
     paddingHorizontal: 4,
     fontWeight: 700,
   },
@@ -39,18 +44,35 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     borderBottomWidth: 1,
     borderBottomColor: "#eef2f7",
-    paddingVertical: 4,
+    paddingVertical: 3,
     paddingHorizontal: 4,
   },
-  c1: { width: "18%" },
-  c2: { width: "13%" },
-  c3: { width: "10%", textAlign: "right" },
-  c4: { width: "10%", textAlign: "right" },
-  c5: { width: "10%", textAlign: "right" },
-  c6: { width: "10%", textAlign: "right" },
-  c7: { width: "10%", textAlign: "right" },
-  c8: { width: "9%", textAlign: "right" },
-  c9: { width: "10%", textAlign: "right" },
+  c1: { width: "16%" },
+  c2: { width: "12%" },
+  c3: { width: "8%", textAlign: "right" },
+  c4: { width: "8%", textAlign: "right" },
+  c5: { width: "8%", textAlign: "right" },
+  c6: { width: "7%", textAlign: "right" },
+  c7: { width: "7%", textAlign: "right" },
+  c8: { width: "8%", textAlign: "right" },
+  c9: { width: "8%", textAlign: "right" },
+  c10: { width: "6%", textAlign: "right" },
+  c11: { width: "10%", textAlign: "right" },
+  asinLink: { color: "#1d4ed8", textDecoration: "underline" },
+  footer: {
+    position: "absolute",
+    left: 20,
+    right: 20,
+    bottom: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#e5e7eb",
+    paddingTop: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  footerText: { fontSize: 9, color: "#6b7280" },
+  footerLogo: { width: 56, height: 56, objectFit: "contain" as const },
 });
 
 function pct(num: number | null) {
@@ -61,7 +83,7 @@ function n(num: number | null) {
   return num == null ? "-" : Number(num).toFixed(2);
 }
 
-function WeeklyPerformancePdf({ data }: { data: Input }) {
+function WeeklyPerformancePdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl: string | null }) {
   const prevByKey = new Map<string, Metric>();
   for (const row of data.previousRows) {
     prevByKey.set(`${row.product_name.toLowerCase()}|${row.asin || ""}`, row);
@@ -69,11 +91,19 @@ function WeeklyPerformancePdf({ data }: { data: Input }) {
 
   return (
     <Document>
-      <Page size="A4" style={styles.page}>
-        <Text style={styles.title}>{data.accountName} Weekly Performance Report</Text>
-        <Text style={styles.sub}>
-          Week: {formatUkDate(data.weekStart)} to {formatUkDate(data.weekEnd)} | Previous week comparison included
-        </Text>
+      <Page size="A4" orientation="landscape" style={styles.page}>
+        <View style={styles.topRow}>
+          <View>
+            <Text style={styles.title}>{data.accountName} Weekly Performance Report</Text>
+            <Text style={styles.sub}>
+              Week: {formatUkDate(data.weekStart)} to {formatUkDate(data.weekEnd)}
+            </Text>
+          </View>
+          {data.accountLogoUrl ? (
+            // eslint-disable-next-line jsx-a11y/alt-text
+            <Image src={data.accountLogoUrl} style={styles.logo} />
+          ) : null}
+        </View>
 
         <View style={styles.tableHead}>
           <Text style={styles.c1}>Product</Text>
@@ -84,7 +114,9 @@ function WeeklyPerformancePdf({ data }: { data: Input }) {
           <Text style={styles.c6}>ACOS</Text>
           <Text style={styles.c7}>TACOS</Text>
           <Text style={styles.c8}>BSR</Text>
-          <Text style={styles.c9}>Delta</Text>
+          <Text style={styles.c9}>Reviews</Text>
+          <Text style={styles.c10}>Rating</Text>
+          <Text style={styles.c11}>ACOS Delta</Text>
         </View>
 
         {data.rows.length === 0 ? (
@@ -103,25 +135,56 @@ function WeeklyPerformancePdf({ data }: { data: Input }) {
             return (
               <View key={`${row.product_name}-${idx}`} style={styles.tr}>
                 <Text style={styles.c1}>{row.product_name}</Text>
-                <Text style={styles.c2}>{row.asin || "-"}</Text>
+                <Text style={styles.c2}>
+                  {row.asin ? (
+                    <Link src={`https://www.amazon.co.uk/dp/${row.asin}`} style={styles.asinLink}>
+                      {row.asin}
+                    </Link>
+                  ) : (
+                    "-"
+                  )}
+                </Text>
                 <Text style={styles.c3}>{n(row.ppc_spend)}</Text>
                 <Text style={styles.c4}>{n(row.ppc_sales)}</Text>
                 <Text style={styles.c5}>{n(row.total_sales)}</Text>
                 <Text style={styles.c6}>{pct(acos)}</Text>
                 <Text style={styles.c7}>{pct(tacos)}</Text>
                 <Text style={styles.c8}>{row.bsr ?? "-"}</Text>
-                <Text style={styles.c9}>{deltaText}</Text>
+                <Text style={styles.c9}>{row.review_count ?? "-"}</Text>
+                <Text style={styles.c10}>{row.rating ?? "-"}</Text>
+                <Text style={styles.c11}>{deltaText}</Text>
               </View>
             );
           })
         )}
+
+        <View style={styles.footer} fixed>
+          {footerLogoDataUrl ? (
+            // eslint-disable-next-line jsx-a11y/alt-text
+            <Image src={footerLogoDataUrl} style={styles.footerLogo} />
+          ) : (
+            <Text />
+          )}
+          <Text style={styles.footerText}>© aayat.co | hello@aayat.co | +44 7727 666043</Text>
+        </View>
       </Page>
     </Document>
   );
 }
 
+async function getFooterLogoDataUrl() {
+  try {
+    const logoPath = path.join(process.cwd(), "public", "aayat-logo.png");
+    const bytes = await readFile(logoPath);
+    return `data:image/png;base64,${bytes.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function renderWeeklyPerformancePdfBuffer(data: Input): Promise<Uint8Array> {
-  const instance = pdf(<WeeklyPerformancePdf data={data} />);
+  const footerLogoDataUrl = await getFooterLogoDataUrl();
+  const instance = pdf(<WeeklyPerformancePdf data={data} footerLogoDataUrl={footerLogoDataUrl} />);
   const output = await instance.toBuffer();
   if (output instanceof Uint8Array) return output;
 
