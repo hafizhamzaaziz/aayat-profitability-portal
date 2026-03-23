@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { addDays, formatUkDate } from "@/lib/utils/date";
 
 type SavedReport = {
   id: string;
@@ -65,8 +66,13 @@ function getPrimarySales(report: SavedReport) {
   return Number(line?.value ?? report.gross_sales ?? 0);
 }
 
+function fixed2(value: number) {
+  return Number(value || 0).toFixed(2);
+}
+
 export default function SavedReportsPanel({ accountId, canEdit, currency, vatRate }: Props) {
   const [reports, setReports] = useState<SavedReport[]>([]);
+  const [selectedForCombine, setSelectedForCombine] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [originalExpenses, setOriginalExpenses] = useState<Expense[]>([]);
@@ -149,11 +155,11 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
   useEffect(() => {
     if (!selected) return;
     setForm({
-      gross_sales: String(getPrimarySales(selected)),
-      total_cogs: String(selected.total_cogs ?? 0),
-      total_fees: String(selected.total_fees ?? 0),
-      payable_vat: String((selected.output_vat ?? 0) - (selected.input_vat ?? 0)),
-      net_profit: String(selected.net_profit ?? 0),
+      gross_sales: fixed2(getPrimarySales(selected)),
+      total_cogs: fixed2(selected.total_cogs ?? 0),
+      total_fees: fixed2(selected.total_fees ?? 0),
+      payable_vat: fixed2((selected.output_vat ?? 0) - (selected.input_vat ?? 0)),
+      net_profit: fixed2(selected.net_profit ?? 0),
     });
     setExportNotes("");
     void loadExpenses(selected.id);
@@ -283,6 +289,55 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
     }
   };
 
+  const toggleReportForCombine = (id: string) => {
+    setSelectedForCombine((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const validateContinuousSelection = () => {
+    const selectedRows = reports.filter((r) => selectedForCombine.includes(r.id));
+    if (selectedRows.length < 2) return "Select at least 2 reports.";
+    const platform = selectedRows[0].platform;
+    if (selectedRows.some((r) => r.platform !== platform)) return "You cannot mix Amazon and Temu in one combined file.";
+    const sorted = [...selectedRows].sort((a, b) => (a.period_start < b.period_start ? -1 : 1));
+    for (let i = 1; i < sorted.length; i++) {
+      const expectedStart = addDays(sorted[i - 1].period_end, 1);
+      if (sorted[i].period_start !== expectedStart) {
+        return `Date gap found between ${formatUkDate(sorted[i - 1].period_end)} and ${formatUkDate(sorted[i].period_start)}.`;
+      }
+    }
+    return null;
+  };
+
+  const downloadCombinedPdf = async () => {
+    const validation = validateContinuousSelection();
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    setDownloading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/reports/combined/pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reportIds: selectedForCombine, notes: exportNotes.trim() || undefined }),
+      });
+      if (!response.ok) throw new Error(`Combined PDF failed (${response.status})`);
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = "combined-profitability-report.pdf";
+      a.click();
+      URL.revokeObjectURL(objectUrl);
+      setMessage("Combined PDF exported.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to export combined PDF.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const missingForSelectedPeriod = Boolean(filterStart && filterEnd && reports.length === 0);
 
   return (
@@ -309,6 +364,13 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
         <button onClick={() => void loadReports()} className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700">
           Refresh
         </button>
+        <button
+          onClick={downloadCombinedPdf}
+          disabled={downloading || selectedForCombine.length < 2}
+          className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+        >
+          {downloading ? "Generating..." : "Download Combined PDF"}
+        </button>
       </div>
 
       {missingForSelectedPeriod ? (
@@ -334,9 +396,17 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
                     : "border-slate-200 bg-white"
                 }`}
               >
-                <p className="font-semibold capitalize">{report.platform}</p>
+                <div className="mb-1 flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedForCombine.includes(report.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => toggleReportForCombine(report.id)}
+                  />
+                  <p className="font-semibold capitalize">{report.platform}</p>
+                </div>
                 <p className="text-xs text-slate-500">
-                  {report.period_start} to {report.period_end}
+                  {formatUkDate(report.period_start)} to {formatUkDate(report.period_end)}
                 </p>
                 <p className="mt-1 text-xs text-slate-600">Net: {currency}{Number(report.net_profit).toFixed(2)}</p>
               </button>
@@ -362,6 +432,12 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
                       step="0.01"
                       value={form[key as keyof typeof form]}
                       onChange={(e) => setForm((prev) => ({ ...prev, [key]: e.target.value }))}
+                      onBlur={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          [key]: Number(e.target.value || 0).toFixed(2),
+                        }))
+                      }
                       disabled={!canEdit}
                       className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100"
                     />

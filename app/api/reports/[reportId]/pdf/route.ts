@@ -47,12 +47,17 @@ export async function GET(
     .eq("report_id", report.id)
     .order("created_at", { ascending: true });
 
-  const { data: performance } = await supabase
-    .from("performance_metrics")
-    .select("recorded_date, product_name, bsr, review_count, rating")
-    .eq("account_id", report.account_id)
-    .order("recorded_date", { ascending: false })
-    .limit(12);
+  const { data: performance } =
+    report.platform === "amazon"
+      ? await supabase
+          .from("performance_metrics")
+          .select("recorded_date, product_name, bsr, review_count, rating")
+          .eq("account_id", report.account_id)
+          .gte("recorded_date", report.period_start)
+          .lte("recorded_date", report.period_end)
+          .order("recorded_date", { ascending: false })
+          .limit(12)
+      : { data: [] };
 
   const pdfBytes = await renderReportPdfBuffer({
     accountName: account.name,

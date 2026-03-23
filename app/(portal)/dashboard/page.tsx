@@ -4,6 +4,7 @@ import type { UserRole } from "@/lib/types/auth";
 import { getAccountByIdForRole } from "@/lib/data/accounts";
 import DashboardFilters from "./dashboard-filters";
 import DashboardCharts from "./dashboard-charts";
+import { formatUkDate } from "@/lib/utils/date";
 
 type Search = {
   accountId?: string;
@@ -31,6 +32,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
     period_start: string;
     period_end: string;
     gross_sales: number;
+    breakdown: { summaryLines?: Array<{ label: string; value: number }> } | null;
     total_cogs: number;
     total_fees: number;
     output_vat: number;
@@ -44,7 +46,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
     let query = supabase
       .from("reports")
       .select(
-        "id, platform, period_start, period_end, gross_sales, total_cogs, total_fees, output_vat, input_vat, net_profit"
+        "id, platform, period_start, period_end, gross_sales, breakdown, total_cogs, total_fees, output_vat, input_vat, net_profit"
       )
       .eq("account_id", account.id)
       .order("period_start", { ascending: false });
@@ -68,12 +70,14 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
 
   const totals = reports.reduce(
     (acc, row) => {
+      const salesLabel = row.platform === "amazon" ? "Product Sales" : "Order Payments";
+      const salesFromBreakdown = row.breakdown?.summaryLines?.find((line) => line.label === salesLabel)?.value;
       acc.netProfit += Number(row.net_profit || 0);
       acc.vatPosition += Number((row.output_vat || 0) - (row.input_vat || 0));
-      acc.gross += Number(row.gross_sales || 0);
+      acc.totalSales += Number(salesFromBreakdown ?? row.gross_sales ?? 0);
       return acc;
     },
-    { netProfit: 0, vatPosition: 0, gross: 0 }
+    { netProfit: 0, vatPosition: 0, totalSales: 0 }
   );
 
   return (
@@ -104,8 +108,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
           <p className="text-xl font-semibold">{totals.vatPosition.toFixed(2)}</p>
         </div>
         <div className="rounded-2xl bg-white p-4">
-          <p className="text-xs text-slate-500">Gross Sales</p>
-          <p className="text-xl font-semibold">{totals.gross.toFixed(2)}</p>
+          <p className="text-xs text-slate-500">Total Sales</p>
+          <p className="text-xl font-semibold">{totals.totalSales.toFixed(2)}</p>
         </div>
       </div>
 
@@ -140,8 +144,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
                 {reports.map((report) => (
                   <tr key={report.id} className="border-t border-slate-100">
                     <td className="py-2 pr-4 capitalize">{report.platform}</td>
-                    <td className="py-2 pr-4">{report.period_start}</td>
-                    <td className="py-2 pr-4">{report.period_end}</td>
+                    <td className="py-2 pr-4">{formatUkDate(report.period_start)}</td>
+                    <td className="py-2 pr-4">{formatUkDate(report.period_end)}</td>
                     <td className="py-2 pr-4">{Number(report.net_profit).toFixed(2)}</td>
                   </tr>
                 ))}

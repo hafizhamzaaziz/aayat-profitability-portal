@@ -2,22 +2,31 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { formatUkDate, isMonday } from "@/lib/utils/date";
 
 type Metric = {
   id: string;
   recorded_date: string;
   product_name: string;
+  asin: string | null;
   bsr: number | null;
   review_count: number | null;
   rating: number | null;
+  ppc_spend: number | null;
+  ppc_sales: number | null;
+  total_sales: number | null;
 };
 
 type FormState = {
   recorded_date: string;
   product_name: string;
+  asin: string;
   bsr: string;
   review_count: string;
   rating: string;
+  ppc_spend: string;
+  ppc_sales: string;
+  total_sales: string;
 };
 
 type Props = {
@@ -26,13 +35,21 @@ type Props = {
 };
 
 function initialForm(): FormState {
-  const today = new Date().toISOString().slice(0, 10);
+  const dt = new Date();
+  const day = dt.getDay();
+  const shift = day === 0 ? -6 : 1 - day;
+  dt.setDate(dt.getDate() + shift);
+  const monday = dt.toISOString().slice(0, 10);
   return {
-    recorded_date: today,
+    recorded_date: monday,
     product_name: "",
+    asin: "",
     bsr: "",
     review_count: "",
     rating: "",
+    ppc_spend: "",
+    ppc_sales: "",
+    total_sales: "",
   };
 }
 
@@ -43,6 +60,9 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(initialForm());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [weekStart, setWeekStart] = useState<string>(initialForm().recorded_date);
+  const [downloadingWeekly, setDownloadingWeekly] = useState(false);
 
   const loadRows = async () => {
     setLoading(true);
@@ -51,7 +71,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
 
     const { data, error: fetchError } = await supabase
       .from("performance_metrics")
-      .select("id, recorded_date, product_name, bsr, review_count, rating")
+      .select("id, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales")
       .eq("account_id", accountId)
       .order("recorded_date", { ascending: false });
 
@@ -72,6 +92,10 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
 
   const saveMetric = async () => {
     if (!form.product_name.trim() || !form.recorded_date) return;
+    if (!isMonday(form.recorded_date)) {
+      setError("Performance entries are weekly only. Please select a Monday date.");
+      return;
+    }
 
     setSaving(true);
     setError(null);
@@ -83,16 +107,25 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
         account_id: accountId,
         recorded_date: form.recorded_date,
         product_name: form.product_name.trim(),
+        asin: form.asin.trim() || null,
         bsr: form.bsr ? Number(form.bsr) : null,
         review_count: form.review_count ? Number(form.review_count) : null,
         rating: form.rating ? Number(form.rating) : null,
+        ppc_spend: form.ppc_spend ? Number(form.ppc_spend) : null,
+        ppc_sales: form.ppc_sales ? Number(form.ppc_sales) : null,
+        total_sales: form.total_sales ? Number(form.total_sales) : null,
       };
-
-      const { error: insertError } = await supabase.from("performance_metrics").insert(payload);
-      if (insertError) throw insertError;
+      if (editingId) {
+        const { error: updateError } = await supabase.from("performance_metrics").update(payload).eq("id", editingId);
+        if (updateError) throw updateError;
+      } else {
+        const { error: insertError } = await supabase.from("performance_metrics").insert(payload);
+        if (insertError) throw insertError;
+      }
 
       setForm(initialForm());
-      setMessage("Performance metric saved.");
+      setEditingId(null);
+      setMessage(editingId ? "Performance metric updated." : "Performance metric saved.");
       await loadRows();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save metric.");
@@ -112,6 +145,54 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
     }
 
     await loadRows();
+  };
+
+  const editMetric = (row: Metric) => {
+    setEditingId(row.id);
+    setForm({
+      recorded_date: row.recorded_date,
+      product_name: row.product_name,
+      asin: row.asin || "",
+      bsr: row.bsr == null ? "" : String(row.bsr),
+      review_count: row.review_count == null ? "" : String(row.review_count),
+      rating: row.rating == null ? "" : String(row.rating),
+      ppc_spend: row.ppc_spend == null ? "" : String(row.ppc_spend),
+      ppc_sales: row.ppc_sales == null ? "" : String(row.ppc_sales),
+      total_sales: row.total_sales == null ? "" : String(row.total_sales),
+    });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setForm(initialForm());
+  };
+
+  const downloadWeeklyPdf = async () => {
+    if (!weekStart || !isMonday(weekStart)) {
+      setError("Please select a Monday as week start.");
+      return;
+    }
+    setDownloadingWeekly(true);
+    setError(null);
+    try {
+      const url = `/api/performance/weekly-pdf?accountId=${encodeURIComponent(accountId)}&weekStart=${encodeURIComponent(weekStart)}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Weekly performance PDF failed (${response.status})`);
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = `performance-week-${weekStart}.pdf`;
+      a.click();
+      URL.revokeObjectURL(objectUrl);
+      setMessage("Weekly performance PDF exported.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to export weekly performance PDF.");
+    } finally {
+      setDownloadingWeekly(false);
+    }
   };
 
   const trendByProduct = useMemo(() => {
@@ -160,8 +241,27 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
 
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-2 rounded-2xl border border-slate-200 bg-white p-4">
+        <label className="text-xs text-slate-600">
+          <span className="mb-1 block uppercase tracking-wide text-slate-500">Week Start (Monday)</span>
+          <input
+            type="date"
+            value={weekStart}
+            onChange={(e) => setWeekStart(e.target.value)}
+            className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+          />
+        </label>
+        <button
+          onClick={downloadWeeklyPdf}
+          disabled={downloadingWeekly}
+          className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+        >
+          {downloadingWeekly ? "Generating..." : "Download Weekly PDF"}
+        </button>
+      </div>
+
       {canEdit ? (
-        <div className="grid gap-2 rounded-2xl border border-slate-200 bg-white p-4 md:grid-cols-[150px_1fr_120px_140px_120px_auto]">
+        <div className="grid gap-2 rounded-2xl border border-slate-200 bg-white p-4 md:grid-cols-4">
           <input
             type="date"
             value={form.recorded_date}
@@ -172,6 +272,12 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             placeholder="Product name"
             value={form.product_name}
             onChange={(e) => setForm((prev) => ({ ...prev, product_name: e.target.value }))}
+            className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+          />
+          <input
+            placeholder="ASIN"
+            value={form.asin}
+            onChange={(e) => setForm((prev) => ({ ...prev, asin: e.target.value.toUpperCase() }))}
             className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
           />
           <input
@@ -196,13 +302,46 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             step="0.01"
             className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
           />
+          <input
+            placeholder="PPC Spend"
+            value={form.ppc_spend}
+            onChange={(e) => setForm((prev) => ({ ...prev, ppc_spend: e.target.value }))}
+            type="number"
+            step="0.01"
+            className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+          />
+          <input
+            placeholder="PPC Sales"
+            value={form.ppc_sales}
+            onChange={(e) => setForm((prev) => ({ ...prev, ppc_sales: e.target.value }))}
+            type="number"
+            step="0.01"
+            className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+          />
+          <input
+            placeholder="Total Sales"
+            value={form.total_sales}
+            onChange={(e) => setForm((prev) => ({ ...prev, total_sales: e.target.value }))}
+            type="number"
+            step="0.01"
+            className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+          />
           <button
             onClick={saveMetric}
             disabled={saving}
             className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
           >
-            {saving ? "Saving..." : "Add"}
+            {saving ? "Saving..." : editingId ? "Update" : "Add"}
           </button>
+          {editingId ? (
+            <button
+              onClick={cancelEdit}
+              type="button"
+              className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700"
+            >
+              Cancel
+            </button>
+          ) : null}
         </div>
       ) : (
         <p className="rounded-2xl bg-slate-100 px-3 py-2 text-sm text-slate-700">
@@ -219,9 +358,15 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             <tr>
               <th className="px-4 py-3">Date</th>
               <th className="px-4 py-3">Product</th>
+              <th className="px-4 py-3">ASIN</th>
               <th className="px-4 py-3">BSR</th>
               <th className="px-4 py-3">Reviews</th>
               <th className="px-4 py-3">Rating</th>
+              <th className="px-4 py-3">PPC Spend</th>
+              <th className="px-4 py-3">PPC Sales</th>
+              <th className="px-4 py-3">Total Sales</th>
+              <th className="px-4 py-3">ACOS</th>
+              <th className="px-4 py-3">TACOS</th>
               <th className="px-4 py-3">Trends</th>
               {canEdit ? <th className="px-4 py-3">Actions</th> : null}
             </tr>
@@ -229,26 +374,47 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 7 : 6}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 13 : 12}>
                   Loading performance data...
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 7 : 6}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 13 : 12}>
                   No performance metrics saved for this account.
                 </td>
               </tr>
             ) : (
               rows.map((row) => {
                 const trend = trendByProduct.get(row.product_name.trim().toLowerCase());
+                const acos = row.ppc_spend && row.ppc_sales ? (row.ppc_spend / row.ppc_sales) * 100 : null;
+                const tacos = row.ppc_spend && row.total_sales ? (row.ppc_spend / row.total_sales) * 100 : null;
                 return (
                   <tr key={row.id} className="border-t border-slate-100">
-                    <td className="px-4 py-3">{row.recorded_date}</td>
+                    <td className="px-4 py-3">{formatUkDate(row.recorded_date)}</td>
                     <td className="px-4 py-3">{row.product_name}</td>
+                    <td className="px-4 py-3">
+                      {row.asin ? (
+                        <a
+                          href={`https://www.amazon.co.uk/dp/${row.asin}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[var(--md-primary)] underline"
+                        >
+                          {row.asin}
+                        </a>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
                     <td className="px-4 py-3">{row.bsr ?? "-"}</td>
                     <td className="px-4 py-3">{row.review_count ?? "-"}</td>
                     <td className="px-4 py-3">{row.rating ?? "-"}</td>
+                    <td className="px-4 py-3">{row.ppc_spend == null ? "-" : Number(row.ppc_spend).toFixed(2)}</td>
+                    <td className="px-4 py-3">{row.ppc_sales == null ? "-" : Number(row.ppc_sales).toFixed(2)}</td>
+                    <td className="px-4 py-3">{row.total_sales == null ? "-" : Number(row.total_sales).toFixed(2)}</td>
+                    <td className="px-4 py-3">{acos == null ? "-" : `${acos.toFixed(2)}%`}</td>
+                    <td className="px-4 py-3">{tacos == null ? "-" : `${tacos.toFixed(2)}%`}</td>
                     <td className="px-4 py-3">
                       <div className="space-y-1 text-xs text-slate-600">
                         <p>{trend?.bsrTrend ?? "No trend"}</p>
@@ -257,6 +423,12 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
                     </td>
                     {canEdit ? (
                       <td className="px-4 py-3">
+                        <button
+                          onClick={() => editMetric(row)}
+                          className="mr-2 rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700"
+                        >
+                          Edit
+                        </button>
                         <button
                           onClick={() => deleteMetric(row.id)}
                           className="rounded-lg bg-red-50 px-2 py-1 text-xs font-semibold text-red-700"

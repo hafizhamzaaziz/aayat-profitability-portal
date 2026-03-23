@@ -278,31 +278,33 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
           )}
         </View>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Performance Metrics Snapshot</Text>
-          {perf.length === 0 ? (
-            <Text style={styles.sub}>No performance metrics available.</Text>
-          ) : (
-            <>
-              <View style={styles.tableHead}>
-                <Text style={styles.c1}>Date</Text>
-                <Text style={styles.c2}>Product</Text>
-                <Text style={styles.c3}>BSR</Text>
-                <Text style={styles.c4}>Reviews</Text>
-                <Text style={styles.c5}>Rating</Text>
-              </View>
-              {perf.map((p, idx) => (
-                <View key={`${p.product_name}-${idx}`} style={styles.tr}>
-                  <Text style={styles.c1}>{dateUk(p.recorded_date)}</Text>
-                  <Text style={styles.c2}>{p.product_name}</Text>
-                  <Text style={styles.c3}>{p.bsr ?? "-"}</Text>
-                  <Text style={styles.c4}>{p.review_count ?? "-"}</Text>
-                  <Text style={styles.c5}>{p.rating ?? "-"}</Text>
+        {data.platform === "amazon" ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Performance Metrics Snapshot</Text>
+            {perf.length === 0 ? (
+              <Text style={styles.sub}>No performance metrics available.</Text>
+            ) : (
+              <>
+                <View style={styles.tableHead}>
+                  <Text style={styles.c1}>Date</Text>
+                  <Text style={styles.c2}>Product</Text>
+                  <Text style={styles.c3}>BSR</Text>
+                  <Text style={styles.c4}>Reviews</Text>
+                  <Text style={styles.c5}>Rating</Text>
                 </View>
-              ))}
-            </>
-          )}
-        </View>
+                {perf.map((p, idx) => (
+                  <View key={`${p.product_name}-${idx}`} style={styles.tr}>
+                    <Text style={styles.c1}>{dateUk(p.recorded_date)}</Text>
+                    <Text style={styles.c2}>{p.product_name}</Text>
+                    <Text style={styles.c3}>{p.bsr ?? "-"}</Text>
+                    <Text style={styles.c4}>{p.review_count ?? "-"}</Text>
+                    <Text style={styles.c5}>{p.rating ?? "-"}</Text>
+                  </View>
+                ))}
+              </>
+            )}
+          </View>
+        ) : null}
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Manual Notes</Text>

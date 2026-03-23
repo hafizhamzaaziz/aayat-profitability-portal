@@ -1,0 +1,148 @@
+import React from "react";
+import { Document, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
+import { formatUkDate } from "@/lib/utils/date";
+
+type Metric = {
+  recorded_date: string;
+  product_name: string;
+  asin: string | null;
+  bsr: number | null;
+  review_count: number | null;
+  rating: number | null;
+  ppc_spend: number | null;
+  ppc_sales: number | null;
+  total_sales: number | null;
+};
+
+type Input = {
+  accountName: string;
+  weekStart: string;
+  weekEnd: string;
+  rows: Metric[];
+  previousRows: Metric[];
+};
+
+const styles = StyleSheet.create({
+  page: { fontSize: 10, padding: 28, color: "#1f2937", fontFamily: "Helvetica" },
+  title: { fontSize: 16, fontWeight: 700 },
+  sub: { fontSize: 10, color: "#6b7280", marginTop: 2, marginBottom: 10 },
+  tableHead: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderBottomColor: "#d1d5db",
+    backgroundColor: "#f8fafc",
+    paddingVertical: 4,
+    paddingHorizontal: 4,
+    fontWeight: 700,
+  },
+  tr: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderBottomColor: "#eef2f7",
+    paddingVertical: 4,
+    paddingHorizontal: 4,
+  },
+  c1: { width: "18%" },
+  c2: { width: "13%" },
+  c3: { width: "10%", textAlign: "right" },
+  c4: { width: "10%", textAlign: "right" },
+  c5: { width: "10%", textAlign: "right" },
+  c6: { width: "10%", textAlign: "right" },
+  c7: { width: "10%", textAlign: "right" },
+  c8: { width: "9%", textAlign: "right" },
+  c9: { width: "10%", textAlign: "right" },
+});
+
+function pct(num: number | null) {
+  return num == null ? "-" : `${num.toFixed(2)}%`;
+}
+
+function n(num: number | null) {
+  return num == null ? "-" : Number(num).toFixed(2);
+}
+
+function WeeklyPerformancePdf({ data }: { data: Input }) {
+  const prevByKey = new Map<string, Metric>();
+  for (const row of data.previousRows) {
+    prevByKey.set(`${row.product_name.toLowerCase()}|${row.asin || ""}`, row);
+  }
+
+  return (
+    <Document>
+      <Page size="A4" style={styles.page}>
+        <Text style={styles.title}>{data.accountName} Weekly Performance Report</Text>
+        <Text style={styles.sub}>
+          Week: {formatUkDate(data.weekStart)} to {formatUkDate(data.weekEnd)} | Previous week comparison included
+        </Text>
+
+        <View style={styles.tableHead}>
+          <Text style={styles.c1}>Product</Text>
+          <Text style={styles.c2}>ASIN</Text>
+          <Text style={styles.c3}>PPC Spend</Text>
+          <Text style={styles.c4}>PPC Sales</Text>
+          <Text style={styles.c5}>Total Sales</Text>
+          <Text style={styles.c6}>ACOS</Text>
+          <Text style={styles.c7}>TACOS</Text>
+          <Text style={styles.c8}>BSR</Text>
+          <Text style={styles.c9}>Delta</Text>
+        </View>
+
+        {data.rows.length === 0 ? (
+          <View style={styles.tr}>
+            <Text>No rows for selected week.</Text>
+          </View>
+        ) : (
+          data.rows.map((row, idx) => {
+            const acos = row.ppc_spend && row.ppc_sales ? (row.ppc_spend / row.ppc_sales) * 100 : null;
+            const tacos = row.ppc_spend && row.total_sales ? (row.ppc_spend / row.total_sales) * 100 : null;
+            const prev = prevByKey.get(`${row.product_name.toLowerCase()}|${row.asin || ""}`);
+            const prevAcos = prev?.ppc_spend && prev?.ppc_sales ? (prev.ppc_spend / prev.ppc_sales) * 100 : null;
+            const deltaAcos = acos != null && prevAcos != null ? acos - prevAcos : null;
+            const deltaText = deltaAcos == null ? "-" : `${deltaAcos > 0 ? "+" : ""}${deltaAcos.toFixed(2)}%`;
+
+            return (
+              <View key={`${row.product_name}-${idx}`} style={styles.tr}>
+                <Text style={styles.c1}>{row.product_name}</Text>
+                <Text style={styles.c2}>{row.asin || "-"}</Text>
+                <Text style={styles.c3}>{n(row.ppc_spend)}</Text>
+                <Text style={styles.c4}>{n(row.ppc_sales)}</Text>
+                <Text style={styles.c5}>{n(row.total_sales)}</Text>
+                <Text style={styles.c6}>{pct(acos)}</Text>
+                <Text style={styles.c7}>{pct(tacos)}</Text>
+                <Text style={styles.c8}>{row.bsr ?? "-"}</Text>
+                <Text style={styles.c9}>{deltaText}</Text>
+              </View>
+            );
+          })
+        )}
+      </Page>
+    </Document>
+  );
+}
+
+export async function renderWeeklyPerformancePdfBuffer(data: Input): Promise<Uint8Array> {
+  const instance = pdf(<WeeklyPerformancePdf data={data} />);
+  const output = await instance.toBuffer();
+  if (output instanceof Uint8Array) return output;
+  const maybeWebStream = output as unknown as { getReader?: () => ReadableStreamDefaultReader<Uint8Array> };
+  if (typeof maybeWebStream.getReader === "function") {
+    const reader = maybeWebStream.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalLength = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      chunks.push(value);
+      totalLength += value.length;
+    }
+    const merged = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return merged;
+  }
+  throw new Error("Unexpected performance PDF output type.");
+}

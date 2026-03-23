@@ -102,12 +102,20 @@ create table if not exists public.performance_metrics (
   account_id uuid not null references public.accounts(id) on delete cascade,
   recorded_date date not null,
   product_name text not null,
+  asin text,
   bsr integer,
   review_count integer,
   rating numeric(3,2),
+  ppc_spend numeric(14,2),
+  ppc_sales numeric(14,2),
+  total_sales numeric(14,2),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+alter table public.performance_metrics add column if not exists asin text;
+alter table public.performance_metrics add column if not exists ppc_spend numeric(14,2);
+alter table public.performance_metrics add column if not exists ppc_sales numeric(14,2);
+alter table public.performance_metrics add column if not exists total_sales numeric(14,2);
 
 -- Role helper for RLS checks (must come after users table exists)
 create or replace function public.current_user_role()
