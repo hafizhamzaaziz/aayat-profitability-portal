@@ -9,6 +9,8 @@ type AuditRow = {
   entity_id: string | null;
   action: "insert" | "update" | "delete";
   actor_id: string | null;
+  before_data: Record<string, unknown> | null;
+  after_data: Record<string, unknown> | null;
   created_at: string;
 };
 
@@ -21,24 +23,75 @@ export default function AuditEventsPanel() {
   const [tableFilter, setTableFilter] = useState("all");
   const [actionFilter, setActionFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("");
-  const [hasMore, setHasMore] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+  const [actorMap, setActorMap] = useState<Record<string, string>>({});
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
+
+  const describeEntity = (row: AuditRow) => {
+    const data = row.after_data || row.before_data || {};
+    if (row.table_name === "users") {
+      const name = String(data.full_name || "");
+      const email = String(data.email || "");
+      if (name || email) return `${name}${name && email ? " | " : ""}${email}`;
+    }
+    if (row.table_name === "accounts") {
+      const name = String(data.name || "");
+      if (name) return name;
+    }
+    if (row.table_name === "reports") {
+      const platform = String(data.platform || "");
+      const start = String(data.period_start || "");
+      const end = String(data.period_end || "");
+      if (platform || start || end) return `${platform || "report"} ${start} to ${end}`;
+    }
+    if (row.table_name === "expenses") {
+      const description = String(data.description || "");
+      const amount = data.amount != null ? String(data.amount) : "";
+      if (description || amount) return `${description}${amount ? ` (${amount})` : ""}`;
+    }
+    if (row.table_name === "performance_metrics") {
+      const product = String(data.product_name || "");
+      const date = String(data.recorded_date || "");
+      if (product || date) return `${product}${date ? ` (${date})` : ""}`;
+    }
+    return row.entity_id || "-";
+  };
 
   const loadRows = async (nextOffset = 0) => {
     setLoading(true);
     const supabase = createClient();
     let query = supabase
       .from("audit_events")
-      .select("id, table_name, entity_id, action, actor_id, created_at")
+      .select("id, table_name, entity_id, action, actor_id, before_data, after_data, created_at")
       .order("created_at", { ascending: false })
       .range(nextOffset, nextOffset + PAGE_SIZE - 1);
+    let countQuery = supabase.from("audit_events").select("id", { count: "exact", head: true });
     if (tableFilter !== "all") query = query.eq("table_name", tableFilter);
+    if (tableFilter !== "all") countQuery = countQuery.eq("table_name", tableFilter);
     if (actionFilter !== "all") query = query.eq("action", actionFilter);
+    if (actionFilter !== "all") countQuery = countQuery.eq("action", actionFilter);
     if (dateFilter) query = query.gte("created_at", `${dateFilter}T00:00:00`);
+    if (dateFilter) countQuery = countQuery.gte("created_at", `${dateFilter}T00:00:00`);
 
-    const { data } = await query;
+    const [{ data }, { count }] = await Promise.all([query, countQuery]);
     const next = (data || []) as AuditRow[];
     setRows(next);
-    setHasMore(next.length === PAGE_SIZE);
+    setTotalCount(Number(count || 0));
+
+    const actorIds = Array.from(new Set(next.map((row) => row.actor_id).filter(Boolean))) as string[];
+    if (actorIds.length > 0) {
+      const { data: users } = await supabase.from("users").select("id, full_name, email").in("id", actorIds);
+      const map: Record<string, string> = {};
+      (users || []).forEach((u) => {
+        map[String(u.id)] = `${u.full_name} (${u.email})`;
+      });
+      setActorMap(map);
+    } else {
+      setActorMap({});
+    }
+
     setLoading(false);
   };
 
@@ -94,7 +147,7 @@ export default function AuditEventsPanel() {
               <th className="px-3 py-2">When</th>
               <th className="px-3 py-2">Table</th>
               <th className="px-3 py-2">Action</th>
-              <th className="px-3 py-2">Entity</th>
+              <th className="px-3 py-2">Details</th>
               <th className="px-3 py-2">Actor</th>
             </tr>
           </thead>
@@ -117,8 +170,8 @@ export default function AuditEventsPanel() {
                   <td className="px-3 py-2">{new Date(row.created_at).toLocaleString("en-GB")}</td>
                   <td className="px-3 py-2">{row.table_name}</td>
                   <td className="px-3 py-2">{row.action}</td>
-                  <td className="px-3 py-2">{row.entity_id || "-"}</td>
-                  <td className="px-3 py-2">{row.actor_id || "-"}</td>
+                  <td className="px-3 py-2">{describeEntity(row)}</td>
+                  <td className="px-3 py-2">{row.actor_id ? actorMap[row.actor_id] || row.actor_id : "-"}</td>
                 </tr>
               ))
             )}
@@ -126,7 +179,26 @@ export default function AuditEventsPanel() {
         </table>
       </div>
 
-      <div className="mt-3 flex items-center justify-end gap-2">
+      <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+        <span className="text-xs text-slate-500">
+          Page {currentPage} of {totalPages} ({totalCount} items)
+        </span>
+        <select
+          value={currentPage}
+          onChange={(e) => {
+            const targetPage = Number(e.target.value);
+            const next = Math.max(0, (targetPage - 1) * PAGE_SIZE);
+            setOffset(next);
+            void loadRows(next);
+          }}
+          className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+        >
+          {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
+            <option key={page} value={page}>
+              {page}
+            </option>
+          ))}
+        </select>
         <button
           onClick={() => void previousPage()}
           disabled={offset === 0 || loading}
@@ -136,7 +208,7 @@ export default function AuditEventsPanel() {
         </button>
         <button
           onClick={() => void nextPage()}
-          disabled={!hasMore || loading}
+          disabled={currentPage >= totalPages || loading}
           className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
         >
           Next

@@ -89,6 +89,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
             to: user.email,
             subject: title,
             text: `${body}\n\nOpen portal: /reports?accountId=${account.id}`,
+            linkPath: `/reports?accountId=${account.id}`,
           });
         }
       } catch {

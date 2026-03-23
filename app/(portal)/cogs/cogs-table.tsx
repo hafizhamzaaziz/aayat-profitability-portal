@@ -36,7 +36,10 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [importCostCol, setImportCostCol] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
 
   const getErrorMessage = (err: unknown, fallback: string) => {
     if (err && typeof err === "object" && "message" in err && typeof (err as { message?: unknown }).message === "string") {
@@ -57,12 +60,15 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     setError(null);
     try {
       const supabase = createClient();
-      const { data, error: fetchError } = await supabase
-        .from("cogs")
-        .select("*")
-        .eq("account_id", accountId)
-        .order("sku", { ascending: true })
-        .range(nextOffset, nextOffset + PAGE_SIZE - 1);
+      const [{ data, error: fetchError }, { count }] = await Promise.all([
+        supabase
+          .from("cogs")
+          .select("*")
+          .eq("account_id", accountId)
+          .order("sku", { ascending: true })
+          .range(nextOffset, nextOffset + PAGE_SIZE - 1),
+        supabase.from("cogs").select("id", { count: "exact", head: true }).eq("account_id", accountId),
+      ]);
 
       if (fetchError) throw fetchError;
       const normalized = (data || []).map((row) => ({
@@ -73,7 +79,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         updated_at: String(row.updated_at),
       }));
       setRows(normalized as CogsRow[]);
-      setHasMore(normalized.length === PAGE_SIZE);
+      setTotalCount(Number(count || 0));
     } catch (err) {
       setError(getErrorMessage(err, "Failed to load COGS rows."));
     } finally {
@@ -448,7 +454,26 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <span className="text-xs text-slate-500">
+          Page {currentPage} of {totalPages} ({totalCount} items)
+        </span>
+        <select
+          value={currentPage}
+          onChange={(e) => {
+            const targetPage = Number(e.target.value);
+            const next = Math.max(0, (targetPage - 1) * PAGE_SIZE);
+            setOffset(next);
+            void loadRows(next);
+          }}
+          className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+        >
+          {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
+            <option key={page} value={page}>
+              {page}
+            </option>
+          ))}
+        </select>
         <button
           type="button"
           onClick={() => {
@@ -468,7 +493,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
             setOffset(next);
             void loadRows(next);
           }}
-          disabled={!hasMore || loading}
+          disabled={currentPage >= totalPages || loading}
           className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
         >
           Next

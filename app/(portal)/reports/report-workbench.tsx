@@ -618,6 +618,22 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       if (conflicting.length > 0) {
         throw new Error("This period overlaps with an existing report. Use non-overlapping dates.");
       }
+      const exactMatch = (overlaps || []).find(
+        (row) => String(row.period_start) === periodStart && String(row.period_end) === periodEnd
+      );
+      if (exactMatch) {
+        const shouldOverwrite = window.confirm(
+          "A report for this same platform and period already exists. Click OK to overwrite it, or Cancel to stop."
+        );
+        if (!shouldOverwrite) {
+          setWarnings((prev) => [
+            ...prev.filter((item) => !item.includes("already exists")),
+            "A report for this period already exists. Save cancelled to avoid accidental overwrite.",
+          ]);
+          setMessage("Save cancelled.");
+          return;
+        }
+      }
 
       const reportPayload = {
         account_id: account.id,

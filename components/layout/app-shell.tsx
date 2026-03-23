@@ -19,6 +19,14 @@ type NotificationRow = {
   created_at: string;
 };
 
+function BellIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.9" aria-hidden="true">
+      <path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V10a6 6 0 1 0-12 0v4.2a2 2 0 0 1-.6 1.4L4 17h5m6 0a3 3 0 1 1-6 0" />
+    </svg>
+  );
+}
+
 const navItems: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", emoji: "📊" },
   { href: "/reports", label: "Reports", emoji: "🧾" },
@@ -170,11 +178,14 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                 <button
                   type="button"
                   onClick={() => setNotificationsOpen((v) => !v)}
-                  className="relative rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700"
+                  aria-label="Open notifications"
+                  className="relative inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-700 transition hover:bg-slate-50"
                 >
-                  Notifications
+                  <BellIcon />
                   {unreadCount > 0 ? (
-                    <span className="ml-2 rounded-full bg-[var(--md-primary)] px-2 py-0.5 text-xs text-white">{unreadCount}</span>
+                    <span className="absolute -right-1 -top-1 min-w-[20px] rounded-full bg-[var(--md-primary)] px-1.5 py-0.5 text-center text-[10px] font-semibold text-white">
+                      {unreadCount > 99 ? "99+" : unreadCount}
+                    </span>
                   ) : null}
                 </button>
                 {notificationsOpen ? (

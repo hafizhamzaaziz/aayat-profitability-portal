@@ -69,6 +69,7 @@ export default async function PerformancePage({
             to: user.email,
             subject: title,
             text: `${body}\n\nOpen portal: /performance?accountId=${account.id}`,
+            linkPath: `/performance?accountId=${account.id}`,
           });
         }
       } catch {

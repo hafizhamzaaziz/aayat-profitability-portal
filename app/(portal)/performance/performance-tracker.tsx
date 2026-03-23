@@ -67,19 +67,25 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const [weekStart, setWeekStart] = useState<string>(initialForm().recorded_date);
   const [downloadingWeekly, setDownloadingWeekly] = useState(false);
   const [pageOffset, setPageOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const currentPage = Math.floor(pageOffset / PAGE_SIZE) + 1;
 
   const loadRows = async (offset = pageOffset) => {
     setLoading(true);
     setError(null);
     const supabase = createClient();
 
-    const { data, error: fetchError } = await supabase
-      .from("performance_metrics")
-      .select("id, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales")
-      .eq("account_id", accountId)
-      .order("recorded_date", { ascending: false })
-      .range(offset, offset + PAGE_SIZE - 1);
+    const [{ data, error: fetchError }, { count }] = await Promise.all([
+      supabase
+        .from("performance_metrics")
+        .select("id, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales")
+        .eq("account_id", accountId)
+        .order("recorded_date", { ascending: false })
+        .range(offset, offset + PAGE_SIZE - 1),
+      supabase.from("performance_metrics").select("id", { count: "exact", head: true }).eq("account_id", accountId),
+    ]);
 
     if (fetchError) {
       setError(fetchError.message);
@@ -89,7 +95,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
 
     const nextRows = (data || []) as Metric[];
     setRows(nextRows);
-    setHasMore(nextRows.length === PAGE_SIZE);
+    setTotalCount(Number(count || 0));
     setLoading(false);
   };
 
@@ -532,7 +538,26 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <span className="text-xs text-slate-500">
+          Page {currentPage} of {totalPages} ({totalCount} items)
+        </span>
+        <select
+          value={currentPage}
+          onChange={(e) => {
+            const targetPage = Number(e.target.value);
+            const next = Math.max(0, (targetPage - 1) * PAGE_SIZE);
+            setPageOffset(next);
+            void loadRows(next);
+          }}
+          className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+        >
+          {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
+            <option key={page} value={page}>
+              {page}
+            </option>
+          ))}
+        </select>
         <button
           type="button"
           onClick={() => {
@@ -552,7 +577,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             setPageOffset(next);
             void loadRows(next);
           }}
-          disabled={!hasMore || loading}
+          disabled={currentPage >= totalPages || loading}
           className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
         >
           Next

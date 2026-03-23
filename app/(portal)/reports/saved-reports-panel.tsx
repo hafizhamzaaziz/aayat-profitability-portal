@@ -88,7 +88,10 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
   const [filterEnd, setFilterEnd] = useState("");
   const [exportNotes, setExportNotes] = useState("");
   const [pageOffset, setPageOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const currentPage = Math.floor(pageOffset / PAGE_SIZE) + 1;
 
   const selected = useMemo(() => reports.find((r) => r.id === selectedId) || null, [reports, selectedId]);
 
@@ -113,11 +116,14 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
       .eq("account_id", accountId)
       .order("period_start", { ascending: false })
       .range(offset, offset + PAGE_SIZE - 1);
+    let countQuery = supabase.from("reports").select("id", { count: "exact", head: true }).eq("account_id", accountId);
 
     if (filterStart) query = query.gte("period_start", filterStart);
+    if (filterStart) countQuery = countQuery.gte("period_start", filterStart);
     if (filterEnd) query = query.lte("period_end", filterEnd);
+    if (filterEnd) countQuery = countQuery.lte("period_end", filterEnd);
 
-    const { data, error: fetchError } = await query;
+    const [{ data, error: fetchError }, { count }] = await Promise.all([query, countQuery]);
 
     if (fetchError) {
       setError(fetchError.message);
@@ -127,7 +133,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
 
     const nextReports = (data || []) as SavedReport[];
     setReports(nextReports);
-    setHasMore(nextReports.length === PAGE_SIZE);
+    setTotalCount(Number(count || 0));
 
     if (nextReports.length > 0) {
       const current = nextReports.find((r) => r.id === selectedId) || nextReports[0];
@@ -407,7 +413,26 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
           {downloading ? "Generating..." : "Download Combined PDF"}
         </button>
       </div>
-      <div className="flex justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <span className="text-xs text-slate-500">
+          Page {currentPage} of {totalPages} ({totalCount} items)
+        </span>
+        <select
+          value={currentPage}
+          onChange={(e) => {
+            const targetPage = Number(e.target.value);
+            const next = Math.max(0, (targetPage - 1) * PAGE_SIZE);
+            setPageOffset(next);
+            void loadReports(next);
+          }}
+          className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+        >
+          {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
+            <option key={page} value={page}>
+              {page}
+            </option>
+          ))}
+        </select>
         <button
           type="button"
           onClick={() => {
@@ -427,7 +452,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
             setPageOffset(next);
             void loadReports(next);
           }}
-          disabled={!hasMore || loading}
+          disabled={currentPage >= totalPages || loading}
           className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
         >
           Next
