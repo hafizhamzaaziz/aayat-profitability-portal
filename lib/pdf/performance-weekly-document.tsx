@@ -124,6 +124,7 @@ export async function renderWeeklyPerformancePdfBuffer(data: Input): Promise<Uin
   const instance = pdf(<WeeklyPerformancePdf data={data} />);
   const output = await instance.toBuffer();
   if (output instanceof Uint8Array) return output;
+
   const maybeWebStream = output as unknown as { getReader?: () => ReadableStreamDefaultReader<Uint8Array> };
   if (typeof maybeWebStream.getReader === "function") {
     const reader = maybeWebStream.getReader();
@@ -144,5 +145,29 @@ export async function renderWeeklyPerformancePdfBuffer(data: Input): Promise<Uin
     }
     return merged;
   }
+
+  const maybeNodeStream = output as unknown as {
+    on?: (event: string, callback: (...args: unknown[]) => void) => void;
+  };
+  if (typeof maybeNodeStream.on === "function") {
+    const chunks: Uint8Array[] = [];
+    await new Promise<void>((resolve, reject) => {
+      maybeNodeStream.on!("data", (chunk: unknown) => {
+        if (chunk instanceof Uint8Array) chunks.push(chunk);
+        else chunks.push(new Uint8Array(Buffer.from(String(chunk))));
+      });
+      maybeNodeStream.on!("end", () => resolve());
+      maybeNodeStream.on!("error", (err: unknown) => reject(err));
+    });
+    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+    const merged = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return merged;
+  }
+
   throw new Error("Unexpected performance PDF output type.");
 }
