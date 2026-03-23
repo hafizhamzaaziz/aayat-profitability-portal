@@ -31,6 +31,24 @@ function errorMessage(err: unknown, fallback: string) {
   return fallback;
 }
 
+async function logAdminAudit(args: {
+  actorId: string;
+  action: "insert" | "update" | "delete";
+  entityId?: string;
+  beforeData?: unknown;
+  afterData?: unknown;
+}) {
+  const admin = createAdminClient();
+  await admin.from("audit_events").insert({
+    actor_id: args.actorId,
+    table_name: "users",
+    entity_id: args.entityId || null,
+    action: args.action,
+    before_data: args.beforeData ?? null,
+    after_data: args.afterData ?? null,
+  });
+}
+
 export async function POST(request: NextRequest) {
   const auth = await requireAdmin();
   if (!auth.ok) {
@@ -83,6 +101,12 @@ export async function POST(request: NextRequest) {
       throw profileError;
     }
 
+    await logAdminAudit({
+      actorId: auth.userId,
+      action: "insert",
+      entityId: authUser.user.id,
+      afterData: { role, full_name: fullName, email },
+    });
     return Response.json({ id: authUser.user.id });
   } catch (err) {
     return new Response(errorMessage(err, "Failed to create user."), { status: 500 });
@@ -121,6 +145,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     const admin = createAdminClient();
+    const { data: beforeUser } = await admin.from("users").select("id, role, full_name, email").eq("id", userId).maybeSingle();
     const { error: authUpdateError } = await admin.auth.admin.updateUserById(userId, {
       email,
       password: password || undefined,
@@ -134,6 +159,13 @@ export async function PATCH(request: NextRequest) {
       .eq("id", userId);
     if (profileUpdateError) throw profileUpdateError;
 
+    await logAdminAudit({
+      actorId: auth.userId,
+      action: "update",
+      entityId: userId,
+      beforeData: beforeUser || null,
+      afterData: { role, full_name: fullName, email },
+    });
     return Response.json({ ok: true });
   } catch (err) {
     return new Response(errorMessage(err, "Failed to update user."), { status: 500 });
@@ -158,9 +190,17 @@ export async function DELETE(request: NextRequest) {
     }
 
     const admin = createAdminClient();
+    const { data: beforeUser } = await admin.from("users").select("id, role, full_name, email").eq("id", userId).maybeSingle();
     const { error } = await admin.auth.admin.deleteUser(userId);
 
     if (error) throw error;
+    await logAdminAudit({
+      actorId: auth.userId,
+      action: "delete",
+      entityId: userId,
+      beforeData: beforeUser || null,
+      afterData: null,
+    });
     return Response.json({ ok: true });
   } catch (err) {
     return new Response(errorMessage(err, "Failed to delete user."), { status: 500 });

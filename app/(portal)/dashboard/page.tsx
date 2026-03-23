@@ -5,6 +5,7 @@ import { getAccountByIdForRole } from "@/lib/data/accounts";
 import DashboardFilters from "./dashboard-filters";
 import DashboardCharts from "./dashboard-charts";
 import { formatUkDate } from "@/lib/utils/date";
+import { createNotification, sendNotificationEmailIfConfigured } from "@/lib/notifications/server";
 
 type Search = {
   accountId?: string;
@@ -66,6 +67,34 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
 
     const selectedPeriod = Boolean(searchParams.periodStart && searchParams.periodEnd);
     missingForSelectedPeriod = selectedPeriod && reports.length === 0;
+
+    if (missingForSelectedPeriod && searchParams.periodStart && searchParams.periodEnd) {
+      try {
+        const eventKey = `missing-report:${user.id}:${account.id}:${searchParams.periodStart}:${searchParams.periodEnd}:${searchParams.platform || "all"}`;
+        const title = "Report missing for selected period";
+        const body = `No ${searchParams.platform && searchParams.platform !== "all" ? searchParams.platform : "platform"} report found from ${formatUkDate(
+          searchParams.periodStart
+        )} to ${formatUkDate(searchParams.periodEnd)} for ${account.name}.`;
+        const created = await createNotification(supabase, {
+          userId: user.id,
+          title,
+          body,
+          level: "warning",
+          eventKey,
+          link: `/reports?accountId=${account.id}`,
+          email: user.email,
+        });
+        if (created.inserted) {
+          await sendNotificationEmailIfConfigured({
+            to: user.email,
+            subject: title,
+            text: `${body}\n\nOpen portal: /reports?accountId=${account.id}`,
+          });
+        }
+      } catch {
+        // non-blocking notification path
+      }
+    }
   }
 
   const totals = reports.reduce(

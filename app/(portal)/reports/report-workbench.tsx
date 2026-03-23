@@ -4,6 +4,8 @@ import { useMemo, useState } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import { pushClientNotification } from "@/lib/notifications/client";
+import { deriveReportWarnings, validateBreakdown, validatePeriodRange } from "@/lib/reports/guardrails";
 
 type Platform = "amazon" | "temu";
 
@@ -438,6 +440,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<CalculationPreview | null>(null);
   const [expenses, setExpenses] = useState<ExpenseRow[]>([]);
+  const [warnings, setWarnings] = useState<string[]>([]);
 
   const currency = account.currency || "£";
 
@@ -528,8 +531,12 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
     setError(null);
     setMessage(null);
     setLoading(true);
+    setWarnings([]);
 
     try {
+      const rangeError = validatePeriodRange(periodStart, periodEnd);
+      if (rangeError) throw new Error(rangeError);
+
       const supabase = createClient();
       const { data: cogsRows, error: cogsError } = await supabase
         .from("cogs")
@@ -555,10 +562,28 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
           ? processAmazon(rows, skuCol, qtyCol, cogsMap, account.vat_rate, expenseTotals)
           : processTemu(rows, skuCol, qtyCol, cogsMap, account.vat_rate, expenseTotals);
 
+      const breakdownError = validateBreakdown(platform, result.breakdown);
+      if (breakdownError) throw new Error(breakdownError);
+
       setPreview(result);
+      setWarnings(
+        deriveReportWarnings({
+          missingSkus: result.missingSkus,
+          netProfit: result.netProfit,
+          outputVat: result.outputVat,
+          inputVat: result.inputVat,
+        })
+      );
       setMessage("Calculation complete. Review and save report.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Calculation failed.");
+      const text = err instanceof Error ? err.message : "Calculation failed.";
+      setError(text);
+      await pushClientNotification({
+        title: "Report calculation failed",
+        body: text,
+        level: "error",
+        eventKey: `report-calc-fail:${account.id}:${Date.now()}`,
+      });
     } finally {
       setLoading(false);
     }
@@ -572,7 +597,27 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
     setMessage(null);
 
     try {
+      const rangeError = validatePeriodRange(periodStart, periodEnd);
+      if (rangeError) throw new Error(rangeError);
+      const breakdownError = validateBreakdown(platform, preview.breakdown);
+      if (breakdownError) throw new Error(breakdownError);
+
       const supabase = createClient();
+
+      const { data: overlaps, error: overlapError } = await supabase
+        .from("reports")
+        .select("id, period_start, period_end")
+        .eq("account_id", account.id)
+        .eq("platform", platform)
+        .lte("period_start", periodEnd)
+        .gte("period_end", periodStart);
+      if (overlapError) throw overlapError;
+      const conflicting = (overlaps || []).filter(
+        (row) => !(String(row.period_start) === periodStart && String(row.period_end) === periodEnd)
+      );
+      if (conflicting.length > 0) {
+        throw new Error("This period overlaps with an existing report. Use non-overlapping dates.");
+      }
 
       const reportPayload = {
         account_id: account.id,
@@ -621,7 +666,14 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
 
       setMessage("Report and expenses saved successfully.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save report.");
+      const text = err instanceof Error ? err.message : "Failed to save report.";
+      setError(text);
+      await pushClientNotification({
+        title: "Report save failed",
+        body: text,
+        level: "error",
+        eventKey: `report-save-fail:${account.id}:${Date.now()}`,
+      });
     } finally {
       setSaving(false);
     }
@@ -803,6 +855,16 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       {fileName ? <p className="text-sm text-slate-600">Loaded file: {fileName}</p> : null}
       {message ? <p className="rounded-2xl bg-green-50 px-3 py-2 text-sm text-green-700">{message}</p> : null}
       {error ? <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
+      {warnings.length > 0 ? (
+        <div className="rounded-2xl border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">
+          <p className="mb-1 font-semibold">Data quality warnings</p>
+          <ul className="list-disc space-y-0.5 pl-5">
+            {warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {preview ? (
         <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5">

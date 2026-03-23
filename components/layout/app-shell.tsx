@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
@@ -9,6 +9,15 @@ import { createClient } from "@/lib/supabase/client";
 import type { UserRole } from "@/lib/types/auth";
 
 type NavItem = { href: string; label: string; emoji: string };
+type NotificationRow = {
+  id: string;
+  title: string;
+  body: string;
+  level: "info" | "warning" | "error" | "success";
+  link: string | null;
+  read_at: string | null;
+  created_at: string;
+};
 
 const navItems: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", emoji: "📊" },
@@ -24,6 +33,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const searchParams = useSearchParams();
   const accountId = searchParams.get("accountId");
   const [role, setRole] = useState<UserRole>("client");
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notifications, setNotifications] = useState<NotificationRow[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
     let mounted = true;
@@ -33,6 +46,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user || !mounted) return;
+      setCurrentUserId(user.id);
       const { data } = await supabase.from("users").select("role").eq("id", user.id).maybeSingle();
       if (!mounted) return;
       setRole(((data?.role as UserRole) || "client") as UserRole);
@@ -42,6 +56,43 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       mounted = false;
     };
   }, []);
+
+  const loadNotifications = useCallback(async () => {
+    if (!currentUserId) return;
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("notifications")
+      .select("id, title, body, level, link, read_at, created_at")
+      .eq("user_id", currentUserId)
+      .order("created_at", { ascending: false })
+      .limit(12);
+    if (error) return;
+    const next = (data || []) as NotificationRow[];
+    setNotifications(next);
+    setUnreadCount(next.filter((n) => !n.read_at).length);
+  }, [currentUserId]);
+
+  useEffect(() => {
+    if (!currentUserId) return;
+    void loadNotifications();
+  }, [currentUserId, loadNotifications]);
+
+  useEffect(() => {
+    if (!notificationsOpen) return;
+    void loadNotifications();
+  }, [notificationsOpen, loadNotifications]);
+
+  const markNotificationRead = async (id: string, link?: string | null) => {
+    const supabase = createClient();
+    await supabase
+      .from("notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("id", id)
+      .is("read_at", null);
+    await loadNotifications();
+    setNotificationsOpen(false);
+    if (link) router.push(link);
+  };
 
   const visibleNavItems = useMemo(() => {
     if (role === "admin") return navItems;
@@ -115,6 +166,41 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               <h2 className="text-lg font-semibold">{currentTab?.label ?? "Portal"}</h2>
             </div>
             <div className="flex items-center gap-3">
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setNotificationsOpen((v) => !v)}
+                  className="relative rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700"
+                >
+                  Notifications
+                  {unreadCount > 0 ? (
+                    <span className="ml-2 rounded-full bg-[var(--md-primary)] px-2 py-0.5 text-xs text-white">{unreadCount}</span>
+                  ) : null}
+                </button>
+                {notificationsOpen ? (
+                  <div className="absolute right-0 z-50 mt-2 w-[340px] max-w-[90vw] rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                    {notifications.length === 0 ? (
+                      <p className="px-3 py-2 text-sm text-slate-500">No notifications.</p>
+                    ) : (
+                      <div className="max-h-80 space-y-1 overflow-auto">
+                        {notifications.map((notification) => (
+                          <button
+                            key={notification.id}
+                            type="button"
+                            onClick={() => void markNotificationRead(notification.id, notification.link)}
+                            className={`w-full rounded-xl px-3 py-2 text-left text-sm ${
+                              notification.read_at ? "bg-slate-50 text-slate-600" : "bg-[var(--md-primary-container)] text-slate-800"
+                            }`}
+                          >
+                            <p className="font-semibold">{notification.title}</p>
+                            <p className="mt-0.5 text-xs">{notification.body}</p>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
               <AccountSwitcher />
             </div>
           </header>

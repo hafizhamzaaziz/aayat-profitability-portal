@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { addDays, formatUkDate } from "@/lib/utils/date";
+import { pushClientNotification } from "@/lib/notifications/client";
 
 type SavedReport = {
   id: string;
@@ -71,6 +72,7 @@ function fixed2(value: number) {
 }
 
 export default function SavedReportsPanel({ accountId, canEdit, currency, vatRate }: Props) {
+  const PAGE_SIZE = 20;
   const [reports, setReports] = useState<SavedReport[]>([]);
   const [selectedForCombine, setSelectedForCombine] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
@@ -85,6 +87,8 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
   const [filterStart, setFilterStart] = useState("");
   const [filterEnd, setFilterEnd] = useState("");
   const [exportNotes, setExportNotes] = useState("");
+  const [pageOffset, setPageOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
 
   const selected = useMemo(() => reports.find((r) => r.id === selectedId) || null, [reports, selectedId]);
 
@@ -96,7 +100,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
     net_profit: "0",
   });
 
-  const loadReports = async () => {
+  const loadReports = async (offset = pageOffset) => {
     setLoading(true);
     setError(null);
     const supabase = createClient();
@@ -107,7 +111,8 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
         "id, platform, period_start, period_end, gross_sales, total_cogs, total_fees, output_vat, input_vat, net_profit, breakdown"
       )
       .eq("account_id", accountId)
-      .order("period_start", { ascending: false });
+      .order("period_start", { ascending: false })
+      .range(offset, offset + PAGE_SIZE - 1);
 
     if (filterStart) query = query.gte("period_start", filterStart);
     if (filterEnd) query = query.lte("period_end", filterEnd);
@@ -122,6 +127,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
 
     const nextReports = (data || []) as SavedReport[];
     setReports(nextReports);
+    setHasMore(nextReports.length === PAGE_SIZE);
 
     if (nextReports.length > 0) {
       const current = nextReports.find((r) => r.id === selectedId) || nextReports[0];
@@ -148,7 +154,8 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
   };
 
   useEffect(() => {
-    void loadReports();
+    setPageOffset(0);
+    void loadReports(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
@@ -231,9 +238,16 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
       }
 
       setMessage("Saved report totals and expenses.");
-      await loadReports();
+      await loadReports(pageOffset);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save changes.");
+      const text = err instanceof Error ? err.message : "Failed to save changes.";
+      setError(text);
+      await pushClientNotification({
+        title: "Report edit failed",
+        body: text,
+        level: "error",
+        eventKey: `saved-report-edit-fail:${selected.id}:${Date.now()}`,
+      });
     } finally {
       setSaving(false);
     }
@@ -250,9 +264,16 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
       const { error: deleteError } = await supabase.from("reports").delete().eq("id", selected.id);
       if (deleteError) throw deleteError;
       setMessage("Report deleted.");
-      await loadReports();
+      await loadReports(pageOffset);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete report.");
+      const text = err instanceof Error ? err.message : "Failed to delete report.";
+      setError(text);
+      await pushClientNotification({
+        title: "Report delete failed",
+        body: text,
+        level: "error",
+        eventKey: `saved-report-delete-fail:${selected.id}:${Date.now()}`,
+      });
     } finally {
       setSaving(false);
     }
@@ -283,7 +304,14 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
       URL.revokeObjectURL(objectUrl);
       setMessage("PDF exported.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to export PDF.");
+      const text = err instanceof Error ? err.message : "Failed to export PDF.";
+      setError(text);
+      await pushClientNotification({
+        title: "PDF export failed",
+        body: text,
+        level: "error",
+        eventKey: `report-pdf-fail:${selected.id}:${Date.now()}`,
+      });
     } finally {
       setDownloading(false);
     }
@@ -332,7 +360,14 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
       URL.revokeObjectURL(objectUrl);
       setMessage("Combined PDF exported.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to export combined PDF.");
+      const text = err instanceof Error ? err.message : "Failed to export combined PDF.";
+      setError(text);
+      await pushClientNotification({
+        title: "Combined PDF export failed",
+        body: text,
+        level: "error",
+        eventKey: `combined-pdf-fail:${accountId}:${Date.now()}`,
+      });
     } finally {
       setDownloading(false);
     }
@@ -361,7 +396,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
             className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
           />
         </div>
-        <button onClick={() => void loadReports()} className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700">
+        <button onClick={() => void loadReports(pageOffset)} className="rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700">
           Refresh
         </button>
         <button
@@ -370,6 +405,32 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
           className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
         >
           {downloading ? "Generating..." : "Download Combined PDF"}
+        </button>
+      </div>
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            const next = Math.max(0, pageOffset - PAGE_SIZE);
+            setPageOffset(next);
+            void loadReports(next);
+          }}
+          disabled={pageOffset === 0 || loading}
+          className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            const next = pageOffset + PAGE_SIZE;
+            setPageOffset(next);
+            void loadReports(next);
+          }}
+          disabled={!hasMore || loading}
+          className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Next
         </button>
       </div>
 
@@ -514,7 +575,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
               {error ? <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
 
               {canEdit ? (
-                <div className="flex flex-wrap gap-2">
+                <div className="sticky bottom-0 z-10 flex flex-wrap gap-2 rounded-xl bg-white/95 py-2 backdrop-blur md:static md:bg-transparent md:py-0">
                   <button
                     onClick={saveChanges}
                     disabled={saving}

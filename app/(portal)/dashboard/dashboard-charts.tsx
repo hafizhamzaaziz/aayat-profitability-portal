@@ -1,5 +1,7 @@
 "use client";
 
+import { formatUkDate } from "@/lib/utils/date";
+
 type ChartReport = {
   id: string;
   platform: string;
@@ -16,7 +18,7 @@ type Props = {
 
 function shortPeriod(periodStart: string, periodEnd: string) {
   if (!periodStart && !periodEnd) return "Period";
-  return `${periodStart || "?"} - ${periodEnd || "?"}`;
+  return `${periodStart ? formatUkDate(periodStart) : "?"} - ${periodEnd ? formatUkDate(periodEnd) : "?"}`;
 }
 
 export default function DashboardCharts({ reports, currency }: Props) {

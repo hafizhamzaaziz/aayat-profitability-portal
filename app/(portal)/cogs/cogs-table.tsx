@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import { pushClientNotification } from "@/lib/notifications/client";
 
 type CogsRow = {
   id: string;
@@ -19,6 +20,7 @@ type Props = {
 };
 
 export default function CogsTable({ accountId, canEdit }: Props) {
+  const PAGE_SIZE = 30;
   const [rows, setRows] = useState<CogsRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +35,8 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [importSkuCol, setImportSkuCol] = useState("");
   const [importCostCol, setImportCostCol] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
 
   const getErrorMessage = (err: unknown, fallback: string) => {
     if (err && typeof err === "object" && "message" in err && typeof (err as { message?: unknown }).message === "string") {
@@ -48,7 +52,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     return Number.parseFloat(cleaned) || 0;
   };
 
-  const loadRows = async () => {
+  const loadRows = async (nextOffset = offset) => {
     setLoading(true);
     setError(null);
     try {
@@ -57,7 +61,8 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         .from("cogs")
         .select("*")
         .eq("account_id", accountId)
-        .order("sku", { ascending: true });
+        .order("sku", { ascending: true })
+        .range(nextOffset, nextOffset + PAGE_SIZE - 1);
 
       if (fetchError) throw fetchError;
       const normalized = (data || []).map((row) => ({
@@ -68,6 +73,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         updated_at: String(row.updated_at),
       }));
       setRows(normalized as CogsRow[]);
+      setHasMore(normalized.length === PAGE_SIZE);
     } catch (err) {
       setError(getErrorMessage(err, "Failed to load COGS rows."));
     } finally {
@@ -76,7 +82,8 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   };
 
   useEffect(() => {
-    loadRows();
+    setOffset(0);
+    void loadRows(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
@@ -97,7 +104,14 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       setMessage("COGS row added.");
       await loadRows();
     } catch (err) {
-      setError(getErrorMessage(err, "Failed to add SKU cost."));
+      const text = getErrorMessage(err, "Failed to add SKU cost.");
+      setError(text);
+      await pushClientNotification({
+        title: "COGS add failed",
+        body: text,
+        level: "error",
+        eventKey: `cogs-add-fail:${accountId}:${Date.now()}`,
+      });
     }
   };
 
@@ -116,7 +130,14 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       setMessage("COGS row updated.");
       await loadRows();
     } catch (err) {
-      setError(getErrorMessage(err, "Failed to update SKU cost."));
+      const text = getErrorMessage(err, "Failed to update SKU cost.");
+      setError(text);
+      await pushClientNotification({
+        title: "COGS update failed",
+        body: text,
+        level: "error",
+        eventKey: `cogs-update-fail:${id}:${Date.now()}`,
+      });
     }
   };
 
@@ -128,7 +149,14 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       setMessage("COGS row deleted.");
       await loadRows();
     } catch (err) {
-      setError(getErrorMessage(err, "Failed to delete SKU cost."));
+      const text = getErrorMessage(err, "Failed to delete SKU cost.");
+      setError(text);
+      await pushClientNotification({
+        title: "COGS delete failed",
+        body: text,
+        level: "error",
+        eventKey: `cogs-delete-fail:${id}:${Date.now()}`,
+      });
     }
   };
 
@@ -203,6 +231,12 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         ? " Database is missing includes_vat column. Run: alter table public.cogs add column if not exists includes_vat boolean not null default false;"
         : "";
       setError(`${msg}${columnHint}`);
+      await pushClientNotification({
+        title: "COGS import failed",
+        body: `${msg}${columnHint}`,
+        level: "error",
+        eventKey: `cogs-import-fail:${accountId}:${Date.now()}`,
+      });
     } finally {
       setImporting(false);
     }
@@ -251,6 +285,12 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         ? " Database is missing includes_vat column. Run: alter table public.cogs add column if not exists includes_vat boolean not null default false;"
         : "";
       setError(`${msg}${columnHint}`);
+      await pushClientNotification({
+        title: "COGS import failed",
+        body: `${msg}${columnHint}`,
+        level: "error",
+        eventKey: `cogs-import-fail:${accountId}:${Date.now()}`,
+      });
     } finally {
       setImporting(false);
     }
@@ -408,6 +448,32 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           </tbody>
         </table>
       </div>
+      <div className="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            const next = Math.max(0, offset - PAGE_SIZE);
+            setOffset(next);
+            void loadRows(next);
+          }}
+          disabled={offset === 0 || loading}
+          className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            const next = offset + PAGE_SIZE;
+            setOffset(next);
+            void loadRows(next);
+          }}
+          disabled={!hasMore || loading}
+          className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Next
+        </button>
+      </div>
     </div>
   );
 }
@@ -469,7 +535,7 @@ function EditableCogsRow({
           "No"
         )}
       </td>
-      <td className="px-4 py-3 text-slate-500">{new Date(row.updated_at).toLocaleString()}</td>
+      <td className="px-4 py-3 text-slate-500">{new Date(row.updated_at).toLocaleString("en-GB")}</td>
       {canEdit ? (
         <td className="px-4 py-3">
           <div className="flex gap-2">

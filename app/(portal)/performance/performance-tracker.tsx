@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { formatUkDate, isMonday } from "@/lib/utils/date";
+import { pushClientNotification } from "@/lib/notifications/client";
 
 type Metric = {
   id: string;
@@ -54,17 +55,21 @@ function initialForm(): FormState {
 }
 
 export default function PerformanceTracker({ accountId, canEdit }: Props) {
+  const PAGE_SIZE = 20;
   const [rows, setRows] = useState<Metric[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(initialForm());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [weekStart, setWeekStart] = useState<string>(initialForm().recorded_date);
   const [downloadingWeekly, setDownloadingWeekly] = useState(false);
+  const [pageOffset, setPageOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
 
-  const loadRows = async () => {
+  const loadRows = async (offset = pageOffset) => {
     setLoading(true);
     setError(null);
     const supabase = createClient();
@@ -73,7 +78,8 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
       .from("performance_metrics")
       .select("id, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales")
       .eq("account_id", accountId)
-      .order("recorded_date", { ascending: false });
+      .order("recorded_date", { ascending: false })
+      .range(offset, offset + PAGE_SIZE - 1);
 
     if (fetchError) {
       setError(fetchError.message);
@@ -81,12 +87,15 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
       return;
     }
 
-    setRows((data || []) as Metric[]);
+    const nextRows = (data || []) as Metric[];
+    setRows(nextRows);
+    setHasMore(nextRows.length === PAGE_SIZE);
     setLoading(false);
   };
 
   useEffect(() => {
-    void loadRows();
+    setPageOffset(0);
+    void loadRows(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
@@ -100,20 +109,35 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
     setSaving(true);
     setError(null);
     setMessage(null);
+    setWarning(null);
 
     try {
+      const asin = form.asin.trim().toUpperCase();
+      if (asin && !/^[A-Z0-9]{10}$/.test(asin)) {
+        throw new Error("ASIN must be exactly 10 letters/numbers.");
+      }
+      const ppcSpend = form.ppc_spend ? Number(form.ppc_spend) : null;
+      const ppcSales = form.ppc_sales ? Number(form.ppc_sales) : null;
+      const totalSales = form.total_sales ? Number(form.total_sales) : null;
+      if ((ppcSpend ?? 0) < 0 || (ppcSales ?? 0) < 0 || (totalSales ?? 0) < 0) {
+        throw new Error("PPC Spend, PPC Sales, and Total Sales must be non-negative.");
+      }
+      if (ppcSpend != null && totalSales != null && ppcSpend > totalSales) {
+        setWarning("PPC Spend is higher than Total Sales. Please verify the values.");
+      }
+
       const supabase = createClient();
       const payload = {
         account_id: accountId,
         recorded_date: form.recorded_date,
         product_name: form.product_name.trim(),
-        asin: form.asin.trim() || null,
+        asin: asin || null,
         bsr: form.bsr ? Number(form.bsr) : null,
         review_count: form.review_count ? Number(form.review_count) : null,
         rating: form.rating ? Number(form.rating) : null,
-        ppc_spend: form.ppc_spend ? Number(form.ppc_spend) : null,
-        ppc_sales: form.ppc_sales ? Number(form.ppc_sales) : null,
-        total_sales: form.total_sales ? Number(form.total_sales) : null,
+        ppc_spend: ppcSpend,
+        ppc_sales: ppcSales,
+        total_sales: totalSales,
       };
       if (editingId) {
         const { error: updateError } = await supabase.from("performance_metrics").update(payload).eq("id", editingId);
@@ -126,9 +150,16 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
       setForm(initialForm());
       setEditingId(null);
       setMessage(editingId ? "Performance metric updated." : "Performance metric saved.");
-      await loadRows();
+      await loadRows(pageOffset);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save metric.");
+      const text = err instanceof Error ? err.message : "Failed to save metric.";
+      setError(text);
+      await pushClientNotification({
+        title: "Performance save failed",
+        body: text,
+        level: "error",
+        eventKey: `performance-save-fail:${accountId}:${Date.now()}`,
+      });
     } finally {
       setSaving(false);
     }
@@ -141,10 +172,16 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
     const { error: deleteError } = await supabase.from("performance_metrics").delete().eq("id", id);
     if (deleteError) {
       setError(deleteError.message);
+      await pushClientNotification({
+        title: "Performance delete failed",
+        body: deleteError.message,
+        level: "error",
+        eventKey: `performance-delete-fail:${id}:${Date.now()}`,
+      });
       return;
     }
 
-    await loadRows();
+    await loadRows(pageOffset);
   };
 
   const editMetric = (row: Metric) => {
@@ -189,7 +226,14 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
       URL.revokeObjectURL(objectUrl);
       setMessage("Weekly performance PDF exported.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to export weekly performance PDF.");
+      const text = err instanceof Error ? err.message : "Failed to export weekly performance PDF.";
+      setError(text);
+      await pushClientNotification({
+        title: "Weekly performance PDF failed",
+        body: text,
+        level: "error",
+        eventKey: `weekly-performance-pdf-fail:${accountId}:${weekStart}:${Date.now()}`,
+      });
     } finally {
       setDownloadingWeekly(false);
     }
@@ -351,8 +395,52 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
 
       {message ? <p className="rounded-xl bg-green-50 px-3 py-2 text-sm text-green-700">{message}</p> : null}
       {error ? <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
+      {warning ? <p className="rounded-xl bg-yellow-50 px-3 py-2 text-sm text-yellow-800">{warning}</p> : null}
 
-      <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white">
+      <div className="rounded-2xl border border-slate-200 bg-white p-3 md:hidden">
+        {loading ? (
+          <p className="text-sm text-slate-500">Loading performance data...</p>
+        ) : rows.length === 0 ? (
+          <p className="text-sm text-slate-500">No performance metrics saved for this account.</p>
+        ) : (
+          <div className="space-y-2">
+            {rows.map((row) => {
+              const acos = row.ppc_spend && row.ppc_sales ? (row.ppc_spend / row.ppc_sales) * 100 : null;
+              const tacos = row.ppc_spend && row.total_sales ? (row.ppc_spend / row.total_sales) * 100 : null;
+              return (
+                <div key={row.id} className="rounded-xl border border-slate-200 p-3 text-sm">
+                  <p className="font-semibold">{row.product_name}</p>
+                  <p className="text-xs text-slate-500">{formatUkDate(row.recorded_date)}</p>
+                  <p className="mt-1">ASIN: {row.asin || "-"}</p>
+                  <p>BSR: {row.bsr ?? "-"}</p>
+                  <p>Reviews: {row.review_count ?? "-"}</p>
+                  <p>Rating: {row.rating ?? "-"}</p>
+                  <p>PPC Spend: {row.ppc_spend == null ? "-" : Number(row.ppc_spend).toFixed(2)}</p>
+                  <p>PPC Sales: {row.ppc_sales == null ? "-" : Number(row.ppc_sales).toFixed(2)}</p>
+                  <p>Total Sales: {row.total_sales == null ? "-" : Number(row.total_sales).toFixed(2)}</p>
+                  <p>ACOS: {acos == null ? "-" : `${acos.toFixed(2)}%`}</p>
+                  <p>TACOS: {tacos == null ? "-" : `${tacos.toFixed(2)}%`}</p>
+                  {canEdit ? (
+                    <div className="mt-2 flex gap-2">
+                      <button onClick={() => editMetric(row)} className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => deleteMetric(row.id)}
+                        className="rounded-lg bg-red-50 px-2 py-1 text-xs font-semibold text-red-700"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="hidden overflow-x-auto rounded-2xl border border-slate-200 bg-white md:block">
         <table className="min-w-full text-sm">
           <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
@@ -443,6 +531,32 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             )}
           </tbody>
         </table>
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            const next = Math.max(0, pageOffset - PAGE_SIZE);
+            setPageOffset(next);
+            void loadRows(next);
+          }}
+          disabled={pageOffset === 0 || loading}
+          className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            const next = pageOffset + PAGE_SIZE;
+            setPageOffset(next);
+            void loadRows(next);
+          }}
+          disabled={!hasMore || loading}
+          className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Next
+        </button>
       </div>
     </div>
   );

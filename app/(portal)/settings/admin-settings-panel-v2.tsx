@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { UserRole } from "@/lib/types/auth";
+import AuditEventsPanel from "./audit-events-panel";
 
 type UserRow = { id: string; full_name: string; email: string; role: UserRole };
 type AccountRow = { id: string; name: string; currency: string; vat_rate: number; assigned_client_id: string | null };
@@ -247,6 +248,8 @@ export default function AdminSettingsPanelV2({ currentUserId }: { currentUserId:
           </div>
         </Modal>
       ) : null}
+
+      <AuditEventsPanel />
     </div>
   );
 }

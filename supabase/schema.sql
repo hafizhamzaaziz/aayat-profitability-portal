@@ -117,6 +117,41 @@ alter table public.performance_metrics add column if not exists ppc_spend numeri
 alter table public.performance_metrics add column if not exists ppc_sales numeric(14,2);
 alter table public.performance_metrics add column if not exists total_sales numeric(14,2);
 
+-- 7) audit trail
+create table if not exists public.audit_events (
+  id uuid primary key default gen_random_uuid(),
+  actor_id uuid references public.users(id) on delete set null,
+  table_name text not null,
+  entity_id text,
+  action text not null check (action in ('insert', 'update', 'delete')),
+  before_data jsonb,
+  after_data jsonb,
+  created_at timestamptz not null default now()
+);
+
+-- 8) notifications
+create table if not exists public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  title text not null,
+  body text not null default '',
+  level text not null default 'info' check (level in ('info','warning','error','success')),
+  link text,
+  event_key text,
+  read_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists notifications_event_key_unique on public.notifications(event_key) where event_key is not null;
+
+-- performance and query indexes
+create index if not exists reports_account_platform_period_idx on public.reports(account_id, platform, period_start, period_end);
+create index if not exists reports_account_period_idx on public.reports(account_id, period_start, period_end);
+create index if not exists performance_account_date_idx on public.performance_metrics(account_id, recorded_date desc);
+create index if not exists expenses_report_idx on public.expenses(report_id);
+create index if not exists notifications_user_read_created_idx on public.notifications(user_id, read_at, created_at desc);
+create index if not exists audit_events_table_created_idx on public.audit_events(table_name, created_at desc);
+create index if not exists audit_events_actor_created_idx on public.audit_events(actor_id, created_at desc);
+
 -- Role helper for RLS checks (must come after users table exists)
 create or replace function public.current_user_role()
 returns public.user_role
@@ -164,6 +199,8 @@ alter table public.cogs enable row level security;
 alter table public.reports enable row level security;
 alter table public.expenses enable row level security;
 alter table public.performance_metrics enable row level security;
+alter table public.audit_events enable row level security;
+alter table public.notifications enable row level security;
 -- users policies
 drop policy if exists "users_select_self_or_staff" on public.users;
 create policy "users_select_self_or_staff"
@@ -299,6 +336,44 @@ to authenticated
 using (public.current_user_role() in ('admin', 'team'))
 with check (public.current_user_role() in ('admin', 'team'));
 
+-- audit policies
+drop policy if exists "audit_events_select_admin_only" on public.audit_events;
+create policy "audit_events_select_admin_only"
+on public.audit_events
+for select
+to authenticated
+using (public.current_user_role() = 'admin');
+
+-- notifications policies
+drop policy if exists "notifications_select_own_or_admin" on public.notifications;
+create policy "notifications_select_own_or_admin"
+on public.notifications
+for select
+to authenticated
+using (auth.uid() = user_id or public.current_user_role() = 'admin');
+
+drop policy if exists "notifications_insert_own_or_staff" on public.notifications;
+create policy "notifications_insert_own_or_staff"
+on public.notifications
+for insert
+to authenticated
+with check (auth.uid() = user_id or public.current_user_role() in ('admin','team'));
+
+drop policy if exists "notifications_update_own_or_admin" on public.notifications;
+create policy "notifications_update_own_or_admin"
+on public.notifications
+for update
+to authenticated
+using (auth.uid() = user_id or public.current_user_role() = 'admin')
+with check (auth.uid() = user_id or public.current_user_role() = 'admin');
+
+drop policy if exists "notifications_delete_admin_only" on public.notifications;
+create policy "notifications_delete_admin_only"
+on public.notifications
+for delete
+to authenticated
+using (public.current_user_role() = 'admin');
+
 -- Storage bucket (public) for account logos
 insert into storage.buckets (id, name, public)
 values ('account_logos', 'account_logos', true)
@@ -337,3 +412,63 @@ using (bucket_id = 'account_logos' and public.current_user_role() in ('admin', '
 -- IMPORTANT (manual setting in dashboard):
 -- Disable public signup in Supabase Auth settings:
 -- Authentication -> Providers -> Email -> Disable "Enable email signups".
+
+-- audit trigger helper
+create or replace function public.log_audit_event()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  actor uuid;
+  target_id text;
+begin
+  actor := auth.uid();
+  if (TG_OP = 'INSERT') then
+    target_id := coalesce((to_jsonb(NEW)->>'id'), null);
+    insert into public.audit_events(actor_id, table_name, entity_id, action, before_data, after_data)
+    values (actor, TG_TABLE_NAME, target_id, 'insert', null, to_jsonb(NEW));
+    return NEW;
+  elsif (TG_OP = 'UPDATE') then
+    target_id := coalesce((to_jsonb(NEW)->>'id'), (to_jsonb(OLD)->>'id'), null);
+    insert into public.audit_events(actor_id, table_name, entity_id, action, before_data, after_data)
+    values (actor, TG_TABLE_NAME, target_id, 'update', to_jsonb(OLD), to_jsonb(NEW));
+    return NEW;
+  elsif (TG_OP = 'DELETE') then
+    target_id := coalesce((to_jsonb(OLD)->>'id'), null);
+    insert into public.audit_events(actor_id, table_name, entity_id, action, before_data, after_data)
+    values (actor, TG_TABLE_NAME, target_id, 'delete', to_jsonb(OLD), null);
+    return OLD;
+  end if;
+  return null;
+end;
+$$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_accounts_changes') THEN
+    CREATE TRIGGER audit_accounts_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.accounts
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_users_changes') THEN
+    CREATE TRIGGER audit_users_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.users
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_reports_changes') THEN
+    CREATE TRIGGER audit_reports_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.reports
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_expenses_changes') THEN
+    CREATE TRIGGER audit_expenses_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.expenses
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_performance_changes') THEN
+    CREATE TRIGGER audit_performance_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.performance_metrics
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+END $$;
