@@ -11,7 +11,17 @@ type CogsRow = {
   sku: string;
   unit_cost: number;
   includes_vat: boolean;
+  effective_from: string;
   updated_at: string;
+};
+
+type CogsHistoryRow = {
+  id: string;
+  sku: string;
+  unit_cost: number;
+  includes_vat: boolean;
+  effective_from: string;
+  created_at: string;
 };
 
 type Props = {
@@ -27,7 +37,9 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [newSku, setNewSku] = useState("");
   const [newCost, setNewCost] = useState("");
   const [newIncludesVat, setNewIncludesVat] = useState(false);
+  const [newEffectiveFrom, setNewEffectiveFrom] = useState(new Date().toISOString().slice(0, 10));
   const [importIncludesVat, setImportIncludesVat] = useState(false);
+  const [importEffectiveFrom, setImportEffectiveFrom] = useState(new Date().toISOString().slice(0, 10));
   const [importing, setImporting] = useState(false);
   const [importFileName, setImportFileName] = useState("");
   const [importRows, setImportRows] = useState<Record<string, unknown>[]>([]);
@@ -35,6 +47,9 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [importSkuCol, setImportSkuCol] = useState("");
   const [importCostCol, setImportCostCol] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [historySku, setHistorySku] = useState<string | null>(null);
+  const [historyRows, setHistoryRows] = useState<CogsHistoryRow[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [offset, setOffset] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
 
@@ -63,7 +78,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       const [{ data, error: fetchError }, { count }] = await Promise.all([
         supabase
           .from("cogs")
-          .select("*")
+          .select("id, sku, unit_cost, includes_vat, effective_from, updated_at")
           .eq("account_id", accountId)
           .order("sku", { ascending: true })
           .range(nextOffset, nextOffset + PAGE_SIZE - 1),
@@ -76,6 +91,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         sku: String(row.sku),
         unit_cost: Number(row.unit_cost || 0),
         includes_vat: Boolean(row.includes_vat),
+        effective_from: String(row.effective_from || "1970-01-01"),
         updated_at: String(row.updated_at),
       }));
       setRows(normalized as CogsRow[]);
@@ -93,21 +109,81 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
+  const applyCogsVersion = async (input: {
+    sku: string;
+    unitCost: number;
+    includesVat: boolean;
+    effectiveFrom: string;
+  }) => {
+    const supabase = createClient();
+    const normalizedSku = input.sku.trim().toUpperCase();
+    if (!normalizedSku) throw new Error("SKU is required.");
+    if (!input.effectiveFrom) throw new Error("Effective from date is required.");
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    const { error: cogsError } = await supabase.from("cogs").upsert(
+      {
+        account_id: accountId,
+        sku: normalizedSku,
+        unit_cost: Number(input.unitCost.toFixed(2)),
+        includes_vat: input.includesVat,
+        effective_from: input.effectiveFrom,
+      },
+      { onConflict: "account_id,sku" }
+    );
+    if (cogsError) throw cogsError;
+
+    const { error: historyError } = await supabase.from("cogs_history").upsert(
+      {
+        account_id: accountId,
+        sku: normalizedSku,
+        unit_cost: Number(input.unitCost.toFixed(2)),
+        includes_vat: input.includesVat,
+        effective_from: input.effectiveFrom,
+        changed_by: user?.id || null,
+      },
+      { onConflict: "account_id,sku,effective_from" }
+    );
+    if (historyError) throw historyError;
+  };
+
+  const loadHistory = async (sku: string) => {
+    setHistorySku(sku);
+    setHistoryLoading(true);
+    setHistoryRows([]);
+    try {
+      const supabase = createClient();
+      const { data, error: historyError } = await supabase
+        .from("cogs_history")
+        .select("id, sku, unit_cost, includes_vat, effective_from, created_at")
+        .eq("account_id", accountId)
+        .eq("sku", sku)
+        .order("effective_from", { ascending: false });
+      if (historyError) throw historyError;
+      setHistoryRows((data || []) as CogsHistoryRow[]);
+    } catch (err) {
+      setError(getErrorMessage(err, "Failed to load COGS history."));
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   const addRow = async () => {
     if (!newSku.trim() || !newCost.trim()) return;
     try {
-      const supabase = createClient();
-      const { error: insertError } = await supabase.from("cogs").insert({
-        account_id: accountId,
-        sku: newSku.trim().toUpperCase(),
-        unit_cost: Number(newCost),
-        includes_vat: newIncludesVat,
+      await applyCogsVersion({
+        sku: newSku,
+        unitCost: Number(newCost),
+        includesVat: newIncludesVat,
+        effectiveFrom: newEffectiveFrom,
       });
-      if (insertError) throw insertError;
       setNewSku("");
       setNewCost("");
       setNewIncludesVat(false);
-      setMessage("COGS row added.");
+      setMessage("COGS version added.");
       await loadRows();
     } catch (err) {
       const text = getErrorMessage(err, "Failed to add SKU cost.");
@@ -121,20 +197,14 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     }
   };
 
-  const updateRow = async (id: string, sku: string, unitCost: number, includesVat: boolean) => {
+  const updateRow = async (id: string, sku: string, unitCost: number, includesVat: boolean, effectiveFrom: string) => {
     try {
-      const supabase = createClient();
-      const { error: updateError } = await supabase
-        .from("cogs")
-        .update({
-          sku: sku.trim().toUpperCase(),
-          unit_cost: unitCost,
-          includes_vat: includesVat,
-        })
-        .eq("id", id);
-      if (updateError) throw updateError;
-      setMessage("COGS row updated.");
+      await applyCogsVersion({ sku, unitCost, includesVat, effectiveFrom });
+      setMessage("COGS version saved.");
       await loadRows();
+      if (historySku === sku.trim().toUpperCase()) {
+        await loadHistory(sku.trim().toUpperCase());
+      }
     } catch (err) {
       const text = getErrorMessage(err, "Failed to update SKU cost.");
       setError(text);
@@ -259,7 +329,10 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     setError(null);
     setMessage(null);
     try {
-      const dedup = new Map<string, { account_id: string; sku: string; unit_cost: number; includes_vat: boolean }>();
+      const dedup = new Map<
+        string,
+        { account_id: string; sku: string; unit_cost: number; includes_vat: boolean; effective_from: string }
+      >();
       for (const row of importRows) {
         const sku = String(row[importSkuCol] ?? "").trim().toUpperCase();
         const unitCost = Number(parseMoney(row[importCostCol]).toFixed(2));
@@ -269,6 +342,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           sku,
           unit_cost: unitCost,
           includes_vat: importIncludesVat,
+          effective_from: importEffectiveFrom,
         });
       }
 
@@ -278,8 +352,16 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       }
 
       const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
       const { error: upsertError } = await supabase.from("cogs").upsert(payload, { onConflict: "account_id,sku" });
       if (upsertError) throw upsertError;
+      const historyPayload = payload.map((item) => ({ ...item, changed_by: user?.id || null }));
+      const { error: historyError } = await supabase.from("cogs_history").upsert(historyPayload, {
+        onConflict: "account_id,sku,effective_from",
+      });
+      if (historyError) throw historyError;
 
       setMessage(
         `Imported ${payload.length} unique SKUs successfully${payload.length < importRows.length ? " (duplicates merged)." : ""}`
@@ -306,7 +388,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     <div className="space-y-4">
       {canEdit ? (
         <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
-          <div className="grid gap-3 md:grid-cols-[1fr_180px_200px_auto]">
+          <div className="grid gap-3 md:grid-cols-[1fr_160px_180px_180px_auto]">
             <input
               value={newSku}
               onChange={(event) => setNewSku(event.target.value)}
@@ -329,6 +411,15 @@ export default function CogsTable({ accountId, canEdit }: Props) {
               />
               Includes VAT
             </label>
+            <label className="rounded-xl border border-slate-300 px-3 py-2 text-sm">
+              <span className="mb-1 block text-xs uppercase tracking-wide text-slate-500">Effective From</span>
+              <input
+                type="date"
+                value={newEffectiveFrom}
+                onChange={(event) => setNewEffectiveFrom(event.target.value)}
+                className="w-full bg-transparent text-sm outline-none"
+              />
+            </label>
             <button
               onClick={addRow}
               className="rounded-xl bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white"
@@ -337,7 +428,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
             </button>
           </div>
 
-          <div className="grid gap-3 rounded-xl bg-slate-50 p-3 md:grid-cols-[1fr_200px_auto]">
+          <div className="grid gap-3 rounded-xl bg-slate-50 p-3 md:grid-cols-[1fr_220px_180px_auto]">
             <input
               type="file"
               accept=".csv,.xlsx,.xls,.xlsm,.xlxs"
@@ -356,6 +447,16 @@ export default function CogsTable({ accountId, canEdit }: Props) {
                 disabled={importing}
               />
               Imported costs include VAT
+            </label>
+            <label className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
+              <span className="mb-1 block text-xs uppercase tracking-wide text-slate-500">Import Effective From</span>
+              <input
+                type="date"
+                value={importEffectiveFrom}
+                onChange={(event) => setImportEffectiveFrom(event.target.value)}
+                disabled={importing}
+                className="w-full bg-transparent text-sm outline-none"
+              />
             </label>
             <div className="flex items-center text-xs text-slate-600">
               {importing ? "Reading file..." : importFileName ? `Loaded: ${importFileName}` : "Upload CSV/XLSX file"}
@@ -423,6 +524,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
               <th className="px-4 py-3">SKU</th>
               <th className="px-4 py-3">Unit Cost</th>
               <th className="px-4 py-3">Includes VAT</th>
+              <th className="px-4 py-3">Effective From</th>
               <th className="px-4 py-3">Updated</th>
               {canEdit ? <th className="px-4 py-3">Actions</th> : null}
             </tr>
@@ -430,13 +532,13 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 5 : 4}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 6 : 5}>
                   Loading COGS...
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 5 : 4}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 6 : 5}>
                   No COGS rows found for this account.
                 </td>
               </tr>
@@ -448,12 +550,58 @@ export default function CogsTable({ accountId, canEdit }: Props) {
                   canEdit={canEdit}
                   onSave={updateRow}
                   onDelete={deleteRow}
+                  onHistory={loadHistory}
                 />
               ))
             )}
           </tbody>
         </table>
       </div>
+      {historySku ? (
+        <div className="rounded-2xl border border-slate-200 bg-white p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-sm font-semibold text-slate-800">COGS History for {historySku}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setHistorySku(null);
+                setHistoryRows([]);
+              }}
+              className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700"
+            >
+              Close
+            </button>
+          </div>
+          {historyLoading ? (
+            <p className="text-sm text-slate-500">Loading history...</p>
+          ) : historyRows.length === 0 ? (
+            <p className="text-sm text-slate-500">No history found.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-xs">
+                <thead className="text-left uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th className="px-2 py-1">Effective From</th>
+                    <th className="px-2 py-1">Unit Cost</th>
+                    <th className="px-2 py-1">Inc VAT</th>
+                    <th className="px-2 py-1">Recorded</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {historyRows.map((h) => (
+                    <tr key={h.id} className="border-t border-slate-100">
+                      <td className="px-2 py-1">{new Date(`${h.effective_from}T00:00:00`).toLocaleDateString("en-GB")}</td>
+                      <td className="px-2 py-1">{Number(h.unit_cost).toFixed(2)}</td>
+                      <td className="px-2 py-1">{h.includes_vat ? "Yes" : "No"}</td>
+                      <td className="px-2 py-1">{new Date(h.created_at).toLocaleString("en-GB")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center justify-end gap-2">
         <span className="text-xs text-slate-500">
           Page {currentPage} of {totalPages} ({totalCount} items)
@@ -508,15 +656,18 @@ function EditableCogsRow({
   canEdit,
   onSave,
   onDelete,
+  onHistory,
 }: {
   row: CogsRow;
   canEdit: boolean;
-  onSave: (id: string, sku: string, unitCost: number, includesVat: boolean) => Promise<void>;
+  onSave: (id: string, sku: string, unitCost: number, includesVat: boolean, effectiveFrom: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onHistory: (sku: string) => Promise<void>;
 }) {
   const [sku, setSku] = useState(row.sku);
   const [unitCost, setUnitCost] = useState(String(row.unit_cost));
   const [includesVat, setIncludesVat] = useState(Boolean(row.includes_vat));
+  const [effectiveFrom, setEffectiveFrom] = useState(row.effective_from);
 
   return (
     <tr className="border-t border-slate-100">
@@ -560,15 +711,33 @@ function EditableCogsRow({
           "No"
         )}
       </td>
+      <td className="px-4 py-3">
+        {canEdit ? (
+          <input
+            value={effectiveFrom}
+            onChange={(event) => setEffectiveFrom(event.target.value)}
+            type="date"
+            className="w-full rounded-lg border border-slate-300 px-2 py-1"
+          />
+        ) : (
+          <span>{new Date(`${row.effective_from}T00:00:00`).toLocaleDateString("en-GB")}</span>
+        )}
+      </td>
       <td className="px-4 py-3 text-slate-500">{new Date(row.updated_at).toLocaleString("en-GB")}</td>
       {canEdit ? (
         <td className="px-4 py-3">
           <div className="flex gap-2">
             <button
-              onClick={() => onSave(row.id, sku, Number(unitCost), includesVat)}
+              onClick={() => onSave(row.id, sku, Number(unitCost), includesVat, effectiveFrom)}
               className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white"
             >
               Save
+            </button>
+            <button
+              onClick={() => void onHistory(sku.trim().toUpperCase())}
+              className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700"
+            >
+              History
             </button>
             <button
               onClick={() => onDelete(row.id)}

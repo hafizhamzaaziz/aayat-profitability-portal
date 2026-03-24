@@ -27,6 +27,7 @@ type CalculationPreview = {
   netProfit: number;
   unitsSold: number;
   missingSkus: string[];
+  cogsSnapshot: CogsSnapshotEntry[];
   breakdown: {
     platform: Platform;
     summaryLines: Array<{ label: string; value: number }>;
@@ -48,9 +49,20 @@ type CalculationPreview = {
   };
 };
 
-type CogsEntry = {
+type CogsVersion = {
   unitCost: number;
   includesVat: boolean;
+  effectiveFrom: string;
+};
+
+type CogsLookup = Map<string, CogsVersion[]>;
+
+type CogsSnapshotEntry = {
+  sku: string;
+  quantity: number;
+  unit_cost: number;
+  includes_vat: boolean;
+  effective_from: string;
 };
 
 type Props = {
@@ -92,6 +104,62 @@ function autoPickHeader(headers: string[], terms: string[]) {
   return hit ?? "";
 }
 
+function toIsoDate(input: unknown): string | null {
+  if (input == null) return null;
+  const text = String(input).trim();
+  if (!text) return null;
+
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  const dmy = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/);
+  if (dmy) {
+    const day = Number(dmy[1]);
+    const month = Number(dmy[2]);
+    const yearRaw = Number(dmy[3]);
+    const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+    }
+  }
+
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 10);
+}
+
+function extractTransactionDate(row: RowData, fallbackIso: string): string {
+  const preferred = Object.keys(row).filter((key) => {
+    const n = norm(key);
+    return (
+      n.includes("date") ||
+      n.includes("posted") ||
+      n.includes("transaction time") ||
+      n.includes("order time") ||
+      n.includes("settlement")
+    );
+  });
+  for (const key of preferred) {
+    const parsed = toIsoDate(row[key]);
+    if (parsed) return parsed;
+  }
+  return fallbackIso;
+}
+
+function resolveCogsVersion(cogsLookup: CogsLookup, sku: string, txDateIso: string) {
+  const versions = cogsLookup.get(sku);
+  if (!versions || versions.length === 0) return null;
+  let selected: CogsVersion | null = null;
+  for (const version of versions) {
+    if (version.effectiveFrom <= txDateIso) {
+      selected = version;
+    } else {
+      break;
+    }
+  }
+  return selected;
+}
+
 function computeExpenses(expenses: ExpenseRow[], vatRatePct: number) {
   const vatRate = vatRatePct / 100;
   let net = 0;
@@ -117,9 +185,10 @@ function processTemu(
   rows: RowData[],
   skuCol: string,
   qtyCol: string,
-  cogsMap: Map<string, CogsEntry>,
+  cogsLookup: CogsLookup,
   vatRatePct: number,
-  expenses: { net: number; vat: number }
+  expenses: { net: number; vat: number },
+  periodStartIso: string
 ): CalculationPreview {
   const summary = {
     orders: 0,
@@ -138,6 +207,7 @@ function processTemu(
   };
 
   const missingSkus = new Set<string>();
+  const cogsSnapshotMap = new Map<string, CogsSnapshotEntry>();
 
   for (const row of rows) {
     const typeCol = findHeaderExact(row, "transaction type") || findHeaderExact(row, "type") || findHeaderIncludes(row, "transaction type");
@@ -153,11 +223,20 @@ function processTemu(
     if (type === "order payment" || type === "refund") {
       const sku = String(row[skuCol] ?? "").trim().toUpperCase();
       const qty = parseMoney(row[qtyCol]);
+      const txDateIso = extractTransactionDate(row, periodStartIso);
 
       if (type === "order payment" && sku && qty > 0) {
         summary.unitsSold += Math.abs(qty);
-        if (cogsMap.has(sku)) {
-          const cogs = cogsMap.get(sku)!;
+        const cogs = resolveCogsVersion(cogsLookup, sku, txDateIso);
+        if (cogs) {
+          const snapshotKey = `${sku}|${cogs.unitCost}|${cogs.includesVat ? "1" : "0"}|${cogs.effectiveFrom}`;
+          cogsSnapshotMap.set(snapshotKey, {
+            sku,
+            quantity: (cogsSnapshotMap.get(snapshotKey)?.quantity || 0) + Math.abs(qty),
+            unit_cost: cogs.unitCost,
+            includes_vat: cogs.includesVat,
+            effective_from: cogs.effectiveFrom,
+          });
           if (cogs.includesVat) {
             const unitNet = cogs.unitCost / (1 + vatRatePct / 100);
             const unitVat = cogs.unitCost - unitNet;
@@ -167,7 +246,7 @@ function processTemu(
             summary.purchaseCost += cogs.unitCost * Math.abs(qty);
           }
         } else {
-          missingSkus.add(sku);
+          missingSkus.add(`${sku} (${txDateIso})`);
         }
       }
     }
@@ -221,6 +300,7 @@ function processTemu(
     netProfit,
     unitsSold: summary.unitsSold,
     missingSkus: Array.from(missingSkus),
+    cogsSnapshot: Array.from(cogsSnapshotMap.values()),
     breakdown: {
       platform: "temu",
       summaryLines: [
@@ -256,9 +336,10 @@ function processAmazon(
   rows: RowData[],
   skuCol: string,
   qtyCol: string,
-  cogsMap: Map<string, CogsEntry>,
+  cogsLookup: CogsLookup,
   vatRatePct: number,
-  expenses: { net: number; vat: number }
+  expenses: { net: number; vat: number },
+  periodStartIso: string
 ): CalculationPreview {
   const vatRate = vatRatePct / 100;
 
@@ -289,6 +370,7 @@ function processAmazon(
   };
 
   const missingSkus = new Set<string>();
+  const cogsSnapshotMap = new Map<string, CogsSnapshotEntry>();
 
   for (const row of rows) {
     const getVal = (target: string) => {
@@ -320,10 +402,19 @@ function processAmazon(
 
       const sku = String(row[skuCol] ?? "").trim().toUpperCase();
       const qty = parseMoney(row[qtyCol]);
+      const txDateIso = extractTransactionDate(row, periodStartIso);
       if (sku && qty > 0) {
         summary.unitsSold += qty;
-        if (cogsMap.has(sku)) {
-          const cogs = cogsMap.get(sku)!;
+        const cogs = resolveCogsVersion(cogsLookup, sku, txDateIso);
+        if (cogs) {
+          const snapshotKey = `${sku}|${cogs.unitCost}|${cogs.includesVat ? "1" : "0"}|${cogs.effectiveFrom}`;
+          cogsSnapshotMap.set(snapshotKey, {
+            sku,
+            quantity: (cogsSnapshotMap.get(snapshotKey)?.quantity || 0) + qty,
+            unit_cost: cogs.unitCost,
+            includes_vat: cogs.includesVat,
+            effective_from: cogs.effectiveFrom,
+          });
           if (cogs.includesVat) {
             const unitNet = cogs.unitCost / (1 + vatRatePct / 100);
             const unitVat = cogs.unitCost - unitNet;
@@ -333,7 +424,7 @@ function processAmazon(
             summary.purchaseCost += cogs.unitCost * qty;
           }
         } else {
-          missingSkus.add(sku);
+          missingSkus.add(`${sku} (${txDateIso})`);
         }
       }
     } else if (type === "refund" || type === "a-to-z guarantee claim") {
@@ -393,6 +484,7 @@ function processAmazon(
     netProfit,
     unitsSold: summary.unitsSold,
     missingSkus: Array.from(missingSkus),
+    cogsSnapshot: Array.from(cogsSnapshotMap.values()),
     breakdown: {
       platform: "amazon",
       summaryLines: [
@@ -538,29 +630,55 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       if (rangeError) throw new Error(rangeError);
 
       const supabase = createClient();
-      const { data: cogsRows, error: cogsError } = await supabase
-        .from("cogs")
-        .select("*")
-        .eq("account_id", account.id);
+      const [{ data: cogsRows, error: cogsError }, { data: historyRows, error: historyError }] = await Promise.all([
+        supabase.from("cogs").select("sku, unit_cost, includes_vat, effective_from").eq("account_id", account.id),
+        supabase
+          .from("cogs_history")
+          .select("sku, unit_cost, includes_vat, effective_from")
+          .eq("account_id", account.id)
+          .order("effective_from", { ascending: true }),
+      ]);
 
-      if (cogsError) {
-        throw cogsError;
-      }
+      if (cogsError) throw cogsError;
+      if (historyError) throw historyError;
 
-      const cogsMap = new Map<string, CogsEntry>();
-      (cogsRows || []).forEach((row) => {
-        cogsMap.set(String(row.sku).trim().toUpperCase(), {
+      const cogsLookup: CogsLookup = new Map();
+      (historyRows || []).forEach((row) => {
+        const sku = String(row.sku).trim().toUpperCase();
+        const list = cogsLookup.get(sku) || [];
+        list.push({
           unitCost: Number(row.unit_cost) || 0,
           includesVat: Boolean(row.includes_vat),
+          effectiveFrom: String(row.effective_from || "1970-01-01"),
         });
+        cogsLookup.set(sku, list);
+      });
+      (cogsRows || []).forEach((row) => {
+        const sku = String(row.sku).trim().toUpperCase();
+        if (!sku || cogsLookup.has(sku)) return;
+        cogsLookup.set(sku, [
+          {
+            unitCost: Number(row.unit_cost) || 0,
+            includesVat: Boolean(row.includes_vat),
+            effectiveFrom: String(row.effective_from || "1970-01-01"),
+          },
+        ]);
+      });
+      cogsLookup.forEach((versions, sku) => {
+        const dedup = new Map<string, CogsVersion>();
+        versions.forEach((version) => dedup.set(version.effectiveFrom, version));
+        cogsLookup.set(
+          sku,
+          Array.from(dedup.values()).sort((a, b) => (a.effectiveFrom < b.effectiveFrom ? -1 : 1))
+        );
       });
 
       const expenseTotals = computeExpenses(expenses, account.vat_rate);
 
       const result =
         platform === "amazon"
-          ? processAmazon(rows, skuCol, qtyCol, cogsMap, account.vat_rate, expenseTotals)
-          : processTemu(rows, skuCol, qtyCol, cogsMap, account.vat_rate, expenseTotals);
+          ? processAmazon(rows, skuCol, qtyCol, cogsLookup, account.vat_rate, expenseTotals, periodStart)
+          : processTemu(rows, skuCol, qtyCol, cogsLookup, account.vat_rate, expenseTotals, periodStart);
 
       const breakdownError = validateBreakdown(platform, result.breakdown);
       if (breakdownError) throw new Error(breakdownError);
@@ -647,6 +765,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
         input_vat: Number(preview.inputVat.toFixed(2)),
         net_profit: Number(preview.netProfit.toFixed(2)),
         breakdown: preview.breakdown,
+        cogs_snapshot: preview.cogsSnapshot,
       };
 
       const { data: reportRow, error: reportError } = await supabase

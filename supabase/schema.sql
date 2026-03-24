@@ -63,10 +63,34 @@ create table if not exists public.cogs (
   sku text not null,
   unit_cost numeric(12,2) not null,
   includes_vat boolean not null default false,
+  effective_from date not null default date '1970-01-01',
   updated_at timestamptz not null default now(),
   unique(account_id, sku)
 );
 alter table public.cogs add column if not exists includes_vat boolean not null default false;
+alter table public.cogs add column if not exists effective_from date not null default date '1970-01-01';
+
+-- 3b) cogs history (versioned by effective date)
+create table if not exists public.cogs_history (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  sku text not null,
+  unit_cost numeric(12,2) not null,
+  includes_vat boolean not null default false,
+  effective_from date not null,
+  changed_by uuid references public.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  unique(account_id, sku, effective_from)
+);
+
+-- Backfill a baseline history row for existing cogs rows.
+insert into public.cogs_history (account_id, sku, unit_cost, includes_vat, effective_from, changed_by)
+select c.account_id, c.sku, c.unit_cost, c.includes_vat, c.effective_from, auth.uid()
+from public.cogs c
+on conflict (account_id, sku, effective_from)
+do update
+set unit_cost = excluded.unit_cost,
+    includes_vat = excluded.includes_vat;
 -- 4) reports (aggregated totals only)
 create table if not exists public.reports (
   id uuid primary key default gen_random_uuid(),
@@ -81,11 +105,13 @@ create table if not exists public.reports (
   input_vat numeric(14,2) not null default 0,
   net_profit numeric(14,2) not null default 0,
   breakdown jsonb,
+  cogs_snapshot jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(account_id, period_start, period_end, platform)
 );
 alter table public.reports add column if not exists breakdown jsonb;
+alter table public.reports add column if not exists cogs_snapshot jsonb;
 -- 5) expenses
 create table if not exists public.expenses (
   id uuid primary key default gen_random_uuid(),
@@ -146,6 +172,7 @@ create unique index if not exists notifications_event_key_unique on public.notif
 -- performance and query indexes
 create index if not exists reports_account_platform_period_idx on public.reports(account_id, platform, period_start, period_end);
 create index if not exists reports_account_period_idx on public.reports(account_id, period_start, period_end);
+create index if not exists cogs_history_account_sku_effective_idx on public.cogs_history(account_id, sku, effective_from desc);
 create index if not exists performance_account_date_idx on public.performance_metrics(account_id, recorded_date desc);
 create index if not exists expenses_report_idx on public.expenses(report_id);
 create index if not exists notifications_user_read_created_idx on public.notifications(user_id, read_at, created_at desc);
@@ -196,6 +223,7 @@ alter table public.accounts enable row level security;
 alter table public.client_team_members enable row level security;
 alter table public.account_team_members enable row level security;
 alter table public.cogs enable row level security;
+alter table public.cogs_history enable row level security;
 alter table public.reports enable row level security;
 alter table public.expenses enable row level security;
 alter table public.performance_metrics enable row level security;
@@ -283,6 +311,22 @@ using (true);
 drop policy if exists "cogs_modify_admin_team" on public.cogs;
 create policy "cogs_modify_admin_team"
 on public.cogs
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+-- cogs_history policies
+drop policy if exists "cogs_history_select_authenticated" on public.cogs_history;
+create policy "cogs_history_select_authenticated"
+on public.cogs_history
+for select
+to authenticated
+using (true);
+
+drop policy if exists "cogs_history_modify_admin_team" on public.cogs_history;
+create policy "cogs_history_modify_admin_team"
+on public.cogs_history
 for all
 to authenticated
 using (public.current_user_role() in ('admin', 'team'))
@@ -469,6 +513,16 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_performance_changes') THEN
     CREATE TRIGGER audit_performance_changes
     AFTER INSERT OR UPDATE OR DELETE ON public.performance_metrics
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_cogs_changes') THEN
+    CREATE TRIGGER audit_cogs_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.cogs
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_cogs_history_changes') THEN
+    CREATE TRIGGER audit_cogs_history_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.cogs_history
     FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
   END IF;
 END $$;
