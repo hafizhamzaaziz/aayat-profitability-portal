@@ -518,6 +518,7 @@ function processAmazon(
 }
 
 export default function ReportWorkbench({ account, canProcess }: Props) {
+  const todayIso = new Date().toISOString().slice(0, 10);
   const [platform, setPlatform] = useState<Platform>("amazon");
   const [periodStart, setPeriodStart] = useState("");
   const [periodEnd, setPeriodEnd] = useState("");
@@ -649,7 +650,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
         list.push({
           unitCost: Number(row.unit_cost) || 0,
           includesVat: Boolean(row.includes_vat),
-          effectiveFrom: String(row.effective_from || "1970-01-01"),
+          effectiveFrom: String(row.effective_from || todayIso),
         });
         cogsLookup.set(sku, list);
       });
@@ -660,7 +661,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
           {
             unitCost: Number(row.unit_cost) || 0,
             includesVat: Boolean(row.includes_vat),
-            effectiveFrom: String(row.effective_from || "1970-01-01"),
+            effectiveFrom: String(row.effective_from || todayIso),
           },
         ]);
       });

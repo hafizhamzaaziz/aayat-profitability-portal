@@ -30,6 +30,7 @@ type Props = {
 };
 
 export default function CogsTable({ accountId, canEdit }: Props) {
+  const todayIso = new Date().toISOString().slice(0, 10);
   const PAGE_SIZE = 30;
   const [rows, setRows] = useState<CogsRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -37,9 +38,9 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [newSku, setNewSku] = useState("");
   const [newCost, setNewCost] = useState("");
   const [newIncludesVat, setNewIncludesVat] = useState(false);
-  const [newEffectiveFrom, setNewEffectiveFrom] = useState(new Date().toISOString().slice(0, 10));
+  const [newEffectiveFrom, setNewEffectiveFrom] = useState(todayIso);
   const [importIncludesVat, setImportIncludesVat] = useState(false);
-  const [importEffectiveFrom, setImportEffectiveFrom] = useState(new Date().toISOString().slice(0, 10));
+  const [importEffectiveFrom, setImportEffectiveFrom] = useState(todayIso);
   const [importing, setImporting] = useState(false);
   const [importFileName, setImportFileName] = useState("");
   const [importRows, setImportRows] = useState<Record<string, unknown>[]>([]);
@@ -91,7 +92,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         sku: String(row.sku),
         unit_cost: Number(row.unit_cost || 0),
         includes_vat: Boolean(row.includes_vat),
-        effective_from: String(row.effective_from || "1970-01-01"),
+        effective_from: String(row.effective_from || todayIso),
         updated_at: String(row.updated_at),
       }));
       setRows(normalized as CogsRow[]);

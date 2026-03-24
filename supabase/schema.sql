@@ -63,12 +63,13 @@ create table if not exists public.cogs (
   sku text not null,
   unit_cost numeric(12,2) not null,
   includes_vat boolean not null default false,
-  effective_from date not null default date '1970-01-01',
+  effective_from date not null default current_date,
   updated_at timestamptz not null default now(),
   unique(account_id, sku)
 );
 alter table public.cogs add column if not exists includes_vat boolean not null default false;
-alter table public.cogs add column if not exists effective_from date not null default date '1970-01-01';
+alter table public.cogs add column if not exists effective_from date not null default current_date;
+alter table public.cogs alter column effective_from set default current_date;
 
 -- 3b) cogs history (versioned by effective date)
 create table if not exists public.cogs_history (
@@ -77,11 +78,31 @@ create table if not exists public.cogs_history (
   sku text not null,
   unit_cost numeric(12,2) not null,
   includes_vat boolean not null default false,
-  effective_from date not null,
+  effective_from date not null default current_date,
   changed_by uuid references public.users(id) on delete set null,
   created_at timestamptz not null default now(),
   unique(account_id, sku, effective_from)
 );
+alter table public.cogs_history alter column effective_from set default current_date;
+
+-- Cleanup legacy placeholder dates.
+update public.cogs
+set effective_from = current_date
+where effective_from = date '1970-01-01';
+
+delete from public.cogs_history ch
+where ch.effective_from = date '1970-01-01'
+  and exists (
+    select 1
+    from public.cogs_history c2
+    where c2.account_id = ch.account_id
+      and c2.sku = ch.sku
+      and c2.effective_from = current_date
+  );
+
+update public.cogs_history
+set effective_from = current_date
+where effective_from = date '1970-01-01';
 
 -- Backfill a baseline history row for existing cogs rows.
 insert into public.cogs_history (account_id, sku, unit_cost, includes_vat, effective_from, changed_by)
