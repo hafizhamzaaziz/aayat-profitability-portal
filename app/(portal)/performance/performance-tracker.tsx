@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { formatUkDate, isMonday } from "@/lib/utils/date";
+import { addDays, formatUkDate, isMonday } from "@/lib/utils/date";
 import { pushClientNotification } from "@/lib/notifications/client";
 
 type Metric = {
@@ -54,6 +54,10 @@ function initialForm(): FormState {
   };
 }
 
+function lastCompletedWeekMonday() {
+  return addDays(initialForm().recorded_date, -7);
+}
+
 export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const PAGE_SIZE = 20;
   const [rows, setRows] = useState<Metric[]>([]);
@@ -64,7 +68,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const [warning, setWarning] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(initialForm());
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [weekStart, setWeekStart] = useState<string>(initialForm().recorded_date);
+  const [weekStart, setWeekStart] = useState<string>(lastCompletedWeekMonday());
   const [downloadingWeekly, setDownloadingWeekly] = useState(false);
   const [pageOffset, setPageOffset] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
@@ -293,7 +297,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-2 rounded-2xl border border-slate-200 bg-white p-4">
         <label className="text-xs text-slate-600">
-          <span className="mb-1 block uppercase tracking-wide text-slate-500">Week Start (Monday)</span>
+          <span className="mb-1 block uppercase tracking-wide text-slate-500">Week Start (Monday, last completed week)</span>
           <input
             type="date"
             value={weekStart}
