@@ -58,6 +58,10 @@ function lastCompletedWeekMonday() {
   return addDays(initialForm().recorded_date, -7);
 }
 
+function weekRangeLabel(weekStart: string) {
+  return `${formatUkDate(weekStart)} to ${formatUkDate(addDays(weekStart, 6))}`;
+}
+
 export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const PAGE_SIZE = 20;
   const [rows, setRows] = useState<Metric[]>([]);
@@ -433,7 +437,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
               return (
                 <div key={row.id} className="rounded-xl border border-slate-200 p-3 text-sm">
                   <p className="font-semibold">{row.product_name}</p>
-                  <p className="text-xs text-slate-500">{formatUkDate(row.recorded_date)}</p>
+                  <p className="text-xs text-slate-500">{weekRangeLabel(row.recorded_date)}</p>
                   <p className="mt-1">ASIN: {row.asin || "-"}</p>
                   <p>BSR: {row.bsr ?? "-"}</p>
                   <p>Reviews: {row.review_count ?? "-"}</p>
@@ -467,7 +471,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
         <table className="min-w-full text-sm">
           <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
-              <th className="px-4 py-3">Date</th>
+              <th className="px-4 py-3">Week</th>
               <th className="px-4 py-3">Product</th>
               <th className="px-4 py-3">ASIN</th>
               <th className="px-4 py-3">BSR</th>
@@ -502,7 +506,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
                 const tacos = row.ppc_spend && row.total_sales ? (row.ppc_spend / row.total_sales) * 100 : null;
                 return (
                   <tr key={row.id} className="border-t border-slate-100">
-                    <td className="px-4 py-3">{formatUkDate(row.recorded_date)}</td>
+                    <td className="px-4 py-3">{weekRangeLabel(row.recorded_date)}</td>
                     <td className="px-4 py-3">{row.product_name}</td>
                     <td className="px-4 py-3">
                       {row.asin ? (
