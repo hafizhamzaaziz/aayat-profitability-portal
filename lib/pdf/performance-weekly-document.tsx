@@ -21,6 +21,8 @@ type Input = {
   accountLogoUrl: string | null;
   weekStart: string;
   weekEnd: string;
+  previousWeekStart: string;
+  previousWeekEnd: string;
   rows: Metric[];
   previousRows: Metric[];
 };
@@ -59,6 +61,9 @@ const styles = StyleSheet.create({
   c10: { width: "6%", textAlign: "right" },
   c11: { width: "10%", textAlign: "right" },
   asinLink: { color: "#1d4ed8", textDecoration: "underline" },
+  deltaGood: { fontSize: 7, color: "#15803d" },
+  deltaBad: { fontSize: 7, color: "#dc2626" },
+  deltaNeutral: { fontSize: 7, color: "#64748b" },
   footer: {
     position: "absolute",
     left: 20,
@@ -83,6 +88,29 @@ function n(num: number | null) {
   return num == null ? "-" : Number(num).toFixed(2);
 }
 
+function deltaText(
+  current: number | null,
+  previous: number | null,
+  mode: "higher_better" | "lower_better" | "neutral",
+  decimals = 2
+) {
+  if (current == null || previous == null) {
+    return { text: "vs last: -", style: "neutral" as const };
+  }
+  const diff = current - previous;
+  const sign = diff > 0 ? "+" : "";
+  const text = `vs last: ${sign}${diff.toFixed(decimals)}`;
+  if (diff === 0 || mode === "neutral") return { text, style: "neutral" as const };
+  if (mode === "higher_better") return { text, style: diff > 0 ? ("good" as const) : ("bad" as const) };
+  return { text, style: diff < 0 ? ("good" as const) : ("bad" as const) };
+}
+
+function deltaStyleFor(status: "good" | "bad" | "neutral") {
+  if (status === "good") return styles.deltaGood;
+  if (status === "bad") return styles.deltaBad;
+  return styles.deltaNeutral;
+}
+
 function WeeklyPerformancePdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl: string | null }) {
   const prevByKey = new Map<string, Metric>();
   for (const row of data.previousRows) {
@@ -97,6 +125,9 @@ function WeeklyPerformancePdf({ data, footerLogoDataUrl }: { data: Input; footer
             <Text style={styles.title}>{data.accountName} Weekly Performance Report</Text>
             <Text style={styles.sub}>
               Week: {formatUkDate(data.weekStart)} to {formatUkDate(data.weekEnd)}
+            </Text>
+            <Text style={styles.sub}>
+              Comparison: {formatUkDate(data.previousWeekStart)} to {formatUkDate(data.previousWeekEnd)}
             </Text>
           </View>
           {data.accountLogoUrl ? (
@@ -116,7 +147,7 @@ function WeeklyPerformancePdf({ data, footerLogoDataUrl }: { data: Input; footer
           <Text style={styles.c8}>BSR</Text>
           <Text style={styles.c9}>Reviews</Text>
           <Text style={styles.c10}>Rating</Text>
-          <Text style={styles.c11}>ACOS Delta</Text>
+          <Text style={styles.c11}>Week-over-week</Text>
         </View>
 
         {data.rows.length === 0 ? (
@@ -129,8 +160,15 @@ function WeeklyPerformancePdf({ data, footerLogoDataUrl }: { data: Input; footer
             const tacos = row.ppc_spend && row.total_sales ? (row.ppc_spend / row.total_sales) * 100 : null;
             const prev = prevByKey.get(`${row.product_name.toLowerCase()}|${row.asin || ""}`);
             const prevAcos = prev?.ppc_spend && prev?.ppc_sales ? (prev.ppc_spend / prev.ppc_sales) * 100 : null;
-            const deltaAcos = acos != null && prevAcos != null ? acos - prevAcos : null;
-            const deltaText = deltaAcos == null ? "-" : `${deltaAcos > 0 ? "+" : ""}${deltaAcos.toFixed(2)}%`;
+            const prevTacos = prev?.ppc_spend && prev?.total_sales ? (prev.ppc_spend / prev.total_sales) * 100 : null;
+            const spendDelta = deltaText(row.ppc_spend, prev?.ppc_spend ?? null, "neutral");
+            const ppcSalesDelta = deltaText(row.ppc_sales, prev?.ppc_sales ?? null, "higher_better");
+            const totalSalesDelta = deltaText(row.total_sales, prev?.total_sales ?? null, "higher_better");
+            const acosDelta = deltaText(acos, prevAcos, "lower_better");
+            const tacosDelta = deltaText(tacos, prevTacos, "lower_better");
+            const bsrDelta = deltaText(row.bsr, prev?.bsr ?? null, "lower_better", 0);
+            const reviewsDelta = deltaText(row.review_count, prev?.review_count ?? null, "higher_better", 0);
+            const ratingDelta = deltaText(row.rating, prev?.rating ?? null, "higher_better");
 
             return (
               <View key={`${row.product_name}-${idx}`} style={styles.tr}>
@@ -144,15 +182,46 @@ function WeeklyPerformancePdf({ data, footerLogoDataUrl }: { data: Input; footer
                     "-"
                   )}
                 </Text>
-                <Text style={styles.c3}>{n(row.ppc_spend)}</Text>
-                <Text style={styles.c4}>{n(row.ppc_sales)}</Text>
-                <Text style={styles.c5}>{n(row.total_sales)}</Text>
-                <Text style={styles.c6}>{pct(acos)}</Text>
-                <Text style={styles.c7}>{pct(tacos)}</Text>
-                <Text style={styles.c8}>{row.bsr ?? "-"}</Text>
-                <Text style={styles.c9}>{row.review_count ?? "-"}</Text>
-                <Text style={styles.c10}>{row.rating ?? "-"}</Text>
-                <Text style={styles.c11}>{deltaText}</Text>
+                <View style={styles.c3}>
+                  <Text>{n(row.ppc_spend)}</Text>
+                  <Text style={deltaStyleFor(spendDelta.style)}>{spendDelta.text}</Text>
+                </View>
+                <View style={styles.c4}>
+                  <Text>{n(row.ppc_sales)}</Text>
+                  <Text style={deltaStyleFor(ppcSalesDelta.style)}>{ppcSalesDelta.text}</Text>
+                </View>
+                <View style={styles.c5}>
+                  <Text>{n(row.total_sales)}</Text>
+                  <Text style={deltaStyleFor(totalSalesDelta.style)}>{totalSalesDelta.text}</Text>
+                </View>
+                <View style={styles.c6}>
+                  <Text>{pct(acos)}</Text>
+                  <Text style={deltaStyleFor(acosDelta.style)}>{acosDelta.text}</Text>
+                </View>
+                <View style={styles.c7}>
+                  <Text>{pct(tacos)}</Text>
+                  <Text style={deltaStyleFor(tacosDelta.style)}>{tacosDelta.text}</Text>
+                </View>
+                <View style={styles.c8}>
+                  <Text>{row.bsr ?? "-"}</Text>
+                  <Text style={deltaStyleFor(bsrDelta.style)}>{bsrDelta.text}</Text>
+                </View>
+                <View style={styles.c9}>
+                  <Text>{row.review_count ?? "-"}</Text>
+                  <Text style={deltaStyleFor(reviewsDelta.style)}>{reviewsDelta.text}</Text>
+                </View>
+                <View style={styles.c10}>
+                  <Text>{row.rating ?? "-"}</Text>
+                  <Text style={deltaStyleFor(ratingDelta.style)}>{ratingDelta.text}</Text>
+                </View>
+                <View style={styles.c11}>
+                  <Text style={deltaStyleFor(totalSalesDelta.style)}>
+                    Sales {totalSalesDelta.text.replace("vs last: ", "")}
+                  </Text>
+                  <Text style={deltaStyleFor(acosDelta.style)}>
+                    ACOS {acosDelta.text.replace("vs last: ", "")}
+                  </Text>
+                </View>
               </View>
             );
           })

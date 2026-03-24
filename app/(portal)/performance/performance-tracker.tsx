@@ -68,13 +68,16 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const [warning, setWarning] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(initialForm());
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [weekStart, setWeekStart] = useState<string>(lastCompletedWeekMonday());
   const [downloadingWeekly, setDownloadingWeekly] = useState(false);
+  const [reportWeekStart, setReportWeekStart] = useState<string>(lastCompletedWeekMonday());
   const [pageOffset, setPageOffset] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const currentPage = Math.floor(pageOffset / PAGE_SIZE) + 1;
+  const reportingWeekStart = lastCompletedWeekMonday();
+  const reportingWeekEnd = addDays(reportingWeekStart, 6);
+  const selectedWeekEnd = addDays(reportWeekStart, 6);
 
   const loadRows = async (offset = pageOffset) => {
     setLoading(true);
@@ -110,11 +113,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   }, [accountId]);
 
   const saveMetric = async () => {
-    if (!form.product_name.trim() || !form.recorded_date) return;
-    if (!isMonday(form.recorded_date)) {
-      setError("Performance entries are weekly only. Please select a Monday date.");
-      return;
-    }
+    if (!form.product_name.trim()) return;
 
     setSaving(true);
     setError(null);
@@ -137,9 +136,13 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
       }
 
       const supabase = createClient();
+      const recordedDate = editingId ? form.recorded_date : reportingWeekStart;
+      if (!isMonday(recordedDate)) {
+        throw new Error("Recorded week must be Monday.");
+      }
       const payload = {
         account_id: accountId,
-        recorded_date: form.recorded_date,
+        recorded_date: recordedDate,
         product_name: form.product_name.trim(),
         asin: asin || null,
         bsr: form.bsr ? Number(form.bsr) : null,
@@ -215,10 +218,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   };
 
   const downloadWeeklyPdf = async () => {
-    if (!weekStart || !isMonday(weekStart)) {
-      setError("Please select a Monday as week start.");
-      return;
-    }
+    const weekStart = reportWeekStart;
     setDownloadingWeekly(true);
     setError(null);
     try {
@@ -296,15 +296,27 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-2 rounded-2xl border border-slate-200 bg-white p-4">
-        <label className="text-xs text-slate-600">
-          <span className="mb-1 block uppercase tracking-wide text-slate-500">Week Start (Monday, last completed week)</span>
-          <input
-            type="date"
-            value={weekStart}
-            onChange={(e) => setWeekStart(e.target.value)}
-            className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
-          />
-        </label>
+        <p className="text-sm text-slate-700">
+          Weekly report period:{" "}
+          <span className="font-semibold">
+            {formatUkDate(reportWeekStart)} to {formatUkDate(selectedWeekEnd)}
+          </span>
+        </p>
+        <button
+          type="button"
+          onClick={() => setReportWeekStart((prev) => addDays(prev, -7))}
+          className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700"
+        >
+          Previous Week
+        </button>
+        <button
+          type="button"
+          onClick={() => setReportWeekStart((prev) => addDays(prev, 7))}
+          disabled={reportWeekStart >= reportingWeekStart}
+          className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Next Week
+        </button>
         <button
           onClick={downloadWeeklyPdf}
           disabled={downloadingWeekly}
@@ -312,16 +324,17 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
         >
           {downloadingWeekly ? "Generating..." : "Download Weekly PDF"}
         </button>
+        <p className="w-full text-xs text-slate-500">Use Previous/Next Week to view older weekly comparisons.</p>
       </div>
 
       {canEdit ? (
         <div className="grid gap-2 rounded-2xl border border-slate-200 bg-white p-4 md:grid-cols-4">
-          <input
-            type="date"
-            value={form.recorded_date}
-            onChange={(e) => setForm((prev) => ({ ...prev, recorded_date: e.target.value }))}
-            className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
-          />
+          {!editingId ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 md:col-span-4">
+              New entries are saved to last completed week: {formatUkDate(reportingWeekStart)} to{" "}
+              {formatUkDate(reportingWeekEnd)}.
+            </div>
+          ) : null}
           <input
             placeholder="Product name"
             value={form.product_name}

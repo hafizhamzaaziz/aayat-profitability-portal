@@ -61,6 +61,8 @@ export async function GET(request: NextRequest) {
       accountLogoUrl: account.logo_url,
       weekStart: effectiveWeekStart,
       weekEnd,
+      previousWeekStart,
+      previousWeekEnd,
       rows: (rows || []) as never[],
       previousRows: (previousRows || []) as never[],
     });
