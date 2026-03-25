@@ -190,10 +190,143 @@ create table if not exists public.notifications (
 );
 create unique index if not exists notifications_event_key_unique on public.notifications(event_key) where event_key is not null;
 
+-- 9) inventory catalog and mappings
+create table if not exists public.sku_catalog (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  product_name text not null,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(account_id, product_name)
+);
+
+create table if not exists public.sku_mappings (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  sku_catalog_id uuid not null references public.sku_catalog(id) on delete cascade,
+  amazon_sku text,
+  temu_sku_id text,
+  lead_time_days integer,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (amazon_sku is not null or temu_sku_id is not null)
+);
+create unique index if not exists sku_mappings_amazon_unique
+  on public.sku_mappings(account_id, amazon_sku) where amazon_sku is not null;
+create unique index if not exists sku_mappings_temu_unique
+  on public.sku_mappings(account_id, temu_sku_id) where temu_sku_id is not null;
+
+-- Optional link from COGS rows to canonical mapping.
+alter table public.cogs add column if not exists sku_mapping_id uuid references public.sku_mappings(id) on delete set null;
+
+-- 10) inventory planning datasets
+create table if not exists public.sku_monthly_sales (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  sku_mapping_id uuid not null references public.sku_mappings(id) on delete cascade,
+  month_start date not null,
+  amazon_units integer not null default 0,
+  temu_units integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(account_id, sku_mapping_id, month_start)
+);
+
+create table if not exists public.inventory_defaults (
+  account_id uuid primary key references public.accounts(id) on delete cascade,
+  lead_time_days integer not null default 90,
+  amazon_cover_days integer not null default 30,
+  warehouse_cover_days integer not null default 120,
+  storage_cost_per_pallet numeric(14,2) not null default 0,
+  storage_cost_period text not null default 'month' check (storage_cost_period in ('week','month')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.inventory_levels (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  sku_mapping_id uuid not null references public.sku_mappings(id) on delete cascade,
+  level_date date not null,
+  amazon_units integer not null default 0,
+  warehouse_units integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(account_id, sku_mapping_id, level_date)
+);
+
+create table if not exists public.pack_profiles (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  profile_name text not null,
+  units_per_box integer not null check (units_per_box > 0),
+  box_length numeric(10,2) not null,
+  box_width numeric(10,2) not null,
+  box_height numeric(10,2) not null,
+  dimension_unit text not null default 'cm' check (dimension_unit in ('mm','cm','in')),
+  box_weight numeric(10,2),
+  weight_unit text not null default 'kg' check (weight_unit in ('kg','lb')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.inventory_movements (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  sku_mapping_id uuid not null references public.sku_mappings(id) on delete cascade,
+  movement_date date not null,
+  movement_type text not null check (movement_type in ('inbound','outbound','adjustment','amazon_transfer')),
+  units_delta integer not null,
+  boxes integer,
+  pack_profile_id uuid references public.pack_profiles(id) on delete set null,
+  notes text,
+  created_by uuid references public.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.shipment_plans (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  plan_date date not null default current_date,
+  plan_type text not null check (plan_type in ('amazon_requirement','warehouse_requirement','manual')),
+  title text not null,
+  notes text,
+  orientation text not null default 'portrait' check (orientation in ('portrait','landscape')),
+  created_by uuid references public.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.shipment_plan_items (
+  id uuid primary key default gen_random_uuid(),
+  shipment_plan_id uuid not null references public.shipment_plans(id) on delete cascade,
+  sku_mapping_id uuid not null references public.sku_mappings(id) on delete cascade,
+  suggested_units integer not null default 0,
+  planned_units integer not null default 0,
+  units_per_box integer not null default 1,
+  planned_boxes integer not null default 0,
+  pallets numeric(12,2) not null default 0,
+  amazon_units_snapshot integer not null default 0,
+  warehouse_units_snapshot integer not null default 0,
+  lead_time_days integer,
+  created_at timestamptz not null default now()
+);
+
 -- performance and query indexes
 create index if not exists reports_account_platform_period_idx on public.reports(account_id, platform, period_start, period_end);
 create index if not exists reports_account_period_idx on public.reports(account_id, period_start, period_end);
 create index if not exists cogs_history_account_sku_effective_idx on public.cogs_history(account_id, sku, effective_from desc);
+create index if not exists sku_catalog_account_idx on public.sku_catalog(account_id, product_name);
+create index if not exists sku_mappings_account_catalog_idx on public.sku_mappings(account_id, sku_catalog_id);
+create index if not exists sku_monthly_sales_account_month_idx on public.sku_monthly_sales(account_id, month_start desc);
+create index if not exists inventory_levels_account_date_idx on public.inventory_levels(account_id, level_date desc);
+create index if not exists inventory_levels_mapping_date_idx on public.inventory_levels(sku_mapping_id, level_date desc);
+create index if not exists inventory_movements_account_date_idx on public.inventory_movements(account_id, movement_date desc);
+create index if not exists inventory_movements_mapping_date_idx on public.inventory_movements(sku_mapping_id, movement_date desc);
+create index if not exists pack_profiles_account_idx on public.pack_profiles(account_id, profile_name);
+create index if not exists shipment_plans_account_date_idx on public.shipment_plans(account_id, plan_date desc);
+create index if not exists shipment_plan_items_plan_idx on public.shipment_plan_items(shipment_plan_id);
 create index if not exists performance_account_date_idx on public.performance_metrics(account_id, recorded_date desc);
 create index if not exists expenses_report_idx on public.expenses(report_id);
 create index if not exists notifications_user_read_created_idx on public.notifications(user_id, read_at, created_at desc);
@@ -237,6 +370,34 @@ DO $$ BEGIN
     CREATE TRIGGER set_cogs_updated_at BEFORE UPDATE ON public.cogs
     FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_sku_catalog_updated_at') THEN
+    CREATE TRIGGER set_sku_catalog_updated_at BEFORE UPDATE ON public.sku_catalog
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_sku_mappings_updated_at') THEN
+    CREATE TRIGGER set_sku_mappings_updated_at BEFORE UPDATE ON public.sku_mappings
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_sku_monthly_sales_updated_at') THEN
+    CREATE TRIGGER set_sku_monthly_sales_updated_at BEFORE UPDATE ON public.sku_monthly_sales
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_inventory_defaults_updated_at') THEN
+    CREATE TRIGGER set_inventory_defaults_updated_at BEFORE UPDATE ON public.inventory_defaults
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_inventory_levels_updated_at') THEN
+    CREATE TRIGGER set_inventory_levels_updated_at BEFORE UPDATE ON public.inventory_levels
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_pack_profiles_updated_at') THEN
+    CREATE TRIGGER set_pack_profiles_updated_at BEFORE UPDATE ON public.pack_profiles
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_shipment_plans_updated_at') THEN
+    CREATE TRIGGER set_shipment_plans_updated_at BEFORE UPDATE ON public.shipment_plans
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
 END $$;
 -- RLS enable
 alter table public.users enable row level security;
@@ -245,6 +406,15 @@ alter table public.client_team_members enable row level security;
 alter table public.account_team_members enable row level security;
 alter table public.cogs enable row level security;
 alter table public.cogs_history enable row level security;
+alter table public.sku_catalog enable row level security;
+alter table public.sku_mappings enable row level security;
+alter table public.sku_monthly_sales enable row level security;
+alter table public.inventory_defaults enable row level security;
+alter table public.inventory_levels enable row level security;
+alter table public.pack_profiles enable row level security;
+alter table public.inventory_movements enable row level security;
+alter table public.shipment_plans enable row level security;
+alter table public.shipment_plan_items enable row level security;
 alter table public.reports enable row level security;
 alter table public.expenses enable row level security;
 alter table public.performance_metrics enable row level security;
@@ -348,6 +518,142 @@ using (true);
 drop policy if exists "cogs_history_modify_admin_team" on public.cogs_history;
 create policy "cogs_history_modify_admin_team"
 on public.cogs_history
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+-- inventory catalog and planning policies
+drop policy if exists "sku_catalog_select_authenticated" on public.sku_catalog;
+create policy "sku_catalog_select_authenticated"
+on public.sku_catalog
+for select
+to authenticated
+using (true);
+
+drop policy if exists "sku_catalog_modify_admin_team" on public.sku_catalog;
+create policy "sku_catalog_modify_admin_team"
+on public.sku_catalog
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "sku_mappings_select_authenticated" on public.sku_mappings;
+create policy "sku_mappings_select_authenticated"
+on public.sku_mappings
+for select
+to authenticated
+using (true);
+
+drop policy if exists "sku_mappings_modify_admin_team" on public.sku_mappings;
+create policy "sku_mappings_modify_admin_team"
+on public.sku_mappings
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "sku_monthly_sales_select_authenticated" on public.sku_monthly_sales;
+create policy "sku_monthly_sales_select_authenticated"
+on public.sku_monthly_sales
+for select
+to authenticated
+using (true);
+
+drop policy if exists "sku_monthly_sales_modify_admin_team" on public.sku_monthly_sales;
+create policy "sku_monthly_sales_modify_admin_team"
+on public.sku_monthly_sales
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "inventory_defaults_select_authenticated" on public.inventory_defaults;
+create policy "inventory_defaults_select_authenticated"
+on public.inventory_defaults
+for select
+to authenticated
+using (true);
+
+drop policy if exists "inventory_defaults_modify_admin_team" on public.inventory_defaults;
+create policy "inventory_defaults_modify_admin_team"
+on public.inventory_defaults
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "inventory_levels_select_authenticated" on public.inventory_levels;
+create policy "inventory_levels_select_authenticated"
+on public.inventory_levels
+for select
+to authenticated
+using (true);
+
+drop policy if exists "inventory_levels_modify_admin_team" on public.inventory_levels;
+create policy "inventory_levels_modify_admin_team"
+on public.inventory_levels
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "pack_profiles_select_authenticated" on public.pack_profiles;
+create policy "pack_profiles_select_authenticated"
+on public.pack_profiles
+for select
+to authenticated
+using (true);
+
+drop policy if exists "pack_profiles_modify_admin_team" on public.pack_profiles;
+create policy "pack_profiles_modify_admin_team"
+on public.pack_profiles
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "inventory_movements_select_authenticated" on public.inventory_movements;
+create policy "inventory_movements_select_authenticated"
+on public.inventory_movements
+for select
+to authenticated
+using (true);
+
+drop policy if exists "inventory_movements_modify_admin_team" on public.inventory_movements;
+create policy "inventory_movements_modify_admin_team"
+on public.inventory_movements
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "shipment_plans_select_authenticated" on public.shipment_plans;
+create policy "shipment_plans_select_authenticated"
+on public.shipment_plans
+for select
+to authenticated
+using (true);
+
+drop policy if exists "shipment_plans_modify_admin_team" on public.shipment_plans;
+create policy "shipment_plans_modify_admin_team"
+on public.shipment_plans
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "shipment_plan_items_select_authenticated" on public.shipment_plan_items;
+create policy "shipment_plan_items_select_authenticated"
+on public.shipment_plan_items
+for select
+to authenticated
+using (true);
+
+drop policy if exists "shipment_plan_items_modify_admin_team" on public.shipment_plan_items;
+create policy "shipment_plan_items_modify_admin_team"
+on public.shipment_plan_items
 for all
 to authenticated
 using (public.current_user_role() in ('admin', 'team'))
@@ -544,6 +850,51 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_cogs_history_changes') THEN
     CREATE TRIGGER audit_cogs_history_changes
     AFTER INSERT OR UPDATE OR DELETE ON public.cogs_history
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_sku_catalog_changes') THEN
+    CREATE TRIGGER audit_sku_catalog_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.sku_catalog
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_sku_mappings_changes') THEN
+    CREATE TRIGGER audit_sku_mappings_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.sku_mappings
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_sku_monthly_sales_changes') THEN
+    CREATE TRIGGER audit_sku_monthly_sales_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.sku_monthly_sales
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_inventory_defaults_changes') THEN
+    CREATE TRIGGER audit_inventory_defaults_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.inventory_defaults
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_inventory_levels_changes') THEN
+    CREATE TRIGGER audit_inventory_levels_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.inventory_levels
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_pack_profiles_changes') THEN
+    CREATE TRIGGER audit_pack_profiles_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.pack_profiles
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_inventory_movements_changes') THEN
+    CREATE TRIGGER audit_inventory_movements_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.inventory_movements
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_shipment_plans_changes') THEN
+    CREATE TRIGGER audit_shipment_plans_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.shipment_plans
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_shipment_plan_items_changes') THEN
+    CREATE TRIGGER audit_shipment_plan_items_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.shipment_plan_items
     FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
   END IF;
 END $$;

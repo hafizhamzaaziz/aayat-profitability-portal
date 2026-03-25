@@ -3,6 +3,7 @@ import { requireAuth } from "@/lib/auth/guards";
 import type { UserRole } from "@/lib/types/auth";
 import { getAccountByIdForRole } from "@/lib/data/accounts";
 import CogsTable from "./cogs-table";
+import SkuMappingsPanel from "./sku-mappings-panel";
 
 export const metadata: Metadata = {
   title: "COGS",
@@ -51,6 +52,7 @@ export default async function CogsPage({
       <p className="text-slate-600">
         Account: <span className="font-semibold">{account.name}</span>
       </p>
+      <SkuMappingsPanel accountId={account.id} canEdit={canEdit} />
       <CogsTable accountId={account.id} canEdit={canEdit} />
     </div>
   );

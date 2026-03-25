@@ -9,6 +9,7 @@ import { pushClientNotification } from "@/lib/notifications/client";
 type CogsRow = {
   id: string;
   sku: string;
+  sku_mapping_id: string | null;
   unit_cost: number;
   includes_vat: boolean;
   effective_from: string;
@@ -53,6 +54,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [offset, setOffset] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
+  const [mappingByAmazonSku, setMappingByAmazonSku] = useState<Record<string, string>>({});
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -79,7 +81,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       const [{ data, error: fetchError }, { count }] = await Promise.all([
         supabase
           .from("cogs")
-          .select("id, sku, unit_cost, includes_vat, effective_from, updated_at")
+          .select("id, sku, sku_mapping_id, unit_cost, includes_vat, effective_from, updated_at")
           .eq("account_id", accountId)
           .order("sku", { ascending: true })
           .range(nextOffset, nextOffset + PAGE_SIZE - 1),
@@ -90,6 +92,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       const normalized = (data || []).map((row) => ({
         id: String(row.id),
         sku: String(row.sku),
+        sku_mapping_id: row.sku_mapping_id ? String(row.sku_mapping_id) : null,
         unit_cost: Number(row.unit_cost || 0),
         includes_vat: Boolean(row.includes_vat),
         effective_from: String(row.effective_from || todayIso),
@@ -108,6 +111,23 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     setOffset(0);
     void loadRows(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId]);
+
+  useEffect(() => {
+    const loadMappings = async () => {
+      const supabase = createClient();
+      const { data } = await supabase
+        .from("sku_mappings")
+        .select("id, amazon_sku")
+        .eq("account_id", accountId);
+      const map: Record<string, string> = {};
+      (data || []).forEach((row) => {
+        const rec = row as { id?: string; amazon_sku?: string | null };
+        if (rec.amazon_sku && rec.id) map[String(rec.amazon_sku).trim().toUpperCase()] = String(rec.id);
+      });
+      setMappingByAmazonSku(map);
+    };
+    void loadMappings();
   }, [accountId]);
 
   const applyCogsVersion = async (input: {
@@ -129,6 +149,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       {
         account_id: accountId,
         sku: normalizedSku,
+        sku_mapping_id: mappingByAmazonSku[normalizedSku] || null,
         unit_cost: Number(input.unitCost.toFixed(2)),
         includes_vat: input.includesVat,
         effective_from: input.effectiveFrom,
@@ -523,6 +544,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
               <th className="px-4 py-3">SKU</th>
+              <th className="px-4 py-3">Mapped</th>
               <th className="px-4 py-3">Unit Cost</th>
               <th className="px-4 py-3">Includes VAT</th>
               <th className="px-4 py-3">Effective From</th>
@@ -533,13 +555,13 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 6 : 5}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 7 : 6}>
                   Loading COGS...
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 6 : 5}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 7 : 6}>
                   No COGS rows found for this account.
                 </td>
               </tr>
@@ -681,6 +703,13 @@ function EditableCogsRow({
           />
         ) : (
           <span>{row.sku}</span>
+        )}
+      </td>
+      <td className="px-4 py-3 text-xs">
+        {row.sku_mapping_id ? (
+          <span className="rounded-full bg-green-50 px-2 py-0.5 font-semibold text-green-700">Yes</span>
+        ) : (
+          <span className="rounded-full bg-yellow-50 px-2 py-0.5 font-semibold text-yellow-700">No</span>
         )}
       </td>
       <td className="px-4 py-3">
