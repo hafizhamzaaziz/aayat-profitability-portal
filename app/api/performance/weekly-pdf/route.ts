@@ -1,17 +1,9 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { renderWeeklyPerformancePdfBuffer } from "@/lib/pdf/performance-weekly-document";
-import { addDays, isMonday } from "@/lib/utils/date";
+import { addDays, currentMondayIsoUtc, isMonday } from "@/lib/utils/date";
 
 export const runtime = "nodejs";
-
-function getCurrentMondayIso() {
-  const dt = new Date();
-  const day = dt.getDay();
-  const shift = day === 0 ? -6 : 1 - day;
-  dt.setDate(dt.getDate() + shift);
-  return dt.toISOString().slice(0, 10);
-}
 
 async function fetchWeekRowsWithLegacyFallback(input: {
   supabase: ReturnType<typeof createClient>;
@@ -57,7 +49,7 @@ export async function GET(request: NextRequest) {
 
     // Weekly report should always be a completed week.
     // If caller selects current/future week start, use the previous completed week.
-    const currentMonday = getCurrentMondayIso();
+    const currentMonday = currentMondayIsoUtc();
     const effectiveWeekStart = weekStart >= currentMonday ? addDays(currentMonday, -7) : weekStart;
 
     const supabase = createClient();

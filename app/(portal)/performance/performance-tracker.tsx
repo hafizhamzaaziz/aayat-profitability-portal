@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { addDays, formatUkDate, isMonday } from "@/lib/utils/date";
+import { addDays, currentMondayIsoUtc, formatUkDate, isMonday, lastCompletedWeekMondayIsoUtc } from "@/lib/utils/date";
 import { pushClientNotification } from "@/lib/notifications/client";
 
 type Metric = {
@@ -36,11 +36,7 @@ type Props = {
 };
 
 function initialForm(): FormState {
-  const dt = new Date();
-  const day = dt.getDay();
-  const shift = day === 0 ? -6 : 1 - day;
-  dt.setDate(dt.getDate() + shift);
-  const monday = dt.toISOString().slice(0, 10);
+  const monday = currentMondayIsoUtc();
   return {
     recorded_date: monday,
     product_name: "",
@@ -55,7 +51,7 @@ function initialForm(): FormState {
 }
 
 function lastCompletedWeekMonday() {
-  return addDays(initialForm().recorded_date, -7);
+  return lastCompletedWeekMondayIsoUtc();
 }
 
 function weekRangeLabel(weekStart: string) {

@@ -4,6 +4,7 @@ import type { UserRole } from "@/lib/types/auth";
 import { getAccountByIdForRole } from "@/lib/data/accounts";
 import PerformanceTracker from "./performance-tracker";
 import { createNotification, sendNotificationEmailIfConfigured } from "@/lib/notifications/server";
+import { isTodayMondayUtc, todayIsoUtc } from "@/lib/utils/date";
 
 export const metadata: Metadata = {
   title: "Performance",
@@ -48,11 +49,9 @@ export default async function PerformancePage({
   const canEdit = role === "admin" || role === "team";
 
   if (canEdit) {
-    const today = new Date();
-    const isMonday = today.getDay() === 1;
-    if (isMonday) {
+    if (isTodayMondayUtc()) {
       try {
-        const isoDate = today.toISOString().slice(0, 10);
+        const isoDate = todayIsoUtc();
         const title = "Weekly performance update reminder";
         const body = `Please update this week's performance metrics for ${account.name}.`;
         const created = await createNotification(supabase, {
