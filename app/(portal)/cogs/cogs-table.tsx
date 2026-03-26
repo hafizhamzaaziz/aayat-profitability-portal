@@ -690,6 +690,7 @@ function EditableCogsRow({
   const [unitCost, setUnitCost] = useState(String(row.unit_cost));
   const [includesVat, setIncludesVat] = useState(Boolean(row.includes_vat));
   const [effectiveFrom, setEffectiveFrom] = useState(row.effective_from);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
     <tr className="border-t border-slate-100">
@@ -755,25 +756,49 @@ function EditableCogsRow({
       <td className="px-4 py-3 text-slate-500">{new Date(row.updated_at).toLocaleString("en-GB")}</td>
       {canEdit ? (
         <td className="px-4 py-3">
-          <div className="flex gap-2">
+          <div className="relative inline-block">
             <button
-              onClick={() => onSave(row.id, sku, Number(unitCost), includesVat, effectiveFrom)}
-              className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white"
+              type="button"
+              onClick={() => setMenuOpen((prev) => !prev)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 bg-white text-base font-semibold text-slate-700"
+              aria-label="Open row actions"
             >
-              Save
+              ⋮
             </button>
-            <button
-              onClick={() => void onHistory(sku.trim().toUpperCase())}
-              className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700"
-            >
-              History
-            </button>
-            <button
-              onClick={() => onDelete(row.id)}
-              className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white"
-            >
-              Delete
-            </button>
+            {menuOpen ? (
+              <div className="absolute right-0 z-20 mt-2 min-w-[140px] rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void onSave(row.id, sku, Number(unitCost), includesVat, effectiveFrom);
+                  }}
+                  className="block w-full rounded-md px-3 py-1.5 text-left text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void onHistory(sku.trim().toUpperCase());
+                  }}
+                  className="block w-full rounded-md px-3 py-1.5 text-left text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  History
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void onDelete(row.id);
+                  }}
+                  className="block w-full rounded-md px-3 py-1.5 text-left text-xs font-semibold text-red-700 hover:bg-red-50"
+                >
+                  Delete
+                </button>
+              </div>
+            ) : null}
           </div>
         </td>
       ) : null}

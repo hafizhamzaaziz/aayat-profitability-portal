@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Papa from "papaparse";
+import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import FileDropzone from "@/components/ui/file-dropzone";
 
 type MappingRow = {
   id: string;
@@ -24,12 +27,14 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [form, setForm] = useState({
-    product_name: "",
-    amazon_sku: "",
-    temu_sku_id: "",
-    lead_time_days: "",
-  });
+  const [bulkFileName, setBulkFileName] = useState("");
+  const [bulkRows, setBulkRows] = useState<Record<string, unknown>[]>([]);
+  const [bulkHeaders, setBulkHeaders] = useState<string[]>([]);
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [productCol, setProductCol] = useState("");
+  const [amazonSkuCol, setAmazonSkuCol] = useState("");
+  const [temuSkuCol, setTemuSkuCol] = useState("");
+  const [leadTimeCol, setLeadTimeCol] = useState("");
 
   const loadRows = async () => {
     setLoading(true);
@@ -90,47 +95,166 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
     });
   }, [rows, search]);
 
-  const createMapping = async () => {
+  const norm = (value: unknown) =>
+    String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+
+  const pickColumn = (headers: string[], terms: string[]) => {
+    return (
+      headers.find((header) => {
+        const compact = norm(header).replace(/[^a-z0-9]/g, "");
+        return terms.some((term) => compact.includes(term));
+      }) || ""
+    );
+  };
+
+  const parseUploadFile = async (file: File): Promise<Record<string, unknown>[]> => {
+    const lowered = file.name.toLowerCase();
+    if (lowered.endsWith(".csv")) {
+      return new Promise((resolve, reject) => {
+        Papa.parse<Record<string, unknown>>(file, {
+          header: true,
+          skipEmptyLines: true,
+          complete: (result) => resolve(result.data),
+          error: reject,
+        });
+      });
+    }
+
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const firstSheet = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[firstSheet];
+    return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+  };
+
+  const onBulkFileChange = async (file: File | null) => {
+    if (!file) return;
+    setError(null);
+    setMessage(null);
+    setBulkLoading(true);
+    try {
+      const parsedRows = await parseUploadFile(file);
+      if (!parsedRows.length) throw new Error("Uploaded file is empty.");
+      const headers = Object.keys(parsedRows[0] || {});
+      setBulkRows(parsedRows);
+      setBulkHeaders(headers);
+      setBulkFileName(file.name);
+      setProductCol(pickColumn(headers, ["productname", "product", "title", "name"]));
+      setAmazonSkuCol(pickColumn(headers, ["amazonsku", "sku", "sellersku"]));
+      setTemuSkuCol(pickColumn(headers, ["temuskuid", "temusku", "skuid"]));
+      setLeadTimeCol(pickColumn(headers, ["leadtimedays", "leadtime", "lead"]));
+      setMessage("File loaded. Confirm column mapping and click Import Mappings.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to read mapping file.");
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const runBulkImport = async () => {
     if (!canEdit) return;
-    if (!form.product_name.trim()) {
-      setError("Product name is required.");
+    if (!bulkRows.length) {
+      setError("Upload a file first.");
       return;
     }
-    if (!form.amazon_sku.trim() && !form.temu_sku_id.trim()) {
-      setError("Add at least Amazon SKU or Temu SKU ID.");
+    if (!productCol) {
+      setError("Product Name column is required.");
       return;
     }
 
     setError(null);
     setMessage(null);
-    const supabase = createClient();
-    const { data: catalog, error: catalogError } = await supabase
-      .from("sku_catalog")
-      .insert({
-        account_id: accountId,
-        product_name: form.product_name.trim(),
-      })
-      .select("id")
-      .single();
-    if (catalogError || !catalog?.id) {
-      setError(catalogError?.message || "Failed to create product.");
-      return;
-    }
+    setBulkLoading(true);
 
-    const { error: mappingError } = await supabase.from("sku_mappings").insert({
-      account_id: accountId,
-      sku_catalog_id: catalog.id,
-      amazon_sku: form.amazon_sku.trim().toUpperCase() || null,
-      temu_sku_id: form.temu_sku_id.trim().toUpperCase() || null,
-      lead_time_days: form.lead_time_days ? Number(form.lead_time_days) : null,
-    });
-    if (mappingError) {
-      setError(mappingError.message);
-      return;
+    try {
+      const supabase = createClient();
+      const { data: existingData, error: existingError } = await supabase
+        .from("sku_mappings")
+        .select("id, sku_catalog_id, amazon_sku, temu_sku_id")
+        .eq("account_id", accountId);
+      if (existingError) throw existingError;
+
+      const byAmazon = new Map<string, { id: string; sku_catalog_id: string }>();
+      const byTemu = new Map<string, { id: string; sku_catalog_id: string }>();
+      (existingData || []).forEach((row) => {
+        const rec = row as { id?: string; sku_catalog_id?: string; amazon_sku?: string | null; temu_sku_id?: string | null };
+        if (!rec.id || !rec.sku_catalog_id) return;
+        const payload = { id: rec.id, sku_catalog_id: rec.sku_catalog_id };
+        if (rec.amazon_sku) byAmazon.set(rec.amazon_sku.trim().toUpperCase(), payload);
+        if (rec.temu_sku_id) byTemu.set(rec.temu_sku_id.trim().toUpperCase(), payload);
+      });
+
+      let created = 0;
+      let updated = 0;
+      let skipped = 0;
+
+      for (const row of bulkRows) {
+        const productName = String(row[productCol] ?? "").trim();
+        const amazonSku = amazonSkuCol ? String(row[amazonSkuCol] ?? "").trim().toUpperCase() : "";
+        const temuSkuId = temuSkuCol ? String(row[temuSkuCol] ?? "").trim().toUpperCase() : "";
+        const leadTimeRaw = leadTimeCol ? String(row[leadTimeCol] ?? "").trim() : "";
+        const leadTimeDays = leadTimeRaw ? Number(leadTimeRaw) : null;
+        if (!productName || (!amazonSku && !temuSkuId)) {
+          skipped += 1;
+          continue;
+        }
+
+        const existing = (amazonSku && byAmazon.get(amazonSku)) || (temuSkuId && byTemu.get(temuSkuId)) || null;
+
+        if (existing) {
+          const { error: catalogError } = await supabase
+            .from("sku_catalog")
+            .update({ product_name: productName })
+            .eq("id", existing.sku_catalog_id);
+          if (catalogError) throw catalogError;
+
+          const { error: mappingError } = await supabase
+            .from("sku_mappings")
+            .update({
+              amazon_sku: amazonSku || null,
+              temu_sku_id: temuSkuId || null,
+              lead_time_days: Number.isFinite(leadTimeDays) ? leadTimeDays : null,
+            })
+            .eq("id", existing.id);
+          if (mappingError) throw mappingError;
+          updated += 1;
+        } else {
+          const { data: catalog, error: catalogError } = await supabase
+            .from("sku_catalog")
+            .insert({ account_id: accountId, product_name: productName })
+            .select("id")
+            .single();
+          if (catalogError || !catalog?.id) throw catalogError || new Error("Failed to create product.");
+
+          const { data: mapping, error: mappingError } = await supabase
+            .from("sku_mappings")
+            .insert({
+              account_id: accountId,
+              sku_catalog_id: String(catalog.id),
+              amazon_sku: amazonSku || null,
+              temu_sku_id: temuSkuId || null,
+              lead_time_days: Number.isFinite(leadTimeDays) ? leadTimeDays : null,
+            })
+            .select("id")
+            .single();
+          if (mappingError || !mapping?.id) throw mappingError || new Error("Failed to create mapping.");
+          const payload = { id: String(mapping.id), sku_catalog_id: String(catalog.id) };
+          if (amazonSku) byAmazon.set(amazonSku, payload);
+          if (temuSkuId) byTemu.set(temuSkuId, payload);
+          created += 1;
+        }
+      }
+
+      setMessage(`Bulk mapping import complete. Created: ${created}, Updated: ${updated}, Skipped: ${skipped}.`);
+      await loadRows();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Bulk mapping import failed.");
+    } finally {
+      setBulkLoading(false);
     }
-    setForm({ product_name: "", amazon_sku: "", temu_sku_id: "", lead_time_days: "" });
-    setMessage("SKU mapping created.");
-    await loadRows();
   };
 
   const saveRow = async (row: MappingRow) => {
@@ -186,35 +310,94 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       </div>
 
       {canEdit ? (
-        <div className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-[1fr_1fr_1fr_140px_auto]">
-          <input
-            value={form.product_name}
-            onChange={(e) => setForm((prev) => ({ ...prev, product_name: e.target.value }))}
-            placeholder="Product name"
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-          />
-          <input
-            value={form.amazon_sku}
-            onChange={(e) => setForm((prev) => ({ ...prev, amazon_sku: e.target.value.toUpperCase() }))}
-            placeholder="Amazon SKU"
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-          />
-          <input
-            value={form.temu_sku_id}
-            onChange={(e) => setForm((prev) => ({ ...prev, temu_sku_id: e.target.value.toUpperCase() }))}
-            placeholder="Temu SKU ID"
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-          />
-          <input
-            value={form.lead_time_days}
-            onChange={(e) => setForm((prev) => ({ ...prev, lead_time_days: e.target.value }))}
-            placeholder="Lead time (days)"
-            type="number"
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-          />
-          <button onClick={() => void createMapping()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
-            Add mapping
-          </button>
+        <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <p className="text-xs text-slate-600">
+            Bulk upload CSV/XLSX with columns: <span className="font-semibold">Product Name, Amazon SKU, Temu SKU ID, Lead Time</span>.
+          </p>
+          <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+            <FileDropzone
+              accept=".csv,.xlsx,.xls"
+              onFileSelect={(file) => void onBulkFileChange(file)}
+              disabled={bulkLoading}
+              label="Upload SKU Mapping file"
+              hint="CSV/XLSX"
+              selectedFileName={bulkFileName || undefined}
+            />
+            <div className="flex items-end">
+              <button
+                type="button"
+                onClick={() => void runBulkImport()}
+                disabled={bulkLoading || !bulkRows.length}
+                className="rounded-lg bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {bulkLoading ? "Importing..." : "Import Mappings"}
+              </button>
+            </div>
+          </div>
+          {bulkRows.length > 0 ? (
+            <div className="grid gap-2 md:grid-cols-4">
+              <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">Product Name Column</span>
+                <select
+                  value={productCol}
+                  onChange={(e) => setProductCol(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">Select column</option>
+                  {bulkHeaders.map((header) => (
+                    <option key={header} value={header}>
+                      {header}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">Amazon SKU Column</span>
+                <select
+                  value={amazonSkuCol}
+                  onChange={(e) => setAmazonSkuCol(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">Select column</option>
+                  {bulkHeaders.map((header) => (
+                    <option key={header} value={header}>
+                      {header}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">Temu SKU ID Column</span>
+                <select
+                  value={temuSkuCol}
+                  onChange={(e) => setTemuSkuCol(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">Select column</option>
+                  {bulkHeaders.map((header) => (
+                    <option key={header} value={header}>
+                      {header}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">Lead Time Column</span>
+                <select
+                  value={leadTimeCol}
+                  onChange={(e) => setLeadTimeCol(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">Select column</option>
+                  {bulkHeaders.map((header) => (
+                    <option key={header} value={header}>
+                      {header}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
