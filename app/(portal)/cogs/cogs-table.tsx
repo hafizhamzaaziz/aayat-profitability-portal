@@ -5,6 +5,7 @@ import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
 import { pushClientNotification } from "@/lib/notifications/client";
+import FileDropzone from "@/components/ui/file-dropzone";
 
 type CogsRow = {
   id: string;
@@ -451,15 +452,13 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           </div>
 
           <div className="grid gap-3 rounded-xl bg-slate-50 p-3 md:grid-cols-[1fr_220px_180px_auto]">
-            <input
-              type="file"
+            <FileDropzone
               accept=".csv,.xlsx,.xls,.xlsm,.xlxs"
-              onChange={(event) => {
-                void onImportFileChange(event.target.files?.[0] ?? null);
-                event.currentTarget.value = "";
-              }}
+              onFileSelect={(file) => void onImportFileChange(file)}
               disabled={importing}
-              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
+              label="Upload COGS file"
+              hint="CSV/XLS/XLSX"
+              selectedFileName={importFileName || undefined}
             />
             <label className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
               <input

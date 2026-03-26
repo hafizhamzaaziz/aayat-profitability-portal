@@ -46,6 +46,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notifications, setNotifications] = useState<NotificationRow[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -122,22 +123,49 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     router.refresh();
   };
 
+  useEffect(() => {
+    const saved = window.localStorage.getItem("portal-sidebar-collapsed");
+    setSidebarCollapsed(saved === "1");
+  }, []);
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      window.localStorage.setItem("portal-sidebar-collapsed", next ? "1" : "0");
+      return next;
+    });
+  };
+
   return (
     <div className="min-h-screen p-4 md:p-6">
-      <div className="mx-auto grid max-w-7xl gap-4 md:grid-cols-[260px_1fr]">
+      <div className={`mx-auto grid max-w-full gap-4 ${sidebarCollapsed ? "md:grid-cols-[92px_minmax(0,1fr)]" : "md:grid-cols-[260px_minmax(0,1fr)]"}`}>
         <aside className="md-card h-fit">
-          <div className="mb-6">
+          <div className={`mb-6 ${sidebarCollapsed ? "text-center" : ""}`}>
+            <div className={`mb-3 flex ${sidebarCollapsed ? "justify-center" : "justify-end"}`}>
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700"
+                aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              >
+                {sidebarCollapsed ? "»" : "«"}
+              </button>
+            </div>
             <Image
               src="/aayat-logo.png"
               alt="Aayat logo"
               width={160}
               height={160}
-              className="mb-3 h-auto w-28"
+              className={`mb-3 h-auto ${sidebarCollapsed ? "mx-auto w-10" : "w-28"}`}
               priority
             />
-            <p className="md-chip mb-2">Aayat.co</p>
-            <h1 className="text-xl font-semibold tracking-tight">Profitability Portal</h1>
-            <p className="mt-2 text-sm text-slate-600">Amazon & Temu insights</p>
+            {!sidebarCollapsed ? (
+              <>
+                <p className="md-chip mb-2">Aayat.co</p>
+                <h1 className="text-xl font-semibold tracking-tight">Profitability Portal</h1>
+                <p className="mt-2 text-sm text-slate-600">Amazon & Temu insights</p>
+              </>
+            ) : null}
           </div>
           <nav className="space-y-2">
             {visibleNavItems.map((item) => {
@@ -147,14 +175,17 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                   key={item.href}
                   href={withAccount(item.href)}
                   prefetch
-                  className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-medium transition ${
+                  className={`flex items-center rounded-2xl px-4 py-3 text-sm font-medium transition ${
+                    sidebarCollapsed ? "justify-center" : "gap-3"
+                  } ${
                     active
                       ? "bg-[var(--md-primary)] text-[var(--md-on-primary)]"
                       : "bg-white text-slate-700 hover:bg-[var(--md-primary-container)]"
                   }`}
+                  title={sidebarCollapsed ? item.label : undefined}
                 >
                   <span>{item.emoji}</span>
-                  <span>{item.label}</span>
+                  {!sidebarCollapsed ? <span>{item.label}</span> : null}
                 </Link>
               );
             })}
@@ -162,13 +193,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           <button
             type="button"
             onClick={onLogout}
-            className="mt-4 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            className={`mt-4 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 ${
+              sidebarCollapsed ? "px-2" : ""
+            }`}
           >
-            Logout
+            {sidebarCollapsed ? "↩" : "Logout"}
           </button>
         </aside>
 
-        <section className="space-y-4">
+        <section className="min-w-0 space-y-4">
           <header className="md-card flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="text-xs uppercase tracking-wide text-slate-500">Workspace</p>
@@ -217,7 +250,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </header>
 
-          <main className="md-card">{children}</main>
+          <main className="md-card max-w-full overflow-x-auto">{children}</main>
         </section>
       </div>
     </div>

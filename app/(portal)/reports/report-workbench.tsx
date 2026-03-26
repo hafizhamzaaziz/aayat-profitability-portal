@@ -6,6 +6,7 @@ import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
 import { pushClientNotification } from "@/lib/notifications/client";
 import { deriveReportWarnings, validateBreakdown, validatePeriodRange } from "@/lib/reports/guardrails";
+import FileDropzone from "@/components/ui/file-dropzone";
 
 type Platform = "amazon" | "temu";
 
@@ -921,12 +922,13 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
 
         <div>
           <label className="mb-1 block text-sm font-medium text-slate-700">Transaction File</label>
-          <input
-            type="file"
+          <FileDropzone
             accept=".csv,.xlsx"
-            onChange={(event) => onFileChange(event.target.files?.[0] ?? null)}
-            className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+            onFileSelect={(file) => void onFileChange(file)}
             disabled={!canProcess}
+            label="Upload transaction file"
+            hint="CSV or XLSX"
+            selectedFileName={fileName || undefined}
           />
         </div>
       </div>

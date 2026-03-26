@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import FileDropzone from "@/components/ui/file-dropzone";
 
 type Props = {
   account: {
@@ -114,11 +115,12 @@ export default function AccountSettingsForm({ account }: Props) {
 
       <div>
         <label className="mb-1 block text-sm font-medium text-slate-700">Account Logo</label>
-        <input
-          type="file"
+        <FileDropzone
           accept="image/*"
-          onChange={(event) => setLogoFile(event.target.files?.[0] ?? null)}
-          className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm"
+          onFileSelect={(file) => setLogoFile(file)}
+          label="Upload account logo"
+          hint="PNG, JPG, WEBP"
+          selectedFileName={logoFile?.name}
         />
         {previewLogo ? (
           <div className="mt-3 inline-flex rounded-2xl border border-slate-200 bg-white p-3">

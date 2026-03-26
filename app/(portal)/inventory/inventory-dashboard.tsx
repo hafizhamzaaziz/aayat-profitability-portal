@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
+import FileDropzone from "@/components/ui/file-dropzone";
 import {
   buildInventoryRows,
   type CogsRow,
@@ -813,15 +814,14 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               <button onClick={() => void saveMonthlySales()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
                 Save Month
               </button>
-              <input
-                type="file"
-                accept=".csv,.xlsx,.xls"
-                onChange={(e) => {
-                  void uploadMonthlySalesFile(e.target.files?.[0] ?? null);
-                  e.currentTarget.value = "";
-                }}
-                className="rounded-lg border border-slate-300 px-2 py-2 text-xs"
-              />
+              <div className="min-w-[220px]">
+                <FileDropzone
+                  accept=".csv,.xlsx,.xls"
+                  onFileSelect={(file) => void uploadMonthlySalesFile(file)}
+                  label="Upload monthly sales"
+                  hint="CSV/XLS/XLSX"
+                />
+              </div>
             </div>
             <div className="grid gap-2 md:grid-cols-2">
               {mappings.map((mapping) => {
