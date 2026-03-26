@@ -167,7 +167,8 @@ function resolveCogsVersion(cogsLookup: CogsLookup, sku: string, txDateIso: stri
       break;
     }
   }
-  return selected;
+  // If no version existed yet on transaction date, fallback to earliest known cost.
+  return selected || versions[0] || null;
 }
 
 function normalizeReportTransactions(input: {
@@ -283,7 +284,7 @@ function processTemu(
             summary.purchaseCost += cogs.unitCost * Math.abs(qty);
           }
         } else {
-          missingSkus.add(`${sku} (${txDateIso})`);
+          missingSkus.add(sku);
         }
       }
     }
@@ -461,7 +462,7 @@ function processAmazon(
             summary.purchaseCost += cogs.unitCost * qty;
           }
         } else {
-          missingSkus.add(`${sku} (${txDateIso})`);
+          missingSkus.add(sku);
         }
       }
     } else if (type === "refund" || type === "a-to-z guarantee claim") {

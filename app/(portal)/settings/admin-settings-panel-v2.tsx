@@ -240,7 +240,17 @@ export default function AdminSettingsPanelV2({ currentUserId }: { currentUserId:
                     <td className="px-3 py-2">{u.full_name}</td>
                     <td className="px-3 py-2 text-slate-600">{u.email}</td>
                     <td className="px-3 py-2">
-                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold capitalize text-slate-700">{u.role}</span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs font-semibold capitalize ${
+                          u.role === "admin"
+                            ? "bg-violet-100 text-violet-700"
+                            : u.role === "team"
+                              ? "bg-blue-100 text-blue-700"
+                              : "bg-emerald-100 text-emerald-700"
+                        }`}
+                      >
+                        {u.role}
+                      </span>
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex gap-2">

@@ -47,7 +47,7 @@ export default function AccountSwitcher() {
       const accountIds = Array.from(
         new Set((linkedAccounts || []).map((row) => String((row as { account_id?: string }).account_id || "")).filter(Boolean))
       );
-      const { data: direct } = await query.or(`assigned_team_id.eq.${user.id},assigned_team_id.is.null`);
+      const { data: direct } = await query.eq("assigned_team_id", user.id);
       const { data: byAccountMapping } =
         accountIds.length > 0
           ? await supabase.from("accounts").select("id, name").in("id", accountIds).order("name", { ascending: true })

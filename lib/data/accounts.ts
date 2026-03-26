@@ -92,7 +92,7 @@ export async function getAccountByIdForRole(
       .maybeSingle() as unknown as Promise<{ data: MinimalAccount | null; error: unknown }>);
 
     if (error || !data) return null;
-    if (data.assigned_team_id === userId || data.assigned_team_id === null) return data;
+    if (data.assigned_team_id === userId) return data;
     const { data: linkRow } = await supabase
       .from("account_team_members")
       .select("id")
