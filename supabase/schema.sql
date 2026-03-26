@@ -133,6 +133,19 @@ create table if not exists public.reports (
 );
 alter table public.reports add column if not exists breakdown jsonb;
 alter table public.reports add column if not exists cogs_snapshot jsonb;
+
+-- 4b) parsed row-level report transactions (raw jsonb)
+create table if not exists public.report_transactions (
+  id uuid primary key default gen_random_uuid(),
+  report_id uuid not null references public.reports(id) on delete cascade,
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  platform text not null check (platform in ('amazon', 'temu')),
+  transaction_date date,
+  sku text,
+  quantity numeric(14,4),
+  raw_row jsonb not null,
+  created_at timestamptz not null default now()
+);
 -- 5) expenses
 create table if not exists public.expenses (
   id uuid primary key default gen_random_uuid(),
@@ -316,6 +329,9 @@ create table if not exists public.shipment_plan_items (
 -- performance and query indexes
 create index if not exists reports_account_platform_period_idx on public.reports(account_id, platform, period_start, period_end);
 create index if not exists reports_account_period_idx on public.reports(account_id, period_start, period_end);
+create index if not exists report_transactions_report_idx on public.report_transactions(report_id);
+create index if not exists report_transactions_account_platform_date_idx on public.report_transactions(account_id, platform, transaction_date);
+create index if not exists report_transactions_sku_idx on public.report_transactions(account_id, sku);
 create index if not exists cogs_history_account_sku_effective_idx on public.cogs_history(account_id, sku, effective_from desc);
 create index if not exists sku_catalog_account_idx on public.sku_catalog(account_id, product_name);
 create index if not exists sku_mappings_account_catalog_idx on public.sku_mappings(account_id, sku_catalog_id);
@@ -416,6 +432,7 @@ alter table public.inventory_movements enable row level security;
 alter table public.shipment_plans enable row level security;
 alter table public.shipment_plan_items enable row level security;
 alter table public.reports enable row level security;
+alter table public.report_transactions enable row level security;
 alter table public.expenses enable row level security;
 alter table public.performance_metrics enable row level security;
 alter table public.audit_events enable row level security;
@@ -675,6 +692,22 @@ to authenticated
 using (public.current_user_role() in ('admin', 'team'))
 with check (public.current_user_role() in ('admin', 'team'));
 
+-- report_transactions policies
+drop policy if exists "report_transactions_select_authenticated" on public.report_transactions;
+create policy "report_transactions_select_authenticated"
+on public.report_transactions
+for select
+to authenticated
+using (true);
+
+drop policy if exists "report_transactions_modify_admin_team" on public.report_transactions;
+create policy "report_transactions_modify_admin_team"
+on public.report_transactions
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
 -- expenses policies
 drop policy if exists "expenses_select_authenticated" on public.expenses;
 create policy "expenses_select_authenticated"
@@ -830,6 +863,11 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_reports_changes') THEN
     CREATE TRIGGER audit_reports_changes
     AFTER INSERT OR UPDATE OR DELETE ON public.reports
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_report_transactions_changes') THEN
+    CREATE TRIGGER audit_report_transactions_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.report_transactions
     FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_expenses_changes') THEN

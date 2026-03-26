@@ -101,6 +101,12 @@ export async function POST(request: NextRequest) {
       throw profileError;
     }
 
+    // Team users must start with zero assigned accounts.
+    if (role === "team") {
+      await admin.from("account_team_members").delete().eq("team_id", authUser.user.id);
+      await admin.from("accounts").update({ assigned_team_id: null }).eq("assigned_team_id", authUser.user.id);
+    }
+
     await logAdminAudit({
       actorId: auth.userId,
       action: "insert",

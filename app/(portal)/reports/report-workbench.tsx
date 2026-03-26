@@ -65,6 +65,16 @@ type CogsSnapshotEntry = {
   effective_from: string;
 };
 
+type ReportTransactionPayload = {
+  account_id: string;
+  report_id: string;
+  platform: Platform;
+  transaction_date: string | null;
+  sku: string | null;
+  quantity: number | null;
+  raw_row: RowData;
+};
+
 type Props = {
   account: {
     id: string;
@@ -158,6 +168,33 @@ function resolveCogsVersion(cogsLookup: CogsLookup, sku: string, txDateIso: stri
     }
   }
   return selected;
+}
+
+function normalizeReportTransactions(input: {
+  rows: RowData[];
+  skuCol: string;
+  qtyCol: string;
+  periodStartIso: string;
+  reportId: string;
+  accountId: string;
+  platform: Platform;
+}) {
+  return input.rows.map((row) => {
+    const sku = String(row[input.skuCol] ?? "")
+      .trim()
+      .toUpperCase();
+    const qty = parseMoney(row[input.qtyCol]);
+    const txDate = extractTransactionDate(row, input.periodStartIso);
+    return {
+      account_id: input.accountId,
+      report_id: input.reportId,
+      platform: input.platform,
+      transaction_date: txDate || null,
+      sku: sku || null,
+      quantity: Number.isFinite(qty) ? qty : null,
+      raw_row: row,
+    } as ReportTransactionPayload;
+  });
 }
 
 function computeExpenses(expenses: ExpenseRow[], vatRatePct: number) {
@@ -782,6 +819,28 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       }
 
       const reportId = reportRow.id as string;
+
+      // Persist parsed row-level transactions for future inventory forecasting.
+      const normalizedTransactions = normalizeReportTransactions({
+        rows,
+        skuCol,
+        qtyCol,
+        periodStartIso: periodStart,
+        reportId,
+        accountId: account.id,
+        platform,
+      });
+      const { error: clearTransactionsError } = await supabase
+        .from("report_transactions")
+        .delete()
+        .eq("report_id", reportId);
+      if (clearTransactionsError) throw clearTransactionsError;
+      const CHUNK_SIZE = 400;
+      for (let i = 0; i < normalizedTransactions.length; i += CHUNK_SIZE) {
+        const chunk = normalizedTransactions.slice(i, i + CHUNK_SIZE);
+        const { error: txInsertError } = await supabase.from("report_transactions").insert(chunk);
+        if (txInsertError) throw txInsertError;
+      }
 
       const { error: clearError } = await supabase.from("expenses").delete().eq("report_id", reportId);
       if (clearError) throw clearError;

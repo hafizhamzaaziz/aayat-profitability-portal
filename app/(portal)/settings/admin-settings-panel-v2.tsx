@@ -221,7 +221,45 @@ export default function AdminSettingsPanelV2({ currentUserId }: { currentUserId:
 
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between"><h4 className="text-lg font-semibold">Users Management</h4><button onClick={openCreateUser} className="rounded-lg bg-[var(--md-primary)] px-3 py-1.5 text-sm font-semibold text-white">Create</button></div>
-        {loading ? <p className="text-sm text-slate-500">Loading users...</p> : <div className="space-y-2">{users.map((u) => <div key={u.id} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm"><span>{u.full_name}</span><div className="flex gap-2"><button onClick={() => openEditUser(u)} className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold">Edit</button><button disabled={u.id === currentUserId} onClick={() => void deleteUser(u.id)} className="rounded-lg bg-red-50 px-3 py-1 text-xs font-semibold text-red-700 disabled:opacity-50">{u.id === currentUserId ? "Current admin" : "Delete"}</button></div></div>)}</div>}
+        {loading ? (
+          <p className="text-sm text-slate-500">Loading users...</p>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Name</th>
+                  <th className="px-3 py-2">Email</th>
+                  <th className="px-3 py-2">Role</th>
+                  <th className="px-3 py-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.map((u) => (
+                  <tr key={u.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2">{u.full_name}</td>
+                    <td className="px-3 py-2 text-slate-600">{u.email}</td>
+                    <td className="px-3 py-2">
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold capitalize text-slate-700">{u.role}</span>
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex gap-2">
+                        <button onClick={() => openEditUser(u)} className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold">Edit</button>
+                        <button
+                          disabled={u.id === currentUserId}
+                          onClick={() => void deleteUser(u.id)}
+                          className="rounded-lg bg-red-50 px-3 py-1 text-xs font-semibold text-red-700 disabled:opacity-50"
+                        >
+                          {u.id === currentUserId ? "Current admin" : "Delete"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       {(createAccountOpen || editAccountId) ? (

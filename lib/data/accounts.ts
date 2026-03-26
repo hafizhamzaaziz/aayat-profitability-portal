@@ -38,7 +38,7 @@ export async function getAccountsForRole(
     const { data: directData, error: directError } = await (supabase
       .from("accounts")
       .select("id, name, currency, vat_rate, assigned_team_id, assigned_client_id, logo_url")
-      .or(`assigned_team_id.eq.${userId},assigned_team_id.is.null`)
+      .eq("assigned_team_id", userId)
       .order("name", { ascending: true }) as unknown as Promise<{ data: MinimalAccount[]; error: unknown }>);
 
     if (directError) return [];
