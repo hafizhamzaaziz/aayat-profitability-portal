@@ -28,6 +28,9 @@ type PlanRowOverride = {
   plannedBoxes: number;
 };
 
+type InventoryTab = "overview" | "stock-intake" | "shipment-planning";
+type IntakeAction = "supplier_inbound" | "seller_returns" | "b2b_wholesale" | "amazon_transfer";
+
 const DEFAULTS: InventoryDefaults = {
   leadTimeDays: 90,
   amazonCoverDays: 30,
@@ -46,6 +49,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [activeTab, setActiveTab] = useState<InventoryTab>("overview");
 
   const [mappings, setMappings] = useState<SkuRef[]>([]);
   const [cogs, setCogs] = useState<CogsRow[]>([]);
@@ -62,6 +66,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
 
   const [intake, setIntake] = useState({
     mappingId: "",
+    actionType: "supplier_inbound" as IntakeAction,
     destination: "warehouse" as "warehouse" | "amazon",
     units: "",
     boxes: "",
@@ -510,15 +515,55 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       data: { user },
     } = await supabase.auth.getUser();
 
+    let movementType: "inbound" | "outbound" | "adjustment" | "amazon_transfer" = "inbound";
+    let amazonDelta = 0;
+    let warehouseDelta = 0;
+    if (intake.actionType === "supplier_inbound") {
+      movementType = "inbound";
+      if (intake.destination === "amazon") amazonDelta = units;
+      else warehouseDelta = units;
+    } else if (intake.actionType === "seller_returns") {
+      movementType = "adjustment";
+      warehouseDelta = units;
+    } else if (intake.actionType === "b2b_wholesale") {
+      movementType = "outbound";
+      warehouseDelta = -units;
+    } else {
+      movementType = "amazon_transfer";
+      warehouseDelta = -units;
+      amazonDelta = units;
+    }
+
+    const latest = levels
+      .filter((row) => row.mappingId === intake.mappingId)
+      .sort((a, b) => (a.levelDate < b.levelDate ? 1 : -1))[0];
+    const nextAmazonUnits = Number(latest?.amazonUnits || 0) + amazonDelta;
+    const nextWarehouseUnits = Number(latest?.warehouseUnits || 0) + warehouseDelta;
+    if (nextAmazonUnits < 0 || nextWarehouseUnits < 0) {
+      setError("Stock action would result in negative inventory. Check quantities.");
+      return;
+    }
+
+    const notePrefix =
+      intake.actionType === "supplier_inbound"
+        ? intake.destination === "amazon"
+          ? "Supplier inbound to Amazon"
+          : "Supplier inbound to warehouse"
+        : intake.actionType === "seller_returns"
+          ? "Seller returns to warehouse"
+          : intake.actionType === "b2b_wholesale"
+            ? "B2B/wholesale deduction"
+            : "Warehouse to Amazon transfer";
+
     const { error: movementError } = await supabase.from("inventory_movements").insert({
       account_id: accountId,
       sku_mapping_id: intake.mappingId,
       movement_date: intake.movementDate,
-      movement_type: "inbound",
-      units_delta: units,
+      movement_type: movementType,
+      units_delta: warehouseDelta !== 0 ? warehouseDelta : amazonDelta,
       boxes: intake.boxes ? Number(intake.boxes) : null,
       pack_profile_id: intake.profileId || null,
-      notes: intake.notes.trim() || null,
+      notes: `${notePrefix}${intake.notes.trim() ? ` - ${intake.notes.trim()}` : ""}`,
       created_by: user?.id || null,
     });
     if (movementError) {
@@ -526,18 +571,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       return;
     }
 
-    const latest = levels
-      .filter((row) => row.mappingId === intake.mappingId)
-      .sort((a, b) => (a.levelDate < b.levelDate ? 1 : -1))[0];
-    const amazonUnits = Number(latest?.amazonUnits || 0) + (intake.destination === "amazon" ? units : 0);
-    const warehouseUnits = Number(latest?.warehouseUnits || 0) + (intake.destination === "warehouse" ? units : 0);
     const { error: levelError } = await supabase.from("inventory_levels").upsert(
       {
         account_id: accountId,
         sku_mapping_id: intake.mappingId,
         level_date: intake.movementDate,
-        amazon_units: amazonUnits,
-        warehouse_units: warehouseUnits,
+        amazon_units: nextAmazonUnits,
+        warehouse_units: nextWarehouseUnits,
       },
       { onConflict: "account_id,sku_mapping_id,level_date" }
     );
@@ -548,6 +588,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     setMessage("Stock intake recorded.");
     setIntake({
       mappingId: "",
+      actionType: "supplier_inbound",
       destination: "warehouse",
       units: "",
       boxes: "",
@@ -557,6 +598,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
     await loadAll();
   };
+
+  const intakeEstimate = useMemo(() => {
+    const profile = packProfiles.find((p) => p.id === intake.profileId);
+    if (!profile) return null;
+    const units = Math.max(0, Number(intake.units || 0));
+    return palletEstimate(profile, units);
+  }, [packProfiles, intake.profileId, intake.units]);
 
   const selectedTotalPallets = useMemo(() => {
     return selectedRows.reduce((acc, row) => {
@@ -720,17 +768,56 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         </div>
       </section>
 
-      <section className="space-y-2 rounded-2xl border border-slate-200 bg-white p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold text-slate-800">Inventory Overview</h3>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search SKU or product"
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-72"
-          />
+      <section className="rounded-2xl border border-slate-200 bg-white p-2">
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab("overview")}
+            className={`rounded-xl px-3 py-2 text-sm font-semibold ${activeTab === "overview" ? "bg-[var(--md-primary)] text-white" : "bg-slate-100 text-slate-700"}`}
+          >
+            Overview & Velocity
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("stock-intake")}
+            className={`rounded-xl px-3 py-2 text-sm font-semibold ${activeTab === "stock-intake" ? "bg-[var(--md-primary)] text-white" : "bg-slate-100 text-slate-700"}`}
+          >
+            Stock Intake & Pallet Calculator
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("shipment-planning")}
+            className={`rounded-xl px-3 py-2 text-sm font-semibold ${activeTab === "shipment-planning" ? "bg-[var(--md-primary)] text-white" : "bg-slate-100 text-slate-700"}`}
+          >
+            Shipment Planning
+          </button>
         </div>
-        <div className="overflow-x-auto rounded-xl border border-slate-200">
+      </section>
+
+      {activeTab === "overview" ? (
+        <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-slate-800">Overview & Velocity</h3>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search SKU or product"
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-72"
+            />
+          </div>
+          {canEdit ? (
+            <div className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">Stock Date</span>
+                <input type="date" value={stockDate} onChange={(e) => setStockDate(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
+              </label>
+              <button onClick={() => void saveStockSnapshot()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
+                Save Stock Updates
+              </button>
+              <p className="text-xs text-slate-500">3PL stock auto-updates based on intake, transfers, and deductions.</p>
+            </div>
+          ) : null}
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
           <table className="min-w-full text-xs">
             <thead className="bg-slate-50 text-left uppercase tracking-wide text-slate-500">
               <tr>
@@ -740,12 +827,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                 <th className="px-2 py-2">Temu SKU ID</th>
                 <th className="px-2 py-2">Prev Mo Amazon</th>
                 <th className="px-2 py-2">Prev Mo Temu</th>
+                <th className="px-2 py-2">Prev Mo Combined</th>
                 <th className="px-2 py-2">YTD Units</th>
                 <th className="px-2 py-2">Avg/Mo</th>
                 <th className="px-2 py-2">Amazon Stock</th>
-                <th className="px-2 py-2">Warehouse Stock</th>
+                <th className="px-2 py-2">3PL Stock</th>
                 <th className="px-2 py-2">Amazon Days Left</th>
-                <th className="px-2 py-2">Warehouse Days Left</th>
+                <th className="px-2 py-2">3PL Days Left</th>
                 <th className="px-2 py-2">Stock Value</th>
                 <th className="px-2 py-2">Potential Sales</th>
                 <th className="px-2 py-2">Potential Profit</th>
@@ -754,7 +842,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             <tbody>
               {visibleRows.length === 0 ? (
                 <tr>
-                  <td className="px-2 py-3 text-slate-500" colSpan={15}>
+                  <td className="px-2 py-3 text-slate-500" colSpan={16}>
                     No SKU mappings found yet. Create mappings in COGS first.
                   </td>
                 </tr>
@@ -777,10 +865,49 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     <td className="px-2 py-2">{row.temuSkuId || "-"}</td>
                     <td className="px-2 py-2">{row.prevMonthAmazonUnits}</td>
                     <td className="px-2 py-2">{row.prevMonthTemuUnits}</td>
+                    <td className="px-2 py-2">{row.prevMonthAmazonUnits + row.prevMonthTemuUnits}</td>
                     <td className="px-2 py-2">{row.yearTotalUnits}</td>
                     <td className="px-2 py-2">{row.yearAvgPerMonth}</td>
-                    <td className="px-2 py-2">{row.amazonUnitsOnHand}</td>
-                    <td className="px-2 py-2">{row.warehouseUnitsOnHand}</td>
+                    <td className="px-2 py-2">
+                      {canEdit ? (
+                        <input
+                          type="number"
+                          value={stockDraft[row.mappingId]?.amazonUnits ?? row.amazonUnitsOnHand}
+                          onChange={(e) =>
+                            setStockDraft((prev) => ({
+                              ...prev,
+                              [row.mappingId]: {
+                                amazonUnits: Number(e.target.value || 0),
+                                warehouseUnits: prev[row.mappingId]?.warehouseUnits ?? row.warehouseUnitsOnHand,
+                              },
+                            }))
+                          }
+                          className="w-20 rounded-lg border border-slate-300 px-2 py-1"
+                        />
+                      ) : (
+                        row.amazonUnitsOnHand
+                      )}
+                    </td>
+                    <td className="px-2 py-2">
+                      {canEdit ? (
+                        <input
+                          type="number"
+                          value={stockDraft[row.mappingId]?.warehouseUnits ?? row.warehouseUnitsOnHand}
+                          onChange={(e) =>
+                            setStockDraft((prev) => ({
+                              ...prev,
+                              [row.mappingId]: {
+                                amazonUnits: prev[row.mappingId]?.amazonUnits ?? row.amazonUnitsOnHand,
+                                warehouseUnits: Number(e.target.value || 0),
+                              },
+                            }))
+                          }
+                          className="w-20 rounded-lg border border-slate-300 px-2 py-1"
+                        />
+                      ) : (
+                        row.warehouseUnitsOnHand
+                      )}
+                    </td>
                     <td className="px-2 py-2">{row.amazonDaysLeft == null ? "-" : row.amazonDaysLeft}</td>
                     <td className="px-2 py-2">{row.warehouseDaysLeft == null ? "-" : row.warehouseDaysLeft}</td>
                     <td className="px-2 py-2">
@@ -795,117 +922,72 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             </tbody>
           </table>
         </div>
-      </section>
-
-      {canEdit ? (
-        <>
-          <section className="space-y-2 rounded-2xl border border-slate-200 bg-white p-4">
-            <h3 className="text-sm font-semibold text-slate-800">Monthly Units Sold (Start-Now)</h3>
-            <div className="flex flex-wrap items-end gap-2">
-              <label className="text-xs text-slate-600">
-                <span className="mb-1 block uppercase tracking-wide text-slate-500">Month</span>
-                <input
-                  type="month"
-                  value={salesMonthInput}
-                  onChange={(e) => setSalesMonthInput(e.target.value)}
-                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
-                />
-              </label>
-              <button onClick={() => void saveMonthlySales()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
-                Save Month
-              </button>
-              <div className="min-w-[220px]">
-                <FileDropzone
-                  accept=".csv,.xlsx,.xls"
-                  onFileSelect={(file) => void uploadMonthlySalesFile(file)}
-                  label="Upload monthly sales"
-                  hint="CSV/XLS/XLSX"
-                />
+          {canEdit ? (
+            <section className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <h4 className="text-sm font-semibold text-slate-800">Monthly Units Sold (Start-Now)</h4>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="text-xs text-slate-600">
+                  <span className="mb-1 block uppercase tracking-wide text-slate-500">Month</span>
+                  <input
+                    type="month"
+                    value={salesMonthInput}
+                    onChange={(e) => setSalesMonthInput(e.target.value)}
+                    className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                  />
+                </label>
+                <button onClick={() => void saveMonthlySales()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
+                  Save Month
+                </button>
+                <div className="min-w-[220px]">
+                  <FileDropzone
+                    accept=".csv,.xlsx,.xls"
+                    onFileSelect={(file) => void uploadMonthlySalesFile(file)}
+                    label="Upload monthly sales"
+                    hint="CSV/XLS/XLSX"
+                  />
+                </div>
               </div>
-            </div>
-            <div className="grid gap-2 md:grid-cols-2">
-              {mappings.map((mapping) => {
-                const value = salesDraft[mapping.mappingId] || { amazonUnits: 0, temuUnits: 0 };
-                return (
-                  <div key={mapping.mappingId} className="grid gap-2 rounded-xl border border-slate-200 p-2 md:grid-cols-[1fr_130px_130px]">
-                    <p className="text-xs font-semibold text-slate-700">{mapping.productName}</p>
-                    <input
-                      type="number"
-                      value={value.amazonUnits}
-                      onChange={(e) =>
-                        setSalesDraft((prev) => ({
-                          ...prev,
-                          [mapping.mappingId]: { ...value, amazonUnits: Number(e.target.value || 0) },
-                        }))
-                      }
-                      className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
-                      placeholder="Amazon units"
-                    />
-                    <input
-                      type="number"
-                      value={value.temuUnits}
-                      onChange={(e) =>
-                        setSalesDraft((prev) => ({
-                          ...prev,
-                          [mapping.mappingId]: { ...value, temuUnits: Number(e.target.value || 0) },
-                        }))
-                      }
-                      className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
-                      placeholder="Temu units"
-                    />
-                  </div>
-                );
-              })}
-            </div>
-          </section>
+              <div className="grid gap-2 md:grid-cols-2">
+                {mappings.map((mapping) => {
+                  const value = salesDraft[mapping.mappingId] || { amazonUnits: 0, temuUnits: 0 };
+                  return (
+                    <div key={mapping.mappingId} className="grid gap-2 rounded-xl border border-slate-200 bg-white p-2 md:grid-cols-[1fr_130px_130px]">
+                      <p className="text-xs font-semibold text-slate-700">{mapping.productName}</p>
+                      <input
+                        type="number"
+                        value={value.amazonUnits}
+                        onChange={(e) =>
+                          setSalesDraft((prev) => ({
+                            ...prev,
+                            [mapping.mappingId]: { ...value, amazonUnits: Number(e.target.value || 0) },
+                          }))
+                        }
+                        className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                        placeholder="Amazon units"
+                      />
+                      <input
+                        type="number"
+                        value={value.temuUnits}
+                        onChange={(e) =>
+                          setSalesDraft((prev) => ({
+                            ...prev,
+                            [mapping.mappingId]: { ...value, temuUnits: Number(e.target.value || 0) },
+                          }))
+                        }
+                        className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                        placeholder="Temu units"
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          ) : null}
+        </section>
+      ) : null}
 
-          <section className="space-y-2 rounded-2xl border border-slate-200 bg-white p-4">
-            <h3 className="text-sm font-semibold text-slate-800">Stock Snapshot (Amazon + Warehouse)</h3>
-            <div className="flex items-end gap-2">
-              <label className="text-xs text-slate-600">
-                <span className="mb-1 block uppercase tracking-wide text-slate-500">Snapshot Date</span>
-                <input type="date" value={stockDate} onChange={(e) => setStockDate(e.target.value)} className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
-              </label>
-              <button onClick={() => void saveStockSnapshot()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
-                Save Snapshot
-              </button>
-            </div>
-            <div className="grid gap-2 md:grid-cols-2">
-              {mappings.map((mapping) => {
-                const value = stockDraft[mapping.mappingId] || { amazonUnits: 0, warehouseUnits: 0 };
-                return (
-                  <div key={mapping.mappingId} className="grid gap-2 rounded-xl border border-slate-200 p-2 md:grid-cols-[1fr_130px_130px]">
-                    <p className="text-xs font-semibold text-slate-700">{mapping.productName}</p>
-                    <input
-                      type="number"
-                      value={value.amazonUnits}
-                      onChange={(e) =>
-                        setStockDraft((prev) => ({
-                          ...prev,
-                          [mapping.mappingId]: { ...value, amazonUnits: Number(e.target.value || 0) },
-                        }))
-                      }
-                      className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
-                      placeholder="Amazon units"
-                    />
-                    <input
-                      type="number"
-                      value={value.warehouseUnits}
-                      onChange={(e) =>
-                        setStockDraft((prev) => ({
-                          ...prev,
-                          [mapping.mappingId]: { ...value, warehouseUnits: Number(e.target.value || 0) },
-                        }))
-                      }
-                      className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
-                      placeholder="Warehouse units"
-                    />
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
+      {activeTab === "stock-intake" && canEdit ? (
+        <>
           <section className="space-y-2 rounded-2xl border border-slate-200 bg-white p-4">
             <h3 className="text-sm font-semibold text-slate-800">Pack Profiles + Stock Intake</h3>
             <div className="grid gap-2 md:grid-cols-8">
@@ -924,7 +1006,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               </button>
             </div>
 
-            <div className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-[1fr_140px_130px_130px_1fr_140px_auto]">
+            <div className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-[1fr_160px_120px_120px_1fr_140px_auto]">
               <select value={intake.mappingId} onChange={(e) => setIntake((prev) => ({ ...prev, mappingId: e.target.value }))} className="rounded-lg border border-slate-300 px-2 py-2 text-sm">
                 <option value="">Select SKU</option>
                 {mappings.map((m) => (
@@ -933,10 +1015,30 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   </option>
                 ))}
               </select>
-              <select value={intake.destination} onChange={(e) => setIntake((prev) => ({ ...prev, destination: e.target.value as "warehouse" | "amazon" }))} className="rounded-lg border border-slate-300 px-2 py-2 text-sm">
-                <option value="warehouse">To warehouse</option>
-                <option value="amazon">To Amazon</option>
+              <select
+                value={intake.actionType}
+                onChange={(e) => setIntake((prev) => ({ ...prev, actionType: e.target.value as IntakeAction }))}
+                className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+              >
+                <option value="supplier_inbound">Supplier inbound</option>
+                <option value="seller_returns">Seller returns</option>
+                <option value="b2b_wholesale">B2B/Wholesale deduction</option>
+                <option value="amazon_transfer">Transfer warehouse to Amazon</option>
               </select>
+              {intake.actionType === "supplier_inbound" ? (
+                <select value={intake.destination} onChange={(e) => setIntake((prev) => ({ ...prev, destination: e.target.value as "warehouse" | "amazon" }))} className="rounded-lg border border-slate-300 px-2 py-2 text-sm">
+                  <option value="warehouse">To warehouse</option>
+                  <option value="amazon">To Amazon</option>
+                </select>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs text-slate-500">
+                  {intake.actionType === "seller_returns"
+                    ? "Destination: 3PL warehouse"
+                    : intake.actionType === "b2b_wholesale"
+                      ? "Source: 3PL warehouse"
+                      : "From 3PL to Amazon"}
+                </div>
+              )}
               <input type="number" value={intake.units} onChange={(e) => setIntake((prev) => ({ ...prev, units: e.target.value }))} placeholder="Units" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
               <input type="number" value={intake.boxes} onChange={(e) => setIntake((prev) => ({ ...prev, boxes: e.target.value }))} placeholder="Boxes" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
               <select value={intake.profileId} onChange={(e) => setIntake((prev) => ({ ...prev, profileId: e.target.value }))} className="rounded-lg border border-slate-300 px-2 py-2 text-sm">
@@ -949,20 +1051,42 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               </select>
               <input type="date" value={intake.movementDate} onChange={(e) => setIntake((prev) => ({ ...prev, movementDate: e.target.value }))} className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
               <button onClick={() => void recordStockIntake()} className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white">
-                Add stock
+                Apply action
               </button>
             </div>
+            {intakeEstimate ? (
+              <p className="text-xs text-slate-600">
+                Pallet estimate: <span className="font-semibold">{intakeEstimate.plannedBoxes}</span> boxes,{" "}
+                <span className="font-semibold">{intakeEstimate.boxesPerPallet}</span> boxes/pallet,{" "}
+                <span className="font-semibold">{intakeEstimate.pallets.toFixed(2)}</span> pallets.
+              </p>
+            ) : (
+              <p className="text-xs text-slate-500">Select a box profile to view pallet estimate on a 1000x1200mm pallet (max total height 1800mm).</p>
+            )}
           </section>
         </>
       ) : null}
 
+      {activeTab === "shipment-planning" ? (
       <section className="space-y-2 rounded-2xl border border-slate-200 bg-white p-4">
         <h3 className="text-sm font-semibold text-slate-800">Shipment Planning (Multi-SKU)</h3>
-        <div className="grid gap-2 md:grid-cols-[200px_1fr_1fr_auto]">
-          <select value={planType} onChange={(e) => setPlanType(e.target.value as "amazon_requirement" | "warehouse_requirement")} className="rounded-lg border border-slate-300 px-2 py-2 text-sm">
-            <option value="amazon_requirement">Amazon stock requirement</option>
-            <option value="warehouse_requirement">Warehouse stock requirement</option>
-          </select>
+        <div className="grid gap-2 md:grid-cols-[1fr_1fr_1fr_auto]">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPlanType("amazon_requirement")}
+              className={`rounded-lg px-3 py-2 text-sm font-semibold ${planType === "amazon_requirement" ? "bg-[var(--md-primary)] text-white" : "bg-slate-100 text-slate-700"}`}
+            >
+              Send to Amazon
+            </button>
+            <button
+              type="button"
+              onClick={() => setPlanType("warehouse_requirement")}
+              className={`rounded-lg px-3 py-2 text-sm font-semibold ${planType === "warehouse_requirement" ? "bg-[var(--md-primary)] text-white" : "bg-slate-100 text-slate-700"}`}
+            >
+              Order from Supplier
+            </button>
+          </div>
           <input value={planTitle} onChange={(e) => setPlanTitle(e.target.value)} placeholder="Plan title" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
           <input value={planNotes} onChange={(e) => setPlanNotes(e.target.value)} placeholder="Notes" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
           {canEdit ? (
@@ -1104,6 +1228,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           ) : null}
         </div>
       </section>
+      ) : null}
 
       {!canEdit ? (
         <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm text-slate-700">
