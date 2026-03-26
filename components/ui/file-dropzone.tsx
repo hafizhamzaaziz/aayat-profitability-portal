@@ -38,7 +38,7 @@ export default function FileDropzone({
     inputRef.current?.click();
   };
 
-  const onDrop = (event: React.DragEvent<HTMLDivElement>) => {
+  const onDrop = (event: React.DragEvent<HTMLElement>) => {
     event.preventDefault();
     event.stopPropagation();
     setDragActive(false);
