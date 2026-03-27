@@ -26,11 +26,11 @@ export default async function SettingsPage({
         </p>
       ) : null}
       {!accountId ? (
-        <p className="text-slate-600">Select an account from the topbar context switcher to edit logo, currency, and VAT.</p>
+        <p className="text-slate-600">Select an account from the topbar context switcher to edit logo, currency, VAT, and inventory defaults.</p>
       ) : null}
       {account ? (
         <>
-          <p className="text-slate-600">Update account currency/VAT and upload or replace the account logo.</p>
+          <p className="text-slate-600">Update account currency/VAT, inventory planning defaults, and upload or replace the account logo.</p>
           <AccountSettingsForm account={account} />
         </>
       ) : null}

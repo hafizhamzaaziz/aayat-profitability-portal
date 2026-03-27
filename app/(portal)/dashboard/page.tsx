@@ -113,11 +113,13 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
   return (
     <div className="space-y-4">
       <div className="rounded-2xl bg-white p-4 text-sm text-slate-700">
-        Signed in as: <span className="font-semibold">{user.email}</span>
-      </div>
-
-      <div className="rounded-2xl bg-white p-4 text-sm text-slate-700">
-        Selected account: <span className="font-semibold">{account?.name ?? "None selected"}</span>
+        <span>
+          Signed in as: <span className="font-semibold">{user.email}</span>
+        </span>
+        <span className="mx-2 text-slate-400">|</span>
+        <span>
+          Selected account: <span className="font-semibold">{account?.name ?? "None selected"}</span>
+        </span>
       </div>
 
       <DashboardFilters />

@@ -27,6 +27,7 @@ type PlanRowOverride = {
 
 type InventoryTab = "overview" | "stock-intake" | "shipment-planning";
 type IntakeAction = "supplier_inbound" | "seller_returns" | "b2b_wholesale" | "amazon_transfer";
+type InventorySort = "product_asc" | "product_desc" | "month_units_desc" | "stock_value_desc" | "days_left_asc";
 
 const DEFAULTS: InventoryDefaults = {
   leadTimeDays: 90,
@@ -40,15 +41,28 @@ function monthStartFromDateIso(input: string) {
   return `${input.slice(0, 7)}-01`;
 }
 
-function previousMonthStartIso(nowIso: string) {
-  const [yearText, monthText] = nowIso.slice(0, 7).split("-");
-  let year = Number(yearText);
-  let month = Number(monthText) - 1;
-  if (month <= 0) {
-    month = 12;
-    year -= 1;
+function shortenName(input: string, max = 28) {
+  const value = String(input || "").trim();
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 3)}...`;
+}
+
+function pickProductNameFromRawRow(platform: string, rawRow: Record<string, unknown> | null): string | null {
+  if (!rawRow) return null;
+  const keys = Object.keys(rawRow);
+  const find = (terms: string[]) =>
+    keys.find((key) => {
+      const normalized = key.trim().toLowerCase();
+      return terms.some((term) => normalized.includes(term));
+    });
+  if (platform.startsWith("amazon")) {
+    const key = find(["description", "product name", "item name", "title"]);
+    const value = key ? String(rawRow[key] ?? "").trim() : "";
+    return value || null;
   }
-  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
+  const key = find(["sku", "product", "title", "item"]);
+  const value = key ? String(rawRow[key] ?? "").trim() : "";
+  return value || null;
 }
 
 async function ensureAmazonOnlyMappingsFromData(input: {
@@ -141,12 +155,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   const [search, setSearch] = useState("");
   const [activeTab, setActiveTab] = useState<InventoryTab>("overview");
   const [plannerSearch, setPlannerSearch] = useState("");
+  const [monthFilter, setMonthFilter] = useState("");
+  const [sortBy, setSortBy] = useState<InventorySort>("product_asc");
 
   const [mappings, setMappings] = useState<SkuRef[]>([]);
   const [cogs, setCogs] = useState<CogsRow[]>([]);
   const [salesRows, setSalesRows] = useState<MonthlySalesRow[]>([]);
   const [levels, setLevels] = useState<InventoryLevelRow[]>([]);
   const [packProfiles, setPackProfiles] = useState<PackProfile[]>([]);
+  const [profileIdsByMapping, setProfileIdsByMapping] = useState<Record<string, string[]>>({});
   const [defaults, setDefaults] = useState<InventoryDefaults>(DEFAULTS);
 
   const [stockDate, setStockDate] = useState(todayIsoUtc());
@@ -189,12 +206,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     setError(null);
     const supabase = createClient();
 
-    const nowIsoForQuery = todayIsoUtc();
-    const currentYearStart = `${nowIsoForQuery.slice(0, 4)}-01-01`;
-    const previousMonthStart = previousMonthStartIso(nowIsoForQuery);
-    const transactionsFrom = previousMonthStart < currentYearStart ? previousMonthStart : currentYearStart;
-
-    const [mappingRes, defaultsRes, reportTxRes, levelRes, cogsRes, profilesRes] = await Promise.all([
+    const [mappingRes, defaultsRes, reportTxRes, levelRes, cogsRes, profilesRes, movementLinksRes] = await Promise.all([
       supabase
         .from("sku_mappings")
         .select("id, amazon_sku, temu_sku_id, lead_time_days, sku_catalog:sku_catalog_id(product_name)")
@@ -203,10 +215,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       supabase.from("inventory_defaults").select("*").eq("account_id", accountId).maybeSingle(),
       supabase
         .from("report_transactions")
-        .select("platform, transaction_date, sku, quantity")
-        .eq("account_id", accountId)
-        .gte("transaction_date", transactionsFrom)
-        .lte("transaction_date", nowIsoForQuery),
+        .select("platform, transaction_date, sku, quantity, raw_row")
+        .eq("account_id", accountId),
       supabase
         .from("inventory_levels")
         .select("sku_mapping_id, level_date, amazon_units, warehouse_units")
@@ -217,6 +227,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         .select("id, profile_name, units_per_box, box_length, box_width, box_height, dimension_unit, box_weight, weight_unit")
         .eq("account_id", accountId)
         .order("created_at", { ascending: false }),
+      supabase
+        .from("inventory_movements")
+        .select("sku_mapping_id, pack_profile_id")
+        .eq("account_id", accountId)
+        .not("pack_profile_id", "is", null),
     ]);
 
     if (mappingRes.error) {
@@ -261,6 +276,31 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       setLoading(false);
       return;
     }
+    if (movementLinksRes.error) {
+      setError(movementLinksRes.error.message);
+      setLoading(false);
+      return;
+    }
+
+    const amazonNameBySku = new Map<string, string>();
+    const temuNameBySku = new Map<string, string>();
+    (reportTxRes.data || []).forEach((row) => {
+      const rec = row as unknown as {
+        platform: string | null;
+        sku: string | null;
+        raw_row: Record<string, unknown> | null;
+      };
+      const sku = String(rec.sku || "").trim().toUpperCase();
+      const platform = String(rec.platform || "").trim().toLowerCase();
+      if (!sku) return;
+      const maybeName = pickProductNameFromRawRow(platform, rec.raw_row);
+      if (!maybeName) return;
+      if (platform.startsWith("amazon")) {
+        if (!amazonNameBySku.has(sku)) amazonNameBySku.set(sku, maybeName);
+      } else if (platform.startsWith("temu")) {
+        if (!temuNameBySku.has(sku)) temuNameBySku.set(sku, maybeName);
+      }
+    });
 
     const nextMappings: SkuRef[] = (mappingRes.data || []).map((row) => {
       const rec = row as unknown as {
@@ -272,7 +312,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       };
       return {
         mappingId: rec.id,
-        productName: rec.sku_catalog?.product_name || "Unnamed product",
+        productName:
+          (rec.amazon_sku ? amazonNameBySku.get(String(rec.amazon_sku).trim().toUpperCase()) : null) ||
+          (rec.temu_sku_id ? temuNameBySku.get(String(rec.temu_sku_id).trim().toUpperCase()) : null) ||
+          rec.sku_catalog?.product_name ||
+          "Unnamed product",
         amazonSku: rec.amazon_sku,
         temuSkuId: rec.temu_sku_id,
         leadTimeDays: rec.lead_time_days,
@@ -400,6 +444,16 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       })
     );
 
+    const links: Record<string, string[]> = {};
+    (movementLinksRes.data || []).forEach((row) => {
+      const rec = row as unknown as { sku_mapping_id: string; pack_profile_id: string | null };
+      if (!rec.pack_profile_id) return;
+      const list = links[rec.sku_mapping_id] || [];
+      if (!list.includes(rec.pack_profile_id)) list.push(rec.pack_profile_id);
+      links[rec.sku_mapping_id] = list;
+    });
+    setProfileIdsByMapping(links);
+
     setLoading(false);
   };
 
@@ -420,20 +474,35 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   }, [mappings, salesRows, levels, cogs, defaults, nowIso]);
 
   const visibleRows = useMemo(() => {
-    if (!search.trim()) return computedRows;
     const q = search.trim().toLowerCase();
-    return computedRows.filter((row) => {
-      return (
-        row.productName.toLowerCase().includes(q) ||
-        String(row.amazonSku || "")
-          .toLowerCase()
-          .includes(q) ||
-        String(row.temuSkuId || "")
-          .toLowerCase()
-          .includes(q)
-      );
+    const filtered = !q
+      ? computedRows
+      : computedRows.filter((row) => {
+          return (
+            row.productName.toLowerCase().includes(q) ||
+            String(row.amazonSku || "")
+              .toLowerCase()
+              .includes(q) ||
+            String(row.temuSkuId || "")
+              .toLowerCase()
+              .includes(q)
+          );
+        });
+    const sorted = [...filtered].sort((a, b) => {
+      if (sortBy === "product_desc") return b.productName.localeCompare(a.productName);
+      if (sortBy === "stock_value_desc") return b.stockValue - a.stockValue;
+      if (sortBy === "days_left_asc") return (a.amazonDaysLeft ?? Number.POSITIVE_INFINITY) - (b.amazonDaysLeft ?? Number.POSITIVE_INFINITY);
+      if (sortBy === "month_units_desc") {
+        const getMonthUnits = (mappingId: string) =>
+          salesRows
+            .filter((row) => row.mappingId === mappingId && (!monthFilter || row.monthStart === monthFilter))
+            .reduce((acc, row) => acc + Number(row.amazonUnits || 0) + Number(row.temuUnits || 0), 0);
+        return getMonthUnits(b.mappingId) - getMonthUnits(a.mappingId);
+      }
+      return a.productName.localeCompare(b.productName);
     });
-  }, [computedRows, search]);
+    return sorted;
+  }, [computedRows, search, sortBy, salesRows, monthFilter]);
 
   const selectedRows = useMemo(() => {
     return computedRows.filter((row) => selectedMappingIds.includes(row.mappingId));
@@ -455,26 +524,29 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
   }, [computedRows, plannerSearch]);
 
-  const saveDefaults = async () => {
-    if (!canEdit) return;
-    const supabase = createClient();
-    const { error: saveError } = await supabase.from("inventory_defaults").upsert(
-      {
-        account_id: accountId,
-        lead_time_days: defaults.leadTimeDays,
-        amazon_cover_days: defaults.amazonCoverDays,
-        warehouse_cover_days: defaults.warehouseCoverDays,
-        storage_cost_per_pallet: defaults.storageCostPerPallet,
-        storage_cost_period: defaults.storageCostPeriod,
-      },
-      { onConflict: "account_id" }
-    );
-    if (saveError) {
-      setError(saveError.message);
-      return;
-    }
-    setMessage("Inventory defaults saved.");
-  };
+  const monthOptions = useMemo(() => {
+    const unique = Array.from(new Set(salesRows.map((row) => row.monthStart))).filter(Boolean);
+    unique.sort((a, b) => (a < b ? 1 : -1));
+    return unique;
+  }, [salesRows]);
+
+  useEffect(() => {
+    if (monthFilter) return;
+    if (monthOptions.length > 0) setMonthFilter(monthOptions[0]);
+  }, [monthFilter, monthOptions]);
+
+  const monthUnitsByMapping = useMemo(() => {
+    const map = new Map<string, { amazon: number; temu: number }>();
+    const targetMonth = monthFilter || monthOptions[0] || "";
+    salesRows.forEach((row) => {
+      if (!targetMonth || row.monthStart !== targetMonth) return;
+      const prev = map.get(row.mappingId) || { amazon: 0, temu: 0 };
+      prev.amazon += Number(row.amazonUnits || 0);
+      prev.temu += Number(row.temuUnits || 0);
+      map.set(row.mappingId, prev);
+    });
+    return map;
+  }, [salesRows, monthFilter, monthOptions]);
 
   const saveStockSnapshot = async () => {
     if (!canEdit) return;
@@ -747,72 +819,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       {message ? <p className="rounded-xl bg-green-50 px-3 py-2 text-sm text-green-700">{message}</p> : null}
       {error ? <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
 
-      <section className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 md:grid-cols-5">
-        <label className="text-xs text-slate-600">
-          <span className="mb-1 block uppercase tracking-wide text-slate-500">Lead Time Default (days)</span>
-          <input
-            type="number"
-            value={defaults.leadTimeDays}
-            onChange={(e) => setDefaults((prev) => ({ ...prev, leadTimeDays: Number(e.target.value || 0) }))}
-            disabled={!canEdit}
-            className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm disabled:bg-slate-100"
-          />
-        </label>
-        <label className="text-xs text-slate-600">
-          <span className="mb-1 block uppercase tracking-wide text-slate-500">Amazon Cover (days)</span>
-          <input
-            type="number"
-            value={defaults.amazonCoverDays}
-            onChange={(e) => setDefaults((prev) => ({ ...prev, amazonCoverDays: Number(e.target.value || 0) }))}
-            disabled={!canEdit}
-            className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm disabled:bg-slate-100"
-          />
-        </label>
-        <label className="text-xs text-slate-600">
-          <span className="mb-1 block uppercase tracking-wide text-slate-500">Warehouse Cover (days)</span>
-          <input
-            type="number"
-            value={defaults.warehouseCoverDays}
-            onChange={(e) => setDefaults((prev) => ({ ...prev, warehouseCoverDays: Number(e.target.value || 0) }))}
-            disabled={!canEdit}
-            className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm disabled:bg-slate-100"
-          />
-        </label>
-        <label className="text-xs text-slate-600">
-          <span className="mb-1 block uppercase tracking-wide text-slate-500">Storage Cost / Pallet</span>
-          <input
-            type="number"
-            step="0.01"
-            value={defaults.storageCostPerPallet}
-            onChange={(e) => setDefaults((prev) => ({ ...prev, storageCostPerPallet: Number(e.target.value || 0) }))}
-            disabled={!canEdit}
-            className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm disabled:bg-slate-100"
-          />
-        </label>
-        <div className="flex items-end gap-2">
-          <select
-            value={defaults.storageCostPeriod}
-            onChange={(e) =>
-              setDefaults((prev) => ({ ...prev, storageCostPeriod: (e.target.value as "week" | "month") || "month" }))
-            }
-            disabled={!canEdit}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100"
-          >
-            <option value="week">Per week</option>
-            <option value="month">Per month</option>
-          </select>
-          {canEdit ? (
-            <button onClick={() => void saveDefaults()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
-              Save defaults
-            </button>
-          ) : null}
-        </div>
-        <p className="text-xs text-slate-500 md:col-span-5">
-          Amazon Cover (days) controls how many future days of stock you want in Amazon FBA. 3PL/Warehouse Cover (days) controls buffer stock
-          in your warehouse for replenishment planning. Suggested units = velocity x cover days minus current stock.
-        </p>
-      </section>
-
       <section className="rounded-2xl border border-slate-200 bg-white p-2">
         <div className="flex flex-wrap gap-2">
           <button
@@ -843,12 +849,37 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-slate-800">Overview & Velocity</h3>
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search SKU or product"
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-72"
-            />
+            <div className="flex flex-wrap gap-2">
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search SKU or product"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-72"
+              />
+              <select
+                value={monthFilter}
+                onChange={(e) => setMonthFilter(e.target.value)}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              >
+                <option value="">Select month</option>
+                {monthOptions.map((month) => (
+                  <option key={month} value={month}>
+                    {formatUkDate(month)}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as InventorySort)}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              >
+                <option value="product_asc">Sort: Product A-Z</option>
+                <option value="product_desc">Sort: Product Z-A</option>
+                <option value="month_units_desc">Sort: Month units high-low</option>
+                <option value="stock_value_desc">Sort: Stock value high-low</option>
+                <option value="days_left_asc">Sort: Amazon days left low-high</option>
+              </select>
+            </div>
           </div>
           {canEdit ? (
             <div className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
@@ -864,15 +895,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           ) : null}
           <div className="overflow-x-auto rounded-xl border border-slate-200">
           <table className="min-w-full text-xs">
-            <thead className="bg-slate-50 text-left uppercase tracking-wide text-slate-500">
+            <thead className="sticky top-0 z-10 bg-slate-50 text-left uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-2 py-2">Select</th>
                 <th className="px-2 py-2">Product</th>
                 <th className="px-2 py-2">Amazon SKU</th>
                 <th className="px-2 py-2">Temu SKU ID</th>
-                <th className="px-2 py-2">Prev Mo Amazon</th>
-                <th className="px-2 py-2">Prev Mo Temu</th>
-                <th className="px-2 py-2">Prev Mo Combined</th>
+                <th className="px-2 py-2">Selected Mo Amazon</th>
+                <th className="px-2 py-2">Selected Mo Temu</th>
+                <th className="px-2 py-2">Selected Mo Combined</th>
                 <th className="px-2 py-2">YTD Units</th>
                 <th className="px-2 py-2">Avg/Mo</th>
                 <th className="px-2 py-2">Amazon Stock</th>
@@ -905,12 +936,16 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         }
                       />
                     </td>
-                    <td className="px-2 py-2 font-medium">{row.productName}</td>
+                    <td className="px-2 py-2 font-medium" title={row.productName}>
+                      {shortenName(row.productName)}
+                    </td>
                     <td className="px-2 py-2">{row.amazonSku || "-"}</td>
                     <td className="px-2 py-2">{row.temuSkuId || "-"}</td>
-                    <td className="px-2 py-2">{row.prevMonthAmazonUnits}</td>
-                    <td className="px-2 py-2">{row.prevMonthTemuUnits}</td>
-                    <td className="px-2 py-2">{row.prevMonthAmazonUnits + row.prevMonthTemuUnits}</td>
+                    <td className="px-2 py-2">{monthUnitsByMapping.get(row.mappingId)?.amazon || 0}</td>
+                    <td className="px-2 py-2">{monthUnitsByMapping.get(row.mappingId)?.temu || 0}</td>
+                    <td className="px-2 py-2">
+                      {(monthUnitsByMapping.get(row.mappingId)?.amazon || 0) + (monthUnitsByMapping.get(row.mappingId)?.temu || 0)}
+                    </td>
                     <td className="px-2 py-2">{row.yearTotalUnits}</td>
                     <td className="px-2 py-2">{row.yearAvgPerMonth}</td>
                     <td className="px-2 py-2">
@@ -959,8 +994,14 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                       {currency}
                       {row.stockValue.toFixed(2)}
                     </td>
-                    <td className="px-2 py-2">{row.potentialSalesUnits.toFixed(0)}</td>
-                    <td className="px-2 py-2">{row.potentialProfitUnits.toFixed(0)}</td>
+                    <td className="px-2 py-2">
+                      {currency}
+                      {row.potentialSalesValue.toFixed(2)}
+                    </td>
+                    <td className="px-2 py-2">
+                      {currency}
+                      {row.potentialProfitValue.toFixed(2)}
+                    </td>
                   </tr>
                 ))
               )}
@@ -973,6 +1014,9 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               <p className="text-xs text-slate-500">
                 Monthly velocity is now calculated from `report_transactions` (saved from uploaded Amazon/Temu report rows). If you re-upload and
                 save reports, this section updates automatically.
+              </p>
+              <p className="text-xs text-slate-500">
+                Potential Sales/Potential Profit are estimated from stock value using a default 18% target net margin model.
               </p>
               <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
                 <table className="min-w-full text-xs">
@@ -996,12 +1040,14 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     ) : (
                       visibleRows.map((row) => (
                         <tr key={`monthly-${row.mappingId}`} className="border-t border-slate-100">
-                          <td className="px-2 py-2 font-medium">{row.productName}</td>
+                          <td className="px-2 py-2 font-medium" title={row.productName}>{shortenName(row.productName)}</td>
                           <td className="px-2 py-2">{row.amazonSku || "-"}</td>
                           <td className="px-2 py-2">{row.temuSkuId || "-"}</td>
-                          <td className="px-2 py-2">{row.prevMonthAmazonUnits}</td>
-                          <td className="px-2 py-2">{row.prevMonthTemuUnits}</td>
-                          <td className="px-2 py-2">{row.prevMonthAmazonUnits + row.prevMonthTemuUnits}</td>
+                          <td className="px-2 py-2">{monthUnitsByMapping.get(row.mappingId)?.amazon || 0}</td>
+                          <td className="px-2 py-2">{monthUnitsByMapping.get(row.mappingId)?.temu || 0}</td>
+                          <td className="px-2 py-2">
+                            {(monthUnitsByMapping.get(row.mappingId)?.amazon || 0) + (monthUnitsByMapping.get(row.mappingId)?.temu || 0)}
+                          </td>
                         </tr>
                       ))
                     )}
@@ -1079,7 +1125,10 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               <input type="number" value={intake.boxes} onChange={(e) => setIntake((prev) => ({ ...prev, boxes: e.target.value }))} placeholder="Boxes" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
               <select value={intake.profileId} onChange={(e) => setIntake((prev) => ({ ...prev, profileId: e.target.value }))} className="rounded-lg border border-slate-300 px-2 py-2 text-sm">
                 <option value="">Select box profile</option>
-                {packProfiles.map((profile) => (
+                {(intake.mappingId && (profileIdsByMapping[intake.mappingId] || []).length > 0
+                  ? packProfiles.filter((profile) => (profileIdsByMapping[intake.mappingId] || []).includes(profile.id))
+                  : packProfiles
+                ).map((profile) => (
                   <option key={profile.id} value={profile.id}>
                     {profile.profileName}
                   </option>
@@ -1204,11 +1253,16 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               {selectedRows.length === 0 ? (
                 <tr>
                   <td className="px-2 py-3 text-slate-500" colSpan={7}>
-                    Select SKUs from Inventory Overview above to build shipment plan.
+                    Select SKUs from the selector above to build shipment plan.
                   </td>
                 </tr>
               ) : (
                 selectedRows.map((row) => {
+                  const linkedProfileIds = profileIdsByMapping[row.mappingId] || [];
+                  const availableProfiles =
+                    linkedProfileIds.length > 0
+                      ? packProfiles.filter((p) => linkedProfileIds.includes(p.id))
+                      : packProfiles;
                   const profile = packProfiles.find((p) => p.id === profileByMapping[row.mappingId]);
                   const suggested = planType === "amazon_requirement" ? row.suggestedAmazonUnits : row.suggestedWarehouseUnits;
                   const plannedUnits = Number(overrides[row.mappingId]?.plannedUnits ?? suggested);
@@ -1216,7 +1270,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   const overrideBoxes = Number(overrides[row.mappingId]?.plannedBoxes ?? estimate.plannedBoxes);
                   return (
                     <tr key={row.mappingId} className="border-t border-slate-100">
-                      <td className="px-2 py-2">{row.productName}</td>
+                      <td className="px-2 py-2" title={row.productName}>{shortenName(row.productName)}</td>
                       <td className="px-2 py-2">{suggested}</td>
                       <td className="px-2 py-2">
                         {canEdit ? (
@@ -1264,7 +1318,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                             className="rounded-lg border border-slate-300 px-2 py-1"
                           >
                             <option value="">Select profile</option>
-                            {packProfiles.map((p) => (
+                            {availableProfiles.map((p) => (
                               <option key={p.id} value={p.id}>
                                 {p.profileName}
                               </option>

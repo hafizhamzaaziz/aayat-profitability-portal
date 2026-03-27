@@ -587,6 +587,13 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
     );
   }, [canProcess, periodEnd, periodStart, qtyCol, rows.length, skuCol]);
 
+  const previewProductSales = useMemo(() => {
+    if (!preview) return 0;
+    const label = platform === "amazon" ? "Product Sales" : "Order Payments";
+    const fromBreakdown = preview.breakdown.summaryLines.find((line) => line.label === label)?.value;
+    return Number(fromBreakdown ?? preview.grossSales ?? 0);
+  }, [preview, platform]);
+
   const parseFile = async (file: File): Promise<RowData[]> => {
     if (file.name.toLowerCase().endsWith(".csv")) {
       return new Promise<RowData[]>((resolve, reject) => {
@@ -1068,8 +1075,8 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
         <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5">
           <div className="grid gap-3 md:grid-cols-3">
             <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-xs text-slate-500">Gross Sales</p>
-              <p className="text-xl font-semibold">{currency}{preview.grossSales.toFixed(2)}</p>
+              <p className="text-xs text-slate-500">Total Product Sales</p>
+              <p className="text-xl font-semibold">{currency}{previewProductSales.toFixed(2)}</p>
             </div>
             <div className="rounded-2xl bg-slate-50 p-4">
               <p className="text-xs text-slate-500">Total COGS</p>

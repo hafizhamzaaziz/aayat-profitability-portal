@@ -63,8 +63,8 @@ export type InventoryComputedRow = {
   amazonDaysLeft: number | null;
   warehouseDaysLeft: number | null;
   stockValue: number;
-  potentialSalesUnits: number;
-  potentialProfitUnits: number;
+  potentialSalesValue: number;
+  potentialProfitValue: number;
   suggestedAmazonUnits: number;
   suggestedWarehouseUnits: number;
 };
@@ -173,9 +173,9 @@ export function buildInventoryRows(input: {
     const totalUnitsOnHand = amazonUnitsOnHand + warehouseUnitsOnHand;
     const stockValue = round2(totalUnitsOnHand * unitCost);
 
-    const netMarginUnits = Math.max(0, yearAvgPerMonth * 0.18);
-    const potentialSalesUnits = round2(totalUnitsOnHand);
-    const potentialProfitUnits = round2(netMarginUnits > 0 ? (totalUnitsOnHand / yearAvgPerMonth) * netMarginUnits : 0);
+    const targetNetMarginRate = 0.18;
+    const potentialSalesValue = stockValue > 0 ? round2(stockValue / (1 - targetNetMarginRate)) : 0;
+    const potentialProfitValue = round2(Math.max(0, potentialSalesValue - stockValue));
 
     const suggestedAmazonUnits = Math.max(0, Math.ceil(dailyVelocity * input.defaults.amazonCoverDays - amazonUnitsOnHand));
     const leadTimeDays = mapping.leadTimeDays ?? input.defaults.leadTimeDays;
@@ -200,8 +200,8 @@ export function buildInventoryRows(input: {
       amazonDaysLeft,
       warehouseDaysLeft,
       stockValue,
-      potentialSalesUnits,
-      potentialProfitUnits,
+      potentialSalesValue,
+      potentialProfitValue,
       suggestedAmazonUnits,
       suggestedWarehouseUnits,
     };

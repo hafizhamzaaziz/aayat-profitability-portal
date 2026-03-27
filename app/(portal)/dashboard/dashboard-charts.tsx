@@ -47,10 +47,16 @@ export default function DashboardCharts({ reports, currency }: Props) {
             {recent.map((row) => {
               const widthPct = Math.max((Math.abs(row.net_profit) / maxAbsProfit) * 100, 4);
               const positive = row.net_profit >= 0;
+              const isAmazon = row.platform === "amazon";
+              const barColor = isAmazon ? "bg-[#146eb4]" : "bg-[#ff9900]";
+              const textColor = isAmazon ? "text-[#146eb4]" : "text-[#ff9900]";
               return (
                 <div key={row.id} className="space-y-1">
                   <div className="flex items-center justify-between text-xs text-slate-600">
-                    <span>{shortPeriod(row.period_start, row.period_end)}</span>
+                    <span>
+                      {shortPeriod(row.period_start, row.period_end)}{" "}
+                      <span className={textColor}>({isAmazon ? "Amazon" : "Temu"})</span>
+                    </span>
                     <span className={positive ? "text-emerald-700" : "text-rose-700"}>
                       {currency}
                       {row.net_profit.toFixed(2)}
@@ -58,7 +64,7 @@ export default function DashboardCharts({ reports, currency }: Props) {
                   </div>
                   <div className="h-2 rounded-full bg-slate-100">
                     <div
-                      className={`h-2 rounded-full ${positive ? "bg-emerald-500" : "bg-rose-500"}`}
+                      className={`h-2 rounded-full ${barColor}`}
                       style={{ width: `${widthPct}%` }}
                     />
                   </div>
@@ -80,12 +86,16 @@ export default function DashboardCharts({ reports, currency }: Props) {
               value={platformTotals.amazon}
               widthPct={(Math.abs(platformTotals.amazon) / totalAbs) * 100}
               currency={currency}
+              colorClass="bg-[#146eb4]"
+              labelClass="text-[#146eb4]"
             />
             <PlatformBar
               label="Temu"
               value={platformTotals.temu}
               widthPct={(Math.abs(platformTotals.temu) / totalAbs) * 100}
               currency={currency}
+              colorClass="bg-[#ff9900]"
+              labelClass="text-[#ff9900]"
             />
           </div>
         )}
@@ -99,25 +109,28 @@ function PlatformBar({
   value,
   widthPct,
   currency,
+  colorClass,
+  labelClass,
 }: {
   label: string;
   value: number;
   widthPct: number;
   currency: string;
+  colorClass: string;
+  labelClass: string;
 }) {
-  const positive = value >= 0;
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-xs text-slate-600">
-        <span>{label}</span>
-        <span className={positive ? "text-emerald-700" : "text-rose-700"}>
+        <span className={labelClass}>{label}</span>
+        <span className={labelClass}>
           {currency}
           {value.toFixed(2)}
         </span>
       </div>
       <div className="h-3 rounded-full bg-slate-100">
         <div
-          className={`h-3 rounded-full ${positive ? "bg-emerald-500" : "bg-rose-500"}`}
+          className={`h-3 rounded-full ${colorClass}`}
           style={{ width: `${Math.max(widthPct, 6)}%` }}
         />
       </div>

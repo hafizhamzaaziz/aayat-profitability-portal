@@ -161,7 +161,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             />
             {!sidebarCollapsed ? (
               <>
-                <p className="md-chip mb-2">Aayat.co</p>
                 <h1 className="text-xl font-semibold tracking-tight">Profitability Portal</h1>
                 <p className="mt-2 text-sm text-slate-600">Amazon & Temu insights</p>
               </>

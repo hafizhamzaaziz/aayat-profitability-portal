@@ -8,12 +8,10 @@ type ShipmentPdfItem = {
   product_name: string;
   amazon_sku: string | null;
   temu_sku_id: string | null;
-  suggested_units: number;
   planned_units: number;
   units_per_box: number;
   planned_boxes: number;
   pallets: number;
-  lead_time_days: number | null;
 };
 
 type Input = {
@@ -39,12 +37,10 @@ const styles = StyleSheet.create({
   c1: { width: "20%" },
   c2: { width: "11%" },
   c3: { width: "11%" },
-  c4: { width: "10%", textAlign: "right" },
-  c5: { width: "10%", textAlign: "right" },
-  c6: { width: "10%", textAlign: "right" },
-  c7: { width: "10%", textAlign: "right" },
-  c8: { width: "10%", textAlign: "right" },
-  c9: { width: "8%", textAlign: "right" },
+  c4: { width: "12%", textAlign: "right" },
+  c5: { width: "12%", textAlign: "right" },
+  c6: { width: "12%", textAlign: "right" },
+  c7: { width: "12%", textAlign: "right" },
   footer: {
     position: "absolute",
     left: 24,
@@ -86,12 +82,10 @@ function InventoryShipmentPdf({ data, footerLogoDataUrl }: { data: Input; footer
             <Text style={styles.c1}>Product</Text>
             <Text style={styles.c2}>Amazon SKU</Text>
             <Text style={styles.c3}>Temu SKU ID</Text>
-            <Text style={styles.c4}>Suggested</Text>
-            <Text style={styles.c5}>Planned</Text>
-            <Text style={styles.c6}>Units/Box</Text>
-            <Text style={styles.c7}>Boxes</Text>
-            <Text style={styles.c8}>Pallets</Text>
-            <Text style={styles.c9}>Lead</Text>
+            <Text style={styles.c4}>Planned</Text>
+            <Text style={styles.c5}>Units/Box</Text>
+            <Text style={styles.c6}>Boxes</Text>
+            <Text style={styles.c7}>Pallets</Text>
           </View>
           {data.items.length === 0 ? (
             <View style={styles.tr}>
@@ -103,12 +97,10 @@ function InventoryShipmentPdf({ data, footerLogoDataUrl }: { data: Input; footer
                 <Text style={styles.c1}>{item.product_name}</Text>
                 <Text style={styles.c2}>{item.amazon_sku || "-"}</Text>
                 <Text style={styles.c3}>{item.temu_sku_id || "-"}</Text>
-                <Text style={styles.c4}>{Number(item.suggested_units || 0).toFixed(0)}</Text>
-                <Text style={styles.c5}>{Number(item.planned_units || 0).toFixed(0)}</Text>
-                <Text style={styles.c6}>{Number(item.units_per_box || 0).toFixed(0)}</Text>
-                <Text style={styles.c7}>{Number(item.planned_boxes || 0).toFixed(0)}</Text>
-                <Text style={styles.c8}>{Number(item.pallets || 0).toFixed(2)}</Text>
-                <Text style={styles.c9}>{item.lead_time_days ?? "-"}d</Text>
+                <Text style={styles.c4}>{Number(item.planned_units || 0).toFixed(0)}</Text>
+                <Text style={styles.c5}>{Number(item.units_per_box || 0).toFixed(0)}</Text>
+                <Text style={styles.c6}>{Number(item.planned_boxes || 0).toFixed(0)}</Text>
+                <Text style={styles.c7}>{Number(item.pallets || 0).toFixed(2)}</Text>
               </View>
             ))
           )}

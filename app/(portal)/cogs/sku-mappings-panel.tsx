@@ -21,12 +21,20 @@ type Props = {
   canEdit: boolean;
 };
 
+function shortenText(text: string, max = 30) {
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
 export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
+  const PAGE_SIZE = 20;
   const [rows, setRows] = useState<MappingRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
   const [bulkFileName, setBulkFileName] = useState("");
   const [bulkRows, setBulkRows] = useState<Record<string, unknown>[]>([]);
   const [bulkHeaders, setBulkHeaders] = useState<string[]>([]);
@@ -40,11 +48,15 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
     setLoading(true);
     setError(null);
     const supabase = createClient();
-    const { data, error: fetchError } = await supabase
+    const [{ data, error: fetchError }, { count }] = await Promise.all([
+      supabase
       .from("sku_mappings")
       .select("id, sku_catalog_id, amazon_sku, temu_sku_id, lead_time_days, created_at, sku_catalog:sku_catalog_id(product_name)")
       .eq("account_id", accountId)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .range(offset, offset + PAGE_SIZE - 1),
+      supabase.from("sku_mappings").select("id", { count: "exact", head: true }).eq("account_id", accountId),
+    ]);
     if (fetchError) {
       setError(fetchError.message);
       setLoading(false);
@@ -71,13 +83,14 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       } as MappingRow;
     });
     setRows(mapped);
+    setTotalCount(Number(count || 0));
     setLoading(false);
   };
 
   useEffect(() => {
     void loadRows();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId]);
+  }, [accountId, offset]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return rows;
@@ -94,6 +107,9 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       );
     });
   }, [rows, search]);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
 
   const norm = (value: unknown) =>
     String(value ?? "")
@@ -452,6 +468,38 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
           </tbody>
         </table>
       </div>
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <span className="text-xs text-slate-500">
+          Page {currentPage} of {totalPages} ({totalCount} items)
+        </span>
+        <select
+          value={currentPage}
+          onChange={(e) => setOffset((Number(e.target.value) - 1) * PAGE_SIZE)}
+          className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+        >
+          {Array.from({ length: totalPages }, (_, idx) => idx + 1).map((page) => (
+            <option key={page} value={page}>
+              {page}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => setOffset((prev) => Math.max(0, prev - PAGE_SIZE))}
+          disabled={offset === 0 || loading}
+          className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          onClick={() => setOffset((prev) => prev + PAGE_SIZE)}
+          disabled={currentPage >= totalPages || loading}
+          className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Next
+        </button>
+      </div>
     </section>
   );
 }
@@ -481,7 +529,7 @@ function EditableMappingRow({
             className="w-full rounded-lg border border-slate-300 px-2 py-1"
           />
         ) : (
-          row.product_name
+          <span title={row.product_name}>{shortenText(row.product_name)}</span>
         )}
       </td>
       <td className="px-3 py-2">

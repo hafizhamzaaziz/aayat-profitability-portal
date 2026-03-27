@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import FileDropzone from "@/components/ui/file-dropzone";
 
@@ -22,6 +22,41 @@ export default function AccountSettingsForm({ account }: Props) {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [leadTimeDays, setLeadTimeDays] = useState("90");
+  const [amazonCoverDays, setAmazonCoverDays] = useState("30");
+  const [warehouseCoverDays, setWarehouseCoverDays] = useState("120");
+  const [storageCostPerPallet, setStorageCostPerPallet] = useState("0");
+  const [storageCostPeriod, setStorageCostPeriod] = useState<"week" | "month">("month");
+
+  useEffect(() => {
+    let active = true;
+    const loadInventoryDefaults = async () => {
+      const supabase = createClient();
+      const { data, error: defaultsError } = await supabase
+        .from("inventory_defaults")
+        .select("lead_time_days, amazon_cover_days, warehouse_cover_days, storage_cost_per_pallet, storage_cost_period")
+        .eq("account_id", account.id)
+        .maybeSingle();
+      if (!active || defaultsError) return;
+      if (!data) return;
+      const row = data as {
+        lead_time_days?: number;
+        amazon_cover_days?: number;
+        warehouse_cover_days?: number;
+        storage_cost_per_pallet?: number;
+        storage_cost_period?: "week" | "month";
+      };
+      setLeadTimeDays(String(row.lead_time_days ?? 90));
+      setAmazonCoverDays(String(row.amazon_cover_days ?? 30));
+      setWarehouseCoverDays(String(row.warehouse_cover_days ?? 120));
+      setStorageCostPerPallet(String(row.storage_cost_per_pallet ?? 0));
+      setStorageCostPeriod(row.storage_cost_period || "month");
+    };
+    void loadInventoryDefaults();
+    return () => {
+      active = false;
+    };
+  }, [account.id]);
 
   const previewLogo = useMemo(() => {
     if (logoFile) {
@@ -68,6 +103,19 @@ export default function AccountSettingsForm({ account }: Props) {
         throw updateError;
       }
 
+      const { error: defaultsSaveError } = await supabase.from("inventory_defaults").upsert(
+        {
+          account_id: account.id,
+          lead_time_days: Number(leadTimeDays || 0),
+          amazon_cover_days: Number(amazonCoverDays || 0),
+          warehouse_cover_days: Number(warehouseCoverDays || 0),
+          storage_cost_per_pallet: Number(storageCostPerPallet || 0),
+          storage_cost_period: storageCostPeriod,
+        },
+        { onConflict: "account_id" }
+      );
+      if (defaultsSaveError) throw defaultsSaveError;
+
       setLogoUrl(nextLogoUrl || "");
       setLogoFile(null);
       setMessage("Account settings updated successfully.");
@@ -110,6 +158,59 @@ export default function AccountSettingsForm({ account }: Props) {
             onChange={(event) => setVatRate(event.target.value)}
             className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[var(--md-primary)]"
           />
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+        <p className="mb-3 text-sm font-semibold text-slate-800">Inventory Planning Defaults</p>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Lead Time Default (days)</label>
+            <input
+              type="number"
+              value={leadTimeDays}
+              onChange={(event) => setLeadTimeDays(event.target.value)}
+              className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[var(--md-primary)]"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Amazon Cover (days)</label>
+            <input
+              type="number"
+              value={amazonCoverDays}
+              onChange={(event) => setAmazonCoverDays(event.target.value)}
+              className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[var(--md-primary)]"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Warehouse Cover (days)</label>
+            <input
+              type="number"
+              value={warehouseCoverDays}
+              onChange={(event) => setWarehouseCoverDays(event.target.value)}
+              className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[var(--md-primary)]"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Storage Cost / Pallet</label>
+            <div className="grid grid-cols-[1fr_130px] gap-2">
+              <input
+                type="number"
+                step="0.01"
+                value={storageCostPerPallet}
+                onChange={(event) => setStorageCostPerPallet(event.target.value)}
+                className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[var(--md-primary)]"
+              />
+              <select
+                value={storageCostPeriod}
+                onChange={(event) => setStorageCostPeriod(event.target.value as "week" | "month")}
+                className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[var(--md-primary)]"
+              >
+                <option value="week">Per week</option>
+                <option value="month">Per month</option>
+              </select>
+            </div>
+          </div>
         </div>
       </div>
 
