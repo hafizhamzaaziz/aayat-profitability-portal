@@ -51,6 +51,89 @@ function previousMonthStartIso(nowIso: string) {
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
 }
 
+async function ensureAmazonOnlyMappingsFromData(input: {
+  accountId: string;
+  canEdit: boolean;
+  mappings: Array<{ id: string; amazon_sku: string | null }>;
+  cogs: Array<{ sku: string | null; sku_mapping_id: string | null }>;
+  reportTransactions: Array<{ platform: string | null; sku: string | null }>;
+}) {
+  if (!input.canEdit) return 0;
+
+  const existingAmazonSkus = new Set(
+    input.mappings
+      .map((row) => String(row.amazon_sku || "").trim().toUpperCase())
+      .filter(Boolean)
+  );
+
+  const candidates = new Set<string>();
+  input.cogs.forEach((row) => {
+    if (row.sku_mapping_id) return;
+    const sku = String(row.sku || "").trim().toUpperCase();
+    if (sku) candidates.add(sku);
+  });
+  input.reportTransactions.forEach((row) => {
+    const platform = String(row.platform || "").trim().toLowerCase();
+    if (!platform.startsWith("amazon")) return;
+    const sku = String(row.sku || "").trim().toUpperCase();
+    if (sku) candidates.add(sku);
+  });
+
+  const missingAmazonSkus = Array.from(candidates).filter((sku) => !existingAmazonSkus.has(sku));
+  if (missingAmazonSkus.length === 0) return 0;
+
+  const supabase = createClient();
+  let created = 0;
+
+  for (const sku of missingAmazonSkus) {
+    const { data: existingMapping } = await supabase
+      .from("sku_mappings")
+      .select("id")
+      .eq("account_id", input.accountId)
+      .eq("amazon_sku", sku)
+      .maybeSingle();
+    if (existingMapping?.id) continue;
+
+    const { data: catalogRow, error: catalogError } = await supabase
+      .from("sku_catalog")
+      .upsert(
+        {
+          account_id: input.accountId,
+          product_name: sku,
+        },
+        { onConflict: "account_id,product_name" }
+      )
+      .select("id")
+      .single();
+    if (catalogError || !catalogRow?.id) continue;
+
+    const { data: mappingRow, error: mappingError } = await supabase
+      .from("sku_mappings")
+      .insert({
+        account_id: input.accountId,
+        sku_catalog_id: String(catalogRow.id),
+        amazon_sku: sku,
+        temu_sku_id: null,
+        lead_time_days: null,
+      })
+      .select("id")
+      .maybeSingle();
+    if (mappingError) continue;
+    created += 1;
+
+    if (mappingRow?.id) {
+      await supabase
+        .from("cogs")
+        .update({ sku_mapping_id: String(mappingRow.id) })
+        .eq("account_id", input.accountId)
+        .eq("sku", sku)
+        .is("sku_mapping_id", null);
+    }
+  }
+
+  return created;
+}
+
 export default function InventoryDashboard({ accountId, canEdit, currency }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -139,6 +222,18 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     if (mappingRes.error) {
       setError(mappingRes.error.message);
       setLoading(false);
+      return;
+    }
+
+    const createdMissing = await ensureAmazonOnlyMappingsFromData({
+      accountId,
+      canEdit,
+      mappings: (mappingRes.data || []) as Array<{ id: string; amazon_sku: string | null }>,
+      cogs: (cogsRes.data || []) as Array<{ sku: string | null; sku_mapping_id: string | null }>,
+      reportTransactions: (reportTxRes.data || []) as Array<{ platform: string | null; sku: string | null }>,
+    });
+    if (createdMissing > 0) {
+      await loadAll();
       return;
     }
     if (defaultsRes.error && defaultsRes.error.code !== "PGRST116") {
