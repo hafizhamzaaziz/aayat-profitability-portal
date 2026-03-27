@@ -12,7 +12,7 @@ import {
   type PackProfile,
   type SkuRef,
 } from "@/lib/inventory/engine";
-import { formatUkDate, todayIsoUtc } from "@/lib/utils/date";
+import { addDays, formatUkDate, todayIsoUtc } from "@/lib/utils/date";
 
 type Props = {
   accountId: string;
@@ -27,7 +27,9 @@ type PlanRowOverride = {
 
 type InventoryTab = "overview" | "stock-intake" | "shipment-planning";
 type IntakeAction = "supplier_inbound" | "seller_returns" | "b2b_wholesale" | "amazon_transfer";
-type InventorySort = "product_asc" | "product_desc" | "month_units_desc" | "stock_value_desc" | "days_left_asc";
+type SortColumn = "product" | "selected_combined";
+type SortDirection = "asc" | "desc";
+type TxFact = { mappingId: string; date: string; platform: "amazon" | "temu"; quantity: number };
 
 const DEFAULTS: InventoryDefaults = {
   leadTimeDays: 90,
@@ -56,11 +58,11 @@ function pickProductNameFromRawRow(platform: string, rawRow: Record<string, unkn
       return terms.some((term) => normalized.includes(term));
     });
   if (platform.startsWith("amazon")) {
-    const key = find(["description", "product name", "item name", "title"]);
+    const key = find(["description", "item description", "product description", "product name", "item name", "title"]);
     const value = key ? String(rawRow[key] ?? "").trim() : "";
     return value || null;
   }
-  const key = find(["sku", "product", "title", "item"]);
+  const key = find(["product", "title", "description", "item"]) || keys.find((k) => k.trim().toLowerCase() === "sku");
   const value = key ? String(rawRow[key] ?? "").trim() : "";
   return value || null;
 }
@@ -155,12 +157,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   const [search, setSearch] = useState("");
   const [activeTab, setActiveTab] = useState<InventoryTab>("overview");
   const [plannerSearch, setPlannerSearch] = useState("");
-  const [monthFilter, setMonthFilter] = useState("");
-  const [sortBy, setSortBy] = useState<InventorySort>("product_asc");
+  const [sortColumn, setSortColumn] = useState<SortColumn>("product");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [periodStartDate, setPeriodStartDate] = useState(addDays(todayIsoUtc(), -29));
+  const [periodEndDate, setPeriodEndDate] = useState(todayIsoUtc());
 
   const [mappings, setMappings] = useState<SkuRef[]>([]);
   const [cogs, setCogs] = useState<CogsRow[]>([]);
   const [salesRows, setSalesRows] = useState<MonthlySalesRow[]>([]);
+  const [txFacts, setTxFacts] = useState<TxFact[]>([]);
   const [levels, setLevels] = useState<InventoryLevelRow[]>([]);
   const [packProfiles, setPackProfiles] = useState<PackProfile[]>([]);
   const [profileIdsByMapping, setProfileIdsByMapping] = useState<Record<string, string[]>>({});
@@ -341,7 +346,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       storageCostPeriod: defaultsRow?.storage_cost_period || DEFAULTS.storageCostPeriod,
     });
 
-    const mappingByAmazonSku = new Map(
+      const mappingByAmazonSku = new Map(
       nextMappings
         .filter((m) => m.amazonSku)
         .map((m) => [String(m.amazonSku).trim().toUpperCase(), m.mappingId])
@@ -352,6 +357,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         .map((m) => [String(m.temuSkuId).trim().toUpperCase(), m.mappingId])
     );
     const monthlyAccumulator = new Map<string, MonthlySalesRow>();
+    const factRows: TxFact[] = [];
     (reportTxRes.data || []).forEach((row) => {
       const rec = row as unknown as {
         platform: string | null;
@@ -372,6 +378,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             ? mappingByTemuSku.get(sku)
             : mappingByAmazonSku.get(sku) || mappingByTemuSku.get(sku);
       if (!mappingId) return;
+      const txDate = String(rec.transaction_date || "").slice(0, 10);
+      if (txDate) {
+        factRows.push({
+          mappingId,
+          date: txDate,
+          platform: platform.startsWith("temu") ? "temu" : "amazon",
+          quantity,
+        });
+      }
 
       const monthStart = monthStartFromDateIso(rec.transaction_date);
       const key = `${mappingId}|${monthStart}`;
@@ -386,6 +401,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       monthlyAccumulator.set(key, existing);
     });
     setSalesRows(Array.from(monthlyAccumulator.values()));
+    setTxFacts(factRows);
 
     setLevels(
       (levelRes.data || []).map((row) => {
@@ -489,20 +505,19 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           );
         });
     const sorted = [...filtered].sort((a, b) => {
-      if (sortBy === "product_desc") return b.productName.localeCompare(a.productName);
-      if (sortBy === "stock_value_desc") return b.stockValue - a.stockValue;
-      if (sortBy === "days_left_asc") return (a.amazonDaysLeft ?? Number.POSITIVE_INFINITY) - (b.amazonDaysLeft ?? Number.POSITIVE_INFINITY);
-      if (sortBy === "month_units_desc") {
-        const getMonthUnits = (mappingId: string) =>
-          salesRows
-            .filter((row) => row.mappingId === mappingId && (!monthFilter || row.monthStart === monthFilter))
-            .reduce((acc, row) => acc + Number(row.amazonUnits || 0) + Number(row.temuUnits || 0), 0);
-        return getMonthUnits(b.mappingId) - getMonthUnits(a.mappingId);
+      if (sortColumn === "selected_combined") {
+        const aCombined = txFacts
+          .filter((tx) => tx.mappingId === a.mappingId && (!periodStartDate || tx.date >= periodStartDate) && (!periodEndDate || tx.date <= periodEndDate))
+          .reduce((acc, tx) => acc + Number(tx.quantity || 0), 0);
+        const bCombined = txFacts
+          .filter((tx) => tx.mappingId === b.mappingId && (!periodStartDate || tx.date >= periodStartDate) && (!periodEndDate || tx.date <= periodEndDate))
+          .reduce((acc, tx) => acc + Number(tx.quantity || 0), 0);
+        return sortDirection === "asc" ? aCombined - bCombined : bCombined - aCombined;
       }
-      return a.productName.localeCompare(b.productName);
+      return sortDirection === "asc" ? a.productName.localeCompare(b.productName) : b.productName.localeCompare(a.productName);
     });
     return sorted;
-  }, [computedRows, search, sortBy, salesRows, monthFilter]);
+  }, [computedRows, search, sortColumn, sortDirection, txFacts, periodStartDate, periodEndDate]);
 
   const selectedRows = useMemo(() => {
     return computedRows.filter((row) => selectedMappingIds.includes(row.mappingId));
@@ -524,29 +539,27 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
   }, [computedRows, plannerSearch]);
 
-  const monthOptions = useMemo(() => {
-    const unique = Array.from(new Set(salesRows.map((row) => row.monthStart))).filter(Boolean);
-    unique.sort((a, b) => (a < b ? 1 : -1));
-    return unique;
-  }, [salesRows]);
-
-  useEffect(() => {
-    if (monthFilter) return;
-    if (monthOptions.length > 0) setMonthFilter(monthOptions[0]);
-  }, [monthFilter, monthOptions]);
-
-  const monthUnitsByMapping = useMemo(() => {
+  const periodUnitsByMapping = useMemo(() => {
     const map = new Map<string, { amazon: number; temu: number }>();
-    const targetMonth = monthFilter || monthOptions[0] || "";
-    salesRows.forEach((row) => {
-      if (!targetMonth || row.monthStart !== targetMonth) return;
-      const prev = map.get(row.mappingId) || { amazon: 0, temu: 0 };
-      prev.amazon += Number(row.amazonUnits || 0);
-      prev.temu += Number(row.temuUnits || 0);
-      map.set(row.mappingId, prev);
+    txFacts.forEach((tx) => {
+      if (periodStartDate && tx.date < periodStartDate) return;
+      if (periodEndDate && tx.date > periodEndDate) return;
+      const prev = map.get(tx.mappingId) || { amazon: 0, temu: 0 };
+      if (tx.platform === "temu") prev.temu += Number(tx.quantity || 0);
+      else prev.amazon += Number(tx.quantity || 0);
+      map.set(tx.mappingId, prev);
     });
     return map;
-  }, [salesRows, monthFilter, monthOptions]);
+  }, [txFacts, periodStartDate, periodEndDate]);
+
+  const onSortClick = (column: SortColumn) => {
+    if (sortColumn === column) {
+      setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
+      return;
+    }
+    setSortColumn(column);
+    setSortDirection(column === "selected_combined" ? "desc" : "asc");
+  };
 
   const saveStockSnapshot = async () => {
     if (!canEdit) return;
@@ -856,29 +869,24 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                 placeholder="Search SKU or product"
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-72"
               />
-              <select
-                value={monthFilter}
-                onChange={(e) => setMonthFilter(e.target.value)}
-                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              >
-                <option value="">Select month</option>
-                {monthOptions.map((month) => (
-                  <option key={month} value={month}>
-                    {formatUkDate(month)}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as InventorySort)}
-                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              >
-                <option value="product_asc">Sort: Product A-Z</option>
-                <option value="product_desc">Sort: Product Z-A</option>
-                <option value="month_units_desc">Sort: Month units high-low</option>
-                <option value="stock_value_desc">Sort: Stock value high-low</option>
-                <option value="days_left_asc">Sort: Amazon days left low-high</option>
-              </select>
+              <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">From</span>
+                <input
+                  type="date"
+                  value={periodStartDate}
+                  onChange={(e) => setPeriodStartDate(e.target.value)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">To</span>
+                <input
+                  type="date"
+                  value={periodEndDate}
+                  onChange={(e) => setPeriodEndDate(e.target.value)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+              </label>
             </div>
           </div>
           {canEdit ? (
@@ -898,12 +906,22 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             <thead className="sticky top-0 z-10 bg-slate-50 text-left uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-2 py-2">Select</th>
-                <th className="px-2 py-2">Product</th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("product")} className="inline-flex items-center gap-1">
+                    Product
+                    <span className="text-[10px]">{sortColumn === "product" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
                 <th className="px-2 py-2">Amazon SKU</th>
                 <th className="px-2 py-2">Temu SKU ID</th>
-                <th className="px-2 py-2">Selected Mo Amazon</th>
-                <th className="px-2 py-2">Selected Mo Temu</th>
-                <th className="px-2 py-2">Selected Mo Combined</th>
+                <th className="px-2 py-2">Selected Period Amazon</th>
+                <th className="px-2 py-2">Selected Period Temu</th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("selected_combined")} className="inline-flex items-center gap-1">
+                    Selected Period Combined
+                    <span className="text-[10px]">{sortColumn === "selected_combined" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
                 <th className="px-2 py-2">YTD Units</th>
                 <th className="px-2 py-2">Avg/Mo</th>
                 <th className="px-2 py-2">Amazon Stock</th>
@@ -941,10 +959,10 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     </td>
                     <td className="px-2 py-2">{row.amazonSku || "-"}</td>
                     <td className="px-2 py-2">{row.temuSkuId || "-"}</td>
-                    <td className="px-2 py-2">{monthUnitsByMapping.get(row.mappingId)?.amazon || 0}</td>
-                    <td className="px-2 py-2">{monthUnitsByMapping.get(row.mappingId)?.temu || 0}</td>
+                    <td className="px-2 py-2">{periodUnitsByMapping.get(row.mappingId)?.amazon || 0}</td>
+                    <td className="px-2 py-2">{periodUnitsByMapping.get(row.mappingId)?.temu || 0}</td>
                     <td className="px-2 py-2">
-                      {(monthUnitsByMapping.get(row.mappingId)?.amazon || 0) + (monthUnitsByMapping.get(row.mappingId)?.temu || 0)}
+                      {(periodUnitsByMapping.get(row.mappingId)?.amazon || 0) + (periodUnitsByMapping.get(row.mappingId)?.temu || 0)}
                     </td>
                     <td className="px-2 py-2">{row.yearTotalUnits}</td>
                     <td className="px-2 py-2">{row.yearAvgPerMonth}</td>
@@ -1043,10 +1061,10 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                           <td className="px-2 py-2 font-medium" title={row.productName}>{shortenName(row.productName)}</td>
                           <td className="px-2 py-2">{row.amazonSku || "-"}</td>
                           <td className="px-2 py-2">{row.temuSkuId || "-"}</td>
-                          <td className="px-2 py-2">{monthUnitsByMapping.get(row.mappingId)?.amazon || 0}</td>
-                          <td className="px-2 py-2">{monthUnitsByMapping.get(row.mappingId)?.temu || 0}</td>
+                          <td className="px-2 py-2">{periodUnitsByMapping.get(row.mappingId)?.amazon || 0}</td>
+                          <td className="px-2 py-2">{periodUnitsByMapping.get(row.mappingId)?.temu || 0}</td>
                           <td className="px-2 py-2">
-                            {(monthUnitsByMapping.get(row.mappingId)?.amazon || 0) + (monthUnitsByMapping.get(row.mappingId)?.temu || 0)}
+                            {(periodUnitsByMapping.get(row.mappingId)?.amazon || 0) + (periodUnitsByMapping.get(row.mappingId)?.temu || 0)}
                           </td>
                         </tr>
                       ))

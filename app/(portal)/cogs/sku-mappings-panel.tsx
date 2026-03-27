@@ -26,6 +26,24 @@ function shortenText(text: string, max = 30) {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
+function pickProductNameFromRawRow(platform: string, rawRow: Record<string, unknown> | null): string | null {
+  if (!rawRow) return null;
+  const keys = Object.keys(rawRow);
+  const find = (terms: string[]) =>
+    keys.find((key) => {
+      const normalized = key.trim().toLowerCase();
+      return terms.some((term) => normalized.includes(term));
+    });
+  if (platform.startsWith("amazon")) {
+    const key = find(["description", "item description", "product description", "product name", "item name", "title"]);
+    const value = key ? String(rawRow[key] ?? "").trim() : "";
+    return value || null;
+  }
+  const key = find(["product", "title", "description", "item"]) || keys.find((k) => k.trim().toLowerCase() === "sku");
+  const value = key ? String(rawRow[key] ?? "").trim() : "";
+  return value || null;
+}
+
 export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   const PAGE_SIZE = 20;
   const [rows, setRows] = useState<MappingRow[]>([]);
@@ -48,7 +66,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
     setLoading(true);
     setError(null);
     const supabase = createClient();
-    const [{ data, error: fetchError }, { count }] = await Promise.all([
+    const [{ data, error: fetchError }, { count }, { data: txData }] = await Promise.all([
       supabase
       .from("sku_mappings")
       .select("id, sku_catalog_id, amazon_sku, temu_sku_id, lead_time_days, created_at, sku_catalog:sku_catalog_id(product_name)")
@@ -56,12 +74,29 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       .order("created_at", { ascending: false })
       .range(offset, offset + PAGE_SIZE - 1),
       supabase.from("sku_mappings").select("id", { count: "exact", head: true }).eq("account_id", accountId),
+      supabase.from("report_transactions").select("platform, sku, raw_row").eq("account_id", accountId),
     ]);
     if (fetchError) {
       setError(fetchError.message);
       setLoading(false);
       return;
     }
+    const amazonNameBySku = new Map<string, string>();
+    const temuNameBySku = new Map<string, string>();
+    (txData || []).forEach((row) => {
+      const rec = row as { platform?: string | null; sku?: string | null; raw_row?: Record<string, unknown> | null };
+      const sku = String(rec.sku || "").trim().toUpperCase();
+      const platform = String(rec.platform || "").trim().toLowerCase();
+      if (!sku) return;
+      const candidate = pickProductNameFromRawRow(platform, rec.raw_row || null);
+      if (!candidate) return;
+      if (platform.startsWith("amazon")) {
+        if (!amazonNameBySku.has(sku)) amazonNameBySku.set(sku, candidate);
+      } else if (platform.startsWith("temu")) {
+        if (!temuNameBySku.has(sku)) temuNameBySku.set(sku, candidate);
+      }
+    });
+
     const mapped = (data || []).map((row) => {
       const rec = row as unknown as {
         id: string;
@@ -72,10 +107,15 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         created_at: string;
         sku_catalog?: { product_name?: string } | null;
       };
+      const amazonSkuNorm = String(rec.amazon_sku || "").trim().toUpperCase();
+      const temuSkuNorm = String(rec.temu_sku_id || "").trim().toUpperCase();
+      const amazonName = amazonSkuNorm ? amazonNameBySku.get(amazonSkuNorm) : null;
+      const temuNameRaw = temuSkuNorm ? temuNameBySku.get(temuSkuNorm) : null;
+      const temuName = temuNameRaw && temuNameRaw.toUpperCase() !== temuSkuNorm ? temuNameRaw : null;
       return {
         id: rec.id,
         sku_catalog_id: rec.sku_catalog_id,
-        product_name: rec.sku_catalog?.product_name || "Unnamed product",
+        product_name: amazonName || temuName || rec.sku_catalog?.product_name || "Unnamed product",
         amazon_sku: rec.amazon_sku,
         temu_sku_id: rec.temu_sku_id,
         lead_time_days: rec.lead_time_days,
