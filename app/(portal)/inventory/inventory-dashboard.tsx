@@ -105,13 +105,6 @@ function extractSkuFromRaw(platform: string, rawRow: Record<string, unknown> | n
     .toUpperCase();
 }
 
-function extractQtyFromRaw(rawRow: Record<string, unknown> | null, fallbackQty: number | null) {
-  if (!rawRow) return Number(fallbackQty || 0);
-  const candidate = findRawValue(rawRow, ["quantity", "qty", "units", "item quantity"]);
-  const parsed = Number(String(candidate ?? fallbackQty ?? "0").replace(/[^0-9.-]/g, ""));
-  return Number.isFinite(parsed) ? parsed : Number(fallbackQty || 0);
-}
-
 function isSaleUnitsRow(platform: string, rawRow: Record<string, unknown> | null) {
   if (!rawRow) return true;
   const txType = String(findRawValue(rawRow, ["transaction type", "type"]) ?? "")
@@ -252,6 +245,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     boxWeight: "",
     weightUnit: "kg" as "kg" | "lb",
   });
+  const [profileSkuSearch, setProfileSkuSearch] = useState("");
+  const [newProfileLinkedMappingIds, setNewProfileLinkedMappingIds] = useState<string[]>([]);
 
   const [selectedMappingIds, setSelectedMappingIds] = useState<string[]>([]);
   const [planType, setPlanType] = useState<"amazon_requirement" | "warehouse_requirement">("amazon_requirement");
@@ -424,11 +419,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         raw_row?: Record<string, unknown> | null;
       };
       const platform = String(rec.platform || "").trim().toLowerCase();
-      const sku = extractSkuFromRaw(platform, rec.raw_row || null, rec.sku);
+      const sku = String(rec.sku || "").trim().toUpperCase();
       if (!sku || !rec.transaction_date) return;
       if (!isSaleUnitsRow(platform, rec.raw_row || null)) return;
-      const quantity = extractQtyFromRaw(rec.raw_row || null, rec.quantity || 0);
-      if (!Number.isFinite(quantity)) return;
+      const quantity = Math.abs(Number(rec.quantity || 0));
+      if (!Number.isFinite(quantity) || quantity <= 0) return;
 
       const mappingId =
         platform.startsWith("amazon")
@@ -636,6 +631,22 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
   }, [computedRows, plannerSearch]);
 
+  const profileLinkRows = useMemo(() => {
+    const q = profileSkuSearch.trim().toLowerCase();
+    if (!q) return mappings;
+    return mappings.filter((m) => {
+      return (
+        m.productName.toLowerCase().includes(q) ||
+        String(m.amazonSku || "")
+          .toLowerCase()
+          .includes(q) ||
+        String(m.temuSkuId || "")
+          .toLowerCase()
+          .includes(q)
+      );
+    });
+  }, [mappings, profileSkuSearch]);
+
   const periodUnitsByMapping = useMemo(() => {
     const map = new Map<string, { amazon: number; temu: number }>();
     txFacts.forEach((tx) => {
@@ -702,22 +713,47 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       return;
     }
     const supabase = createClient();
-    const { error: saveError } = await supabase.from("pack_profiles").insert({
-      account_id: accountId,
-      profile_name: newProfile.profileName.trim(),
-      units_per_box: Number(newProfile.unitsPerBox),
-      box_length: Number(newProfile.boxLength),
-      box_width: Number(newProfile.boxWidth),
-      box_height: Number(newProfile.boxHeight),
-      dimension_unit: newProfile.dimensionUnit,
-      box_weight: newProfile.boxWeight ? Number(newProfile.boxWeight) : null,
-      weight_unit: newProfile.weightUnit,
-    });
-    if (saveError) {
-      setError(saveError.message);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const { data: savedProfile, error: saveError } = await supabase
+      .from("pack_profiles")
+      .insert({
+        account_id: accountId,
+        profile_name: newProfile.profileName.trim(),
+        units_per_box: Number(newProfile.unitsPerBox),
+        box_length: Number(newProfile.boxLength),
+        box_width: Number(newProfile.boxWidth),
+        box_height: Number(newProfile.boxHeight),
+        dimension_unit: newProfile.dimensionUnit,
+        box_weight: newProfile.boxWeight ? Number(newProfile.boxWeight) : null,
+        weight_unit: newProfile.weightUnit,
+      })
+      .select("id")
+      .single();
+    if (saveError || !savedProfile?.id) {
+      setError(saveError?.message || "Failed to save profile.");
       return;
     }
-    setMessage("Pack profile saved.");
+    if (newProfileLinkedMappingIds.length > 0) {
+      const linkRows = newProfileLinkedMappingIds.map((mappingId) => ({
+        account_id: accountId,
+        sku_mapping_id: mappingId,
+        movement_date: todayIsoUtc(),
+        movement_type: "adjustment" as const,
+        units_delta: 0,
+        boxes: null,
+        pack_profile_id: String(savedProfile.id),
+        notes: "__profile_link__",
+        created_by: user?.id || null,
+      }));
+      const { error: linkError } = await supabase.from("inventory_movements").insert(linkRows);
+      if (linkError) {
+        setError(linkError.message);
+        return;
+      }
+    }
+    setMessage("Pack profile saved and linked.");
     setNewProfile({
       profileName: "",
       unitsPerBox: "",
@@ -728,6 +764,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       boxWeight: "",
       weightUnit: "kg",
     });
+    setNewProfileLinkedMappingIds([]);
+    setProfileSkuSearch("");
     await loadAll();
   };
 
@@ -1257,6 +1295,40 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             <p className="text-xs text-slate-500">
               Save reusable carton specs once (units/box + dimensions). You can then reuse profiles in stock actions and shipment planning.
             </p>
+            <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">Link profile to SKU(s) first</span>
+                <input
+                  value={profileSkuSearch}
+                  onChange={(e) => setProfileSkuSearch(e.target.value)}
+                  placeholder="Search SKU or product"
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                />
+              </label>
+              <div className="max-h-32 overflow-auto rounded-lg border border-slate-200 bg-white p-2">
+                {profileLinkRows.length === 0 ? (
+                  <p className="text-xs text-slate-500">No SKU found for this search.</p>
+                ) : (
+                  <div className="grid gap-1">
+                    {profileLinkRows.map((m) => (
+                      <label key={m.mappingId} className="flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-slate-50">
+                        <input
+                          type="checkbox"
+                          checked={newProfileLinkedMappingIds.includes(m.mappingId)}
+                          onChange={(e) =>
+                            setNewProfileLinkedMappingIds((prev) =>
+                              e.target.checked ? [...new Set([...prev, m.mappingId])] : prev.filter((id) => id !== m.mappingId)
+                            )
+                          }
+                        />
+                        <span className="font-semibold text-slate-700">{shortenName(m.productName, 40)}</span>
+                        <span className="text-slate-500">({m.amazonSku || m.temuSkuId || "-"})</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
             <div className="grid gap-2 md:grid-cols-8">
               <input value={newProfile.profileName} onChange={(e) => setNewProfile((p) => ({ ...p, profileName: e.target.value }))} placeholder="Profile name" className="rounded-lg border border-slate-300 px-2 py-2 text-sm md:col-span-2" />
               <input value={newProfile.unitsPerBox} onChange={(e) => setNewProfile((p) => ({ ...p, unitsPerBox: e.target.value }))} type="number" placeholder="Units/box" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
