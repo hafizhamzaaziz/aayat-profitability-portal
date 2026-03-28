@@ -27,7 +27,22 @@ type PlanRowOverride = {
 
 type InventoryTab = "overview" | "stock-intake" | "shipment-planning";
 type IntakeAction = "supplier_inbound" | "seller_returns" | "b2b_wholesale" | "amazon_transfer";
-type SortColumn = "product" | "selected_combined";
+type SortColumn =
+  | "product"
+  | "amazon_sku"
+  | "temu_sku"
+  | "selected_amazon"
+  | "selected_temu"
+  | "selected_combined"
+  | "ytd"
+  | "avg_month"
+  | "amazon_stock"
+  | "warehouse_stock"
+  | "amazon_days"
+  | "warehouse_days"
+  | "stock_value"
+  | "potential_sales"
+  | "potential_profit";
 type SortDirection = "asc" | "desc";
 type TxFact = { mappingId: string; date: string; platform: "amazon" | "temu"; quantity: number };
 
@@ -65,6 +80,48 @@ function pickProductNameFromRawRow(platform: string, rawRow: Record<string, unkn
   const key = find(["product", "title", "description", "item"]) || keys.find((k) => k.trim().toLowerCase() === "sku");
   const value = key ? String(rawRow[key] ?? "").trim() : "";
   return value || null;
+}
+
+function normalizeKey(input: string) {
+  return input.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function findRawValue(rawRow: Record<string, unknown>, terms: string[]) {
+  const key = Object.keys(rawRow).find((k) => {
+    const n = normalizeKey(k);
+    return terms.some((term) => n.includes(term));
+  });
+  return key ? rawRow[key] : undefined;
+}
+
+function extractSkuFromRaw(platform: string, rawRow: Record<string, unknown> | null, fallbackSku: string | null) {
+  if (!rawRow) return String(fallbackSku || "").trim().toUpperCase();
+  const candidate =
+    platform.startsWith("amazon")
+      ? findRawValue(rawRow, ["sku", "seller sku", "merchant sku", "msku"])
+      : findRawValue(rawRow, ["sku id", "temu sku", "sku"]);
+  return String(candidate ?? fallbackSku ?? "")
+    .trim()
+    .toUpperCase();
+}
+
+function extractQtyFromRaw(rawRow: Record<string, unknown> | null, fallbackQty: number | null) {
+  if (!rawRow) return Number(fallbackQty || 0);
+  const candidate = findRawValue(rawRow, ["quantity", "qty", "units", "item quantity"]);
+  const parsed = Number(String(candidate ?? fallbackQty ?? "0").replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(parsed) ? parsed : Number(fallbackQty || 0);
+}
+
+function isSaleUnitsRow(platform: string, rawRow: Record<string, unknown> | null) {
+  if (!rawRow) return true;
+  const txType = String(findRawValue(rawRow, ["transaction type", "type"]) ?? "")
+    .trim()
+    .toLowerCase();
+  if (!txType) return true;
+  if (platform.startsWith("amazon")) {
+    return txType.includes("order") && !txType.includes("refund") && !txType.includes("adjustment") && !txType.includes("transfer");
+  }
+  return txType.includes("order payment");
 }
 
 async function ensureAmazonOnlyMappingsFromData(input: {
@@ -295,15 +352,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         sku: string | null;
         raw_row: Record<string, unknown> | null;
       };
-      const sku = String(rec.sku || "").trim().toUpperCase();
       const platform = String(rec.platform || "").trim().toLowerCase();
+      const sku = extractSkuFromRaw(platform, rec.raw_row, rec.sku);
       if (!sku) return;
       const maybeName = pickProductNameFromRawRow(platform, rec.raw_row);
       if (!maybeName) return;
       if (platform.startsWith("amazon")) {
         if (!amazonNameBySku.has(sku)) amazonNameBySku.set(sku, maybeName);
       } else if (platform.startsWith("temu")) {
-        if (!temuNameBySku.has(sku)) temuNameBySku.set(sku, maybeName);
+        if (!temuNameBySku.has(sku) && maybeName.toUpperCase() !== sku) temuNameBySku.set(sku, maybeName);
       }
     });
 
@@ -364,11 +421,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         transaction_date: string;
         sku: string | null;
         quantity: number | null;
+        raw_row?: Record<string, unknown> | null;
       };
-      const sku = String(rec.sku || "").trim().toUpperCase();
-      if (!sku || !rec.transaction_date) return;
       const platform = String(rec.platform || "").trim().toLowerCase();
-      const quantity = Number(rec.quantity || 0);
+      const sku = extractSkuFromRaw(platform, rec.raw_row || null, rec.sku);
+      if (!sku || !rec.transaction_date) return;
+      if (!isSaleUnitsRow(platform, rec.raw_row || null)) return;
+      const quantity = extractQtyFromRaw(rec.raw_row || null, rec.quantity || 0);
       if (!Number.isFinite(quantity)) return;
 
       const mappingId =
@@ -505,16 +564,54 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           );
         });
     const sorted = [...filtered].sort((a, b) => {
-      if (sortColumn === "selected_combined") {
-        const aCombined = txFacts
-          .filter((tx) => tx.mappingId === a.mappingId && (!periodStartDate || tx.date >= periodStartDate) && (!periodEndDate || tx.date <= periodEndDate))
+      const sumPeriod = (mappingId: string, platform?: "amazon" | "temu") =>
+        txFacts
+          .filter(
+            (tx) =>
+              tx.mappingId === mappingId &&
+              (!periodStartDate || tx.date >= periodStartDate) &&
+              (!periodEndDate || tx.date <= periodEndDate) &&
+              (!platform || tx.platform === platform)
+          )
           .reduce((acc, tx) => acc + Number(tx.quantity || 0), 0);
-        const bCombined = txFacts
-          .filter((tx) => tx.mappingId === b.mappingId && (!periodStartDate || tx.date >= periodStartDate) && (!periodEndDate || tx.date <= periodEndDate))
-          .reduce((acc, tx) => acc + Number(tx.quantity || 0), 0);
-        return sortDirection === "asc" ? aCombined - bCombined : bCombined - aCombined;
+      const aPeriodAmazon = sumPeriod(a.mappingId, "amazon");
+      const aPeriodTemu = sumPeriod(a.mappingId, "temu");
+      const bPeriodAmazon = sumPeriod(b.mappingId, "amazon");
+      const bPeriodTemu = sumPeriod(b.mappingId, "temu");
+      const compareNumeric = (x: number, y: number) => (sortDirection === "asc" ? x - y : y - x);
+      const compareText = (x: string, y: string) => (sortDirection === "asc" ? x.localeCompare(y) : y.localeCompare(x));
+      switch (sortColumn) {
+        case "amazon_sku":
+          return compareText(String(a.amazonSku || ""), String(b.amazonSku || ""));
+        case "temu_sku":
+          return compareText(String(a.temuSkuId || ""), String(b.temuSkuId || ""));
+        case "selected_amazon":
+          return compareNumeric(aPeriodAmazon, bPeriodAmazon);
+        case "selected_temu":
+          return compareNumeric(aPeriodTemu, bPeriodTemu);
+        case "selected_combined":
+          return compareNumeric(aPeriodAmazon + aPeriodTemu, bPeriodAmazon + bPeriodTemu);
+        case "ytd":
+          return compareNumeric(a.yearTotalUnits, b.yearTotalUnits);
+        case "avg_month":
+          return compareNumeric(a.yearAvgPerMonth, b.yearAvgPerMonth);
+        case "amazon_stock":
+          return compareNumeric(a.amazonUnitsOnHand, b.amazonUnitsOnHand);
+        case "warehouse_stock":
+          return compareNumeric(a.warehouseUnitsOnHand, b.warehouseUnitsOnHand);
+        case "amazon_days":
+          return compareNumeric(a.amazonDaysLeft ?? Number.POSITIVE_INFINITY, b.amazonDaysLeft ?? Number.POSITIVE_INFINITY);
+        case "warehouse_days":
+          return compareNumeric(a.warehouseDaysLeft ?? Number.POSITIVE_INFINITY, b.warehouseDaysLeft ?? Number.POSITIVE_INFINITY);
+        case "stock_value":
+          return compareNumeric(a.stockValue, b.stockValue);
+        case "potential_sales":
+          return compareNumeric(a.potentialSalesValue, b.potentialSalesValue);
+        case "potential_profit":
+          return compareNumeric(a.potentialProfitValue, b.potentialProfitValue);
+        default:
+          return compareText(a.productName, b.productName);
       }
-      return sortDirection === "asc" ? a.productName.localeCompare(b.productName) : b.productName.localeCompare(a.productName);
     });
     return sorted;
   }, [computedRows, search, sortColumn, sortDirection, txFacts, periodStartDate, periodEndDate]);
@@ -558,7 +655,18 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       return;
     }
     setSortColumn(column);
-    setSortDirection(column === "selected_combined" ? "desc" : "asc");
+    setSortDirection(
+      column === "selected_combined" ||
+        column === "selected_amazon" ||
+        column === "selected_temu" ||
+        column === "ytd" ||
+        column === "avg_month" ||
+        column === "stock_value" ||
+        column === "potential_sales" ||
+        column === "potential_profit"
+        ? "desc"
+        : "asc"
+    );
   };
 
   const saveStockSnapshot = async () => {
@@ -912,25 +1020,90 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     <span className="text-[10px]">{sortColumn === "product" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">Amazon SKU</th>
-                <th className="px-2 py-2">Temu SKU ID</th>
-                <th className="px-2 py-2">Selected Period Amazon</th>
-                <th className="px-2 py-2">Selected Period Temu</th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("amazon_sku")} className="inline-flex items-center gap-1">
+                    Amazon SKU
+                    <span className="text-[10px]">{sortColumn === "amazon_sku" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("temu_sku")} className="inline-flex items-center gap-1">
+                    Temu SKU ID
+                    <span className="text-[10px]">{sortColumn === "temu_sku" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("selected_amazon")} className="inline-flex items-center gap-1">
+                    Selected Period Amazon
+                    <span className="text-[10px]">{sortColumn === "selected_amazon" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("selected_temu")} className="inline-flex items-center gap-1">
+                    Selected Period Temu
+                    <span className="text-[10px]">{sortColumn === "selected_temu" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
                 <th className="px-2 py-2">
                   <button type="button" onClick={() => onSortClick("selected_combined")} className="inline-flex items-center gap-1">
                     Selected Period Combined
                     <span className="text-[10px]">{sortColumn === "selected_combined" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">YTD Units</th>
-                <th className="px-2 py-2">Avg/Mo</th>
-                <th className="px-2 py-2">Amazon Stock</th>
-                <th className="px-2 py-2">3PL Stock</th>
-                <th className="px-2 py-2">Amazon Days Left</th>
-                <th className="px-2 py-2">3PL Days Left</th>
-                <th className="px-2 py-2">Stock Value</th>
-                <th className="px-2 py-2">Potential Sales</th>
-                <th className="px-2 py-2">Potential Profit</th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("ytd")} className="inline-flex items-center gap-1">
+                    YTD Units
+                    <span className="text-[10px]">{sortColumn === "ytd" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("avg_month")} className="inline-flex items-center gap-1">
+                    Avg/Mo
+                    <span className="text-[10px]">{sortColumn === "avg_month" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("amazon_stock")} className="inline-flex items-center gap-1">
+                    Amazon Stock
+                    <span className="text-[10px]">{sortColumn === "amazon_stock" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("warehouse_stock")} className="inline-flex items-center gap-1">
+                    3PL Stock
+                    <span className="text-[10px]">{sortColumn === "warehouse_stock" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("amazon_days")} className="inline-flex items-center gap-1">
+                    Amazon Days Left
+                    <span className="text-[10px]">{sortColumn === "amazon_days" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("warehouse_days")} className="inline-flex items-center gap-1">
+                    3PL Days Left
+                    <span className="text-[10px]">{sortColumn === "warehouse_days" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("stock_value")} className="inline-flex items-center gap-1">
+                    Stock Value
+                    <span className="text-[10px]">{sortColumn === "stock_value" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("potential_sales")} className="inline-flex items-center gap-1">
+                    Potential Sales
+                    <span className="text-[10px]">{sortColumn === "potential_sales" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
+                <th className="px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("potential_profit")} className="inline-flex items-center gap-1">
+                    Potential Profit
+                    <span className="text-[10px]">{sortColumn === "potential_profit" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
+                  </button>
+                </th>
               </tr>
             </thead>
             <tbody>

@@ -107,6 +107,13 @@ function findHeaderIncludes(row: RowData, term: string) {
   return Object.keys(row).find((key) => norm(key).includes(term));
 }
 
+function findHeaderAnyIncludes(row: RowData, terms: string[]) {
+  return Object.keys(row).find((key) => {
+    const n = norm(key);
+    return terms.some((term) => n.includes(term));
+  });
+}
+
 function autoPickHeader(headers: string[], terms: string[]) {
   const hit = headers.find((header) => {
     const n = norm(header).replace(/[^a-z]/g, "");
@@ -117,6 +124,12 @@ function autoPickHeader(headers: string[], terms: string[]) {
 
 function toIsoDate(input: unknown): string | null {
   if (input == null) return null;
+  if (typeof input === "number" && Number.isFinite(input) && input > 1000) {
+    // Excel serial date fallback
+    const epoch = new Date(Date.UTC(1899, 11, 30));
+    const date = new Date(epoch.getTime() + input * 24 * 60 * 60 * 1000);
+    return date.toISOString().slice(0, 10);
+  }
   const text = String(input).trim();
   if (!text) return null;
 
@@ -128,6 +141,17 @@ function toIsoDate(input: unknown): string | null {
     const day = Number(dmy[1]);
     const month = Number(dmy[2]);
     const yearRaw = Number(dmy[3]);
+    const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+    }
+  }
+
+  const dmyDots = text.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2,4})/);
+  if (dmyDots) {
+    const day = Number(dmyDots[1]);
+    const month = Number(dmyDots[2]);
+    const yearRaw = Number(dmyDots[3]);
     const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
     if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
       return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
@@ -249,22 +273,31 @@ function processTemu(
   const cogsSnapshotMap = new Map<string, CogsSnapshotEntry>();
 
   for (const row of rows) {
-    const typeCol = findHeaderExact(row, "transaction type") || findHeaderExact(row, "type") || findHeaderIncludes(row, "transaction type");
-    const amountCol = findHeaderExact(row, "total") || findHeaderExact(row, "amount") || findHeaderIncludes(row, "total") || findHeaderIncludes(row, "amount");
-    const serviceFeeCol = findHeaderIncludes(row, "service fee");
+    const typeCol =
+      findHeaderExact(row, "transaction type") ||
+      findHeaderExact(row, "type") ||
+      findHeaderIncludes(row, "transaction type") ||
+      findHeaderAnyIncludes(row, ["type"]);
+    const amountCol =
+      findHeaderExact(row, "total") ||
+      findHeaderExact(row, "amount") ||
+      findHeaderIncludes(row, "total") ||
+      findHeaderIncludes(row, "amount") ||
+      findHeaderAnyIncludes(row, ["settlement", "cash", "payment amount"]);
+    const serviceFeeCol = findHeaderIncludes(row, "service fee") || findHeaderAnyIncludes(row, ["service fee"]);
 
     if (!typeCol || !amountCol) continue;
 
-    const type = norm(row[typeCol]);
+    const type = norm(row[typeCol]).replace(/\s+/g, " ");
     const amount = parseMoney(row[amountCol]);
     const fee = serviceFeeCol ? parseMoney(row[serviceFeeCol]) : 0;
 
-    if (type === "order payment" || type === "refund") {
+    if (type.includes("order payment") || type === "order" || type.includes("refund")) {
       const sku = String(row[skuCol] ?? "").trim().toUpperCase();
       const qty = parseMoney(row[qtyCol]);
       const txDateIso = extractTransactionDate(row, periodStartIso);
 
-      if (type === "order payment" && sku && qty > 0) {
+      if ((type.includes("order payment") || type === "order") && sku && qty > 0) {
         summary.unitsSold += Math.abs(qty);
         const cogs = resolveCogsVersion(cogsLookup, sku, txDateIso);
         if (cogs) {
@@ -292,12 +325,12 @@ function processTemu(
 
     summary.serviceFees += fee;
 
-    if (type === "order payment") summary.orders += amount;
-    else if (type === "refund") summary.refunds += amount;
+    if (type.includes("order payment") || type === "order") summary.orders += amount;
+    else if (type.includes("refund")) summary.refunds += amount;
     else if (type.includes("return shipping credit")) summary.shippingCredits += amount;
-    else if (type.includes("shipping label") || type.includes("shippinglabel")) summary.shippingLabels += amount;
+    else if (type.includes("shipping label") || type.includes("shippinglabel") || type.includes("shipping adjustment")) summary.shippingLabels += amount;
     else if (type.includes("chargeback")) summary.chargebacks += amount;
-    else if (type.includes("deduction") || type.includes("penalty")) summary.penalties += amount;
+    else if (type.includes("deduction") || type.includes("penalty") || type.includes("penalties")) summary.penalties += amount;
     else if (type.includes("seller repayment")) summary.sellerRepayment += amount;
     else if (type.includes("transfer")) summary.transfers += amount;
     else summary.other += amount;

@@ -44,6 +44,24 @@ function pickProductNameFromRawRow(platform: string, rawRow: Record<string, unkn
   return value || null;
 }
 
+function extractSkuFromRaw(platform: string, rawRow: Record<string, unknown> | null, fallbackSku: string | null) {
+  if (!rawRow) return String(fallbackSku || "").trim().toUpperCase();
+  const keys = Object.keys(rawRow);
+  const find = (terms: string[]) =>
+    keys.find((key) => {
+      const normalized = key.trim().toLowerCase();
+      return terms.some((term) => normalized.includes(term));
+    });
+  const key =
+    platform.startsWith("amazon")
+      ? find(["seller sku", "merchant sku", "sku"])
+      : find(["sku id", "temu sku", "sku"]);
+  const value = key ? rawRow[key] : fallbackSku;
+  return String(value ?? "")
+    .trim()
+    .toUpperCase();
+}
+
 export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   const PAGE_SIZE = 20;
   const [rows, setRows] = useState<MappingRow[]>([]);
@@ -85,15 +103,15 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
     const temuNameBySku = new Map<string, string>();
     (txData || []).forEach((row) => {
       const rec = row as { platform?: string | null; sku?: string | null; raw_row?: Record<string, unknown> | null };
-      const sku = String(rec.sku || "").trim().toUpperCase();
       const platform = String(rec.platform || "").trim().toLowerCase();
+      const sku = extractSkuFromRaw(platform, rec.raw_row || null, rec.sku || null);
       if (!sku) return;
       const candidate = pickProductNameFromRawRow(platform, rec.raw_row || null);
       if (!candidate) return;
       if (platform.startsWith("amazon")) {
         if (!amazonNameBySku.has(sku)) amazonNameBySku.set(sku, candidate);
       } else if (platform.startsWith("temu")) {
-        if (!temuNameBySku.has(sku)) temuNameBySku.set(sku, candidate);
+        if (!temuNameBySku.has(sku) && candidate.toUpperCase() !== sku) temuNameBySku.set(sku, candidate);
       }
     });
 
@@ -559,6 +577,7 @@ function EditableMappingRow({
   onDelete: () => void;
   className?: string;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <tr className={className}>
       <td className="px-3 py-2">
@@ -608,13 +627,39 @@ function EditableMappingRow({
       </td>
       {canEdit ? (
         <td className="px-3 py-2">
-          <div className="flex gap-2">
-            <button onClick={onSave} className="rounded-lg bg-slate-900 px-3 py-1 text-xs font-semibold text-white">
-              Save
+          <div className="relative inline-block">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((prev) => !prev)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-300 bg-white text-base font-semibold text-slate-700"
+              aria-label="Open row actions"
+            >
+              ⋮
             </button>
-            <button onClick={onDelete} className="rounded-lg bg-red-50 px-3 py-1 text-xs font-semibold text-red-700">
-              Delete
-            </button>
+            {menuOpen ? (
+              <div className="absolute right-0 z-20 mt-2 min-w-[130px] rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onSave();
+                  }}
+                  className="block w-full rounded-md px-3 py-1.5 text-left text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onDelete();
+                  }}
+                  className="block w-full rounded-md px-3 py-1.5 text-left text-xs font-semibold text-red-700 hover:bg-red-50"
+                >
+                  Delete
+                </button>
+              </div>
+            ) : null}
           </div>
         </td>
       ) : null}
