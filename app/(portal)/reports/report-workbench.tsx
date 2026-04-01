@@ -122,6 +122,16 @@ function autoPickHeader(headers: string[], terms: string[]) {
   return hit ?? "";
 }
 
+function normalizeSkuToken(input: unknown) {
+  const raw = String(input ?? "")
+    .replace(/\u00a0/g, " ")
+    .trim()
+    .toUpperCase();
+  if (!raw) return "";
+  if (/^\d+\.0+$/.test(raw)) return raw.replace(/\.0+$/, "");
+  return raw;
+}
+
 function toIsoDate(input: unknown): string | null {
   if (input == null) return null;
   if (typeof input === "number" && Number.isFinite(input) && input > 1000) {
@@ -206,18 +216,12 @@ function normalizeReportTransactions(input: {
   platform: Platform;
 }) {
   return input.rows.map((row) => {
-    const selectedSku = String(row[input.skuCol] ?? "")
-      .trim()
-      .toUpperCase();
+    const selectedSku = normalizeSkuToken(row[input.skuCol] ?? "");
     const fallbackSkuKey =
       input.platform === "temu"
         ? findHeaderAnyIncludes(row, ["sku id", "skuid", "temu sku"])
         : findHeaderAnyIncludes(row, ["sku", "seller sku", "merchant sku", "msku"]);
-    const fallbackSku = fallbackSkuKey
-      ? String(row[fallbackSkuKey] ?? "")
-          .trim()
-          .toUpperCase()
-      : "";
+    const fallbackSku = fallbackSkuKey ? normalizeSkuToken(row[fallbackSkuKey] ?? "") : "";
     const sku = input.platform === "temu" ? (fallbackSku || selectedSku) : (selectedSku || fallbackSku);
     const qty = parseMoney(row[input.qtyCol]);
     const txDate = extractTransactionDate(row, input.periodStartIso);

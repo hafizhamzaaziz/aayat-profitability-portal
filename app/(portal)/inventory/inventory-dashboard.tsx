@@ -58,6 +58,16 @@ function monthStartFromDateIso(input: string) {
   return `${input.slice(0, 7)}-01`;
 }
 
+function normalizeSkuToken(input: unknown) {
+  const raw = String(input ?? "")
+    .replace(/\u00a0/g, " ")
+    .trim()
+    .toUpperCase();
+  if (!raw) return "";
+  if (/^\d+\.0+$/.test(raw)) return raw.replace(/\.0+$/, "");
+  return raw;
+}
+
 function daysBetweenInclusive(startIso: string, endIso: string) {
   const start = new Date(`${startIso}T00:00:00Z`);
   const end = new Date(`${endIso}T00:00:00Z`);
@@ -89,14 +99,12 @@ function findRawValue(rawRow: Record<string, unknown>, terms: string[]) {
 }
 
 function extractSkuFromRaw(platform: string, rawRow: Record<string, unknown> | null, fallbackSku: string | null) {
-  if (!rawRow) return String(fallbackSku || "").trim().toUpperCase();
+  if (!rawRow) return normalizeSkuToken(fallbackSku || "");
   const candidate =
     platform.startsWith("amazon")
       ? findRawValue(rawRow, ["sku", "seller sku", "merchant sku", "msku"])
       : findRawValue(rawRow, ["sku id", "temu sku", "sku"]);
-  return String(candidate ?? fallbackSku ?? "")
-    .trim()
-    .toUpperCase();
+  return normalizeSkuToken(candidate ?? fallbackSku ?? "");
 }
 
 function isSaleUnitsRow(platform: string, rawRow: Record<string, unknown> | null) {

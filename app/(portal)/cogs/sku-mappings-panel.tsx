@@ -21,6 +21,23 @@ type Props = {
   canEdit: boolean;
 };
 
+function normalizeProductName(input: unknown) {
+  return String(input ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeSkuToken(input: unknown) {
+  const raw = String(input ?? "")
+    .replace(/\u00a0/g, " ")
+    .trim()
+    .toUpperCase();
+  if (!raw) return "";
+  if (/^\d+\.0+$/.test(raw)) return raw.replace(/\.0+$/, "");
+  return raw;
+}
+
 function shortenText(text: string, max = 30) {
   if (!text) return "";
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
@@ -212,9 +229,9 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       let skipped = 0;
 
       for (const row of bulkRows) {
-        const productName = String(row[productCol] ?? "").trim();
-        const amazonSku = amazonSkuCol ? String(row[amazonSkuCol] ?? "").trim().toUpperCase() : "";
-        const temuSkuId = temuSkuCol ? String(row[temuSkuCol] ?? "").trim().toUpperCase() : "";
+        const productName = normalizeProductName(row[productCol] ?? "");
+        const amazonSku = amazonSkuCol ? normalizeSkuToken(row[amazonSkuCol] ?? "") : "";
+        const temuSkuId = temuSkuCol ? normalizeSkuToken(row[temuSkuCol] ?? "") : "";
         const leadTimeRaw = leadTimeCol ? String(row[leadTimeCol] ?? "").trim() : "";
         const leadTimeDays = leadTimeRaw ? Number(leadTimeRaw) : null;
         if (!productName || (!amazonSku && !temuSkuId)) {
@@ -314,7 +331,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   const saveRow = async (row: MappingRow) => {
     if (!canEdit) return;
     const supabase = createClient();
-    const normalizedName = row.product_name.trim();
+    const normalizedName = normalizeProductName(row.product_name);
     const { data: sameNameCatalog, error: sameNameCatalogError } = await supabase
       .from("sku_catalog")
       .select("id")
@@ -342,8 +359,8 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       .from("sku_mappings")
       .update({
         sku_catalog_id: targetCatalogId,
-        amazon_sku: row.amazon_sku?.trim().toUpperCase() || null,
-        temu_sku_id: row.temu_sku_id?.trim().toUpperCase() || null,
+        amazon_sku: normalizeSkuToken(row.amazon_sku || "") || null,
+        temu_sku_id: normalizeSkuToken(row.temu_sku_id || "") || null,
         lead_time_days: row.lead_time_days ?? null,
       })
       .eq("id", row.id);

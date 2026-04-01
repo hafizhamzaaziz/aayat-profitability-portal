@@ -32,6 +32,13 @@ type Props = {
   canEdit: boolean;
 };
 
+function normalizeProductName(input: unknown) {
+  return String(input ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export default function CogsTable({ accountId, canEdit }: Props) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const PAGE_SIZE = 30;
@@ -138,7 +145,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
 
   const upsertProductAndMapping = async (supabase: ReturnType<typeof createClient>, sku: string, productName: string) => {
     const normalizedSku = sku.trim().toUpperCase();
-    const normalizedName = productName.trim();
+    const normalizedName = normalizeProductName(productName);
     if (!normalizedName) throw new Error("Product name is required.");
 
     const { data: existingMapping } = await supabase
@@ -440,7 +447,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         { product_name: string; sku: string; unit_cost: number; includes_vat: boolean; effective_from: string }
       >();
       for (const row of importRows) {
-        const productName = String(row[importNameCol] ?? "").trim();
+        const productName = normalizeProductName(row[importNameCol] ?? "");
         const sku = String(row[importSkuCol] ?? "").trim().toUpperCase();
         const unitCost = Number(parseMoney(row[importCostCol]).toFixed(2));
         if (!productName || !sku || unitCost <= 0) continue;
