@@ -371,7 +371,10 @@ function processTemu(
     summary.serviceFees += fee;
 
     if (type.includes("order payment") || type === "order") summary.orders += amount;
-    else if (type.includes("refund")) summary.refunds += amount;
+    else if (type.includes("refund")) {
+      // Business rule: Temu refund transaction-type should not be added to report totals.
+      summary.refunds += 0;
+    }
     else if (type.includes("return shipping credit")) summary.shippingCredits += amount;
     else if (type.includes("shipping label") || type.includes("shippinglabel") || type.includes("shipping adjustment")) summary.shippingLabels += amount;
     else if (type.includes("chargeback")) summary.chargebacks += amount;

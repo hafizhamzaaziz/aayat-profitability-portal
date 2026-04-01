@@ -63,7 +63,13 @@ export default async function ReportsPage({
           canProcess={canProcess}
         />
       ) : null}
-      <SavedReportsPanel accountId={account.id} canEdit={canProcess} currency={account.currency} vatRate={account.vat_rate} />
+      <SavedReportsPanel
+        accountId={account.id}
+        accountName={account.name}
+        canEdit={canProcess}
+        currency={account.currency}
+        vatRate={account.vat_rate}
+      />
     </div>
   );
 }

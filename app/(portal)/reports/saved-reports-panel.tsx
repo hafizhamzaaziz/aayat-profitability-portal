@@ -30,6 +30,7 @@ type Expense = {
 
 type Props = {
   accountId: string;
+  accountName: string;
   canEdit: boolean;
   currency: string;
   vatRate: number;
@@ -71,7 +72,7 @@ function fixed2(value: number) {
   return Number(value || 0).toFixed(2);
 }
 
-export default function SavedReportsPanel({ accountId, canEdit, currency, vatRate }: Props) {
+export default function SavedReportsPanel({ accountId, accountName, canEdit, currency, vatRate }: Props) {
   const PAGE_SIZE = 20;
   const [reports, setReports] = useState<SavedReport[]>([]);
   const [selectedForCombine, setSelectedForCombine] = useState<string[]>([]);
@@ -306,7 +307,8 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = objectUrl;
-      a.download = `profitability-${selected.platform}-${selected.period_start}.pdf`;
+      const safeAccount = accountName.replace(/[^a-zA-Z0-9-]/g, "-");
+      a.download = `${safeAccount}-profitability-${selected.platform}-${selected.period_start}.pdf`;
       a.click();
       URL.revokeObjectURL(objectUrl);
       setMessage("PDF exported.");
@@ -362,7 +364,8 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = objectUrl;
-      a.download = "combined-profitability-report.pdf";
+      const safeAccount = accountName.replace(/[^a-zA-Z0-9-]/g, "-");
+      a.download = `${safeAccount}-combined-profitability-report.pdf`;
       a.click();
       URL.revokeObjectURL(objectUrl);
       setMessage("Combined PDF exported.");
