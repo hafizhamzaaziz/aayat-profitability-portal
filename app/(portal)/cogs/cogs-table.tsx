@@ -225,22 +225,30 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       if (!patchErr) return String(reusableMapping.id);
     }
 
-    const { data: mappingRow, error: mappingError } = await supabase
+    const { data: mappingBySku, error: mappingBySkuError } = await supabase
       .from("sku_mappings")
-      .upsert(
-        {
-          account_id: accountId,
-          sku_catalog_id: String(catalogId),
-          amazon_sku: normalizedSku,
-          temu_sku_id: null,
-          lead_time_days: null,
-        },
-        { onConflict: "account_id,amazon_sku" }
-      )
+      .select("id")
+      .eq("account_id", accountId)
+      .eq("amazon_sku", normalizedSku)
+      .maybeSingle();
+    if (mappingBySkuError) throw mappingBySkuError;
+    if (mappingBySku?.id) return String(mappingBySku.id);
+
+    const { data: insertedMapping, error: insertedMappingError } = await supabase
+      .from("sku_mappings")
+      .insert({
+        account_id: accountId,
+        sku_catalog_id: String(catalogId),
+        amazon_sku: normalizedSku,
+        temu_sku_id: null,
+        lead_time_days: null,
+      })
       .select("id")
       .single();
-    if (mappingError || !mappingRow?.id) throw mappingError || new Error("Failed to create SKU mapping.");
-    return String(mappingRow.id);
+    if (insertedMappingError || !insertedMapping?.id) {
+      throw insertedMappingError || new Error("Failed to create SKU mapping.");
+    }
+    return String(insertedMapping.id);
   };
 
   const applyCogsVersion = async (input: {
