@@ -71,24 +71,6 @@ function shortenName(input: string, max = 28) {
   return `${value.slice(0, max - 3)}...`;
 }
 
-function pickProductNameFromRawRow(platform: string, rawRow: Record<string, unknown> | null): string | null {
-  if (!rawRow) return null;
-  const keys = Object.keys(rawRow);
-  const find = (terms: string[]) =>
-    keys.find((key) => {
-      const normalized = key.trim().toLowerCase();
-      return terms.some((term) => normalized.includes(term));
-    });
-  if (platform.startsWith("amazon")) {
-    const key = find(["description", "item description", "product description", "product name", "item name", "title"]);
-    const value = key ? String(rawRow[key] ?? "").trim() : "";
-    return value || null;
-  }
-  const key = find(["product", "title", "description", "item"]) || keys.find((k) => k.trim().toLowerCase() === "sku");
-  const value = key ? String(rawRow[key] ?? "").trim() : "";
-  return value || null;
-}
-
 function normalizeKey(input: string) {
   return input.trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -348,26 +330,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       return;
     }
 
-    const amazonNameBySku = new Map<string, string>();
-    const temuNameBySku = new Map<string, string>();
-    (reportTxRes.data || []).forEach((row) => {
-      const rec = row as unknown as {
-        platform: string | null;
-        sku: string | null;
-        raw_row: Record<string, unknown> | null;
-      };
-      const platform = String(rec.platform || "").trim().toLowerCase();
-      const sku = extractSkuFromRaw(platform, rec.raw_row, rec.sku);
-      if (!sku) return;
-      const maybeName = pickProductNameFromRawRow(platform, rec.raw_row);
-      if (!maybeName) return;
-      if (platform.startsWith("amazon")) {
-        if (!amazonNameBySku.has(sku)) amazonNameBySku.set(sku, maybeName);
-      } else if (platform.startsWith("temu")) {
-        if (!temuNameBySku.has(sku) && maybeName.toUpperCase() !== sku) temuNameBySku.set(sku, maybeName);
-      }
-    });
-
     const nextMappings: SkuRef[] = (mappingRes.data || []).map((row) => {
       const rec = row as unknown as {
         id: string;
@@ -378,11 +340,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       };
       return {
         mappingId: rec.id,
-        productName:
-          (rec.amazon_sku ? amazonNameBySku.get(String(rec.amazon_sku).trim().toUpperCase()) : null) ||
-          (rec.temu_sku_id ? temuNameBySku.get(String(rec.temu_sku_id).trim().toUpperCase()) : null) ||
-          rec.sku_catalog?.product_name ||
-          "Unnamed product",
+        productName: rec.sku_catalog?.product_name || rec.amazon_sku || rec.temu_sku_id || "Unnamed product",
         amazonSku: rec.amazon_sku,
         temuSkuId: rec.temu_sku_id,
         leadTimeDays: rec.lead_time_days,
@@ -428,7 +386,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         raw_row?: Record<string, unknown> | null;
       };
       const platform = String(rec.platform || "").trim().toLowerCase();
-      const sku = String(rec.sku || "").trim().toUpperCase();
+      const sku = extractSkuFromRaw(platform, rec.raw_row || null, rec.sku);
       if (!sku || !rec.transaction_date) return;
       if (!isSaleUnitsRow(platform, rec.raw_row || null)) return;
       const quantity = Math.abs(Number(rec.quantity || 0));
@@ -1087,6 +1045,9 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               </label>
             </div>
           </div>
+          <p className="text-xs text-slate-500">
+            Selected period metrics and YTD show inline comparison against the immediately previous matching period.
+          </p>
           {canEdit ? (
             <div className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <label className="text-xs text-slate-600">
@@ -1140,14 +1101,12 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     <span className="text-[10px]">{sortColumn === "selected_combined" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">Vs Previous Period</th>
                 <th className="px-2 py-2">
                   <button type="button" onClick={() => onSortClick("ytd")} className="inline-flex items-center gap-1">
                     YTD Units
                     <span className="text-[10px]">{sortColumn === "ytd" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">YTD Vs Previous Year</th>
                 <th className="px-2 py-2">
                   <button type="button" onClick={() => onSortClick("avg_month")} className="inline-flex items-center gap-1">
                     Avg/Mo
@@ -1201,7 +1160,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             <tbody>
               {visibleRows.length === 0 ? (
                 <tr>
-                  <td className="px-2 py-3 text-slate-500" colSpan={18}>
+                  <td className="px-2 py-3 text-slate-500" colSpan={16}>
                     No SKU mappings found yet. Create mappings in COGS first.
                   </td>
                 </tr>
@@ -1235,17 +1194,41 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     </td>
                     <td className="px-2 py-2">{row.amazonSku || "-"}</td>
                     <td className="px-2 py-2">{row.temuSkuId || "-"}</td>
-                    <td className="px-2 py-2">{selectedAmazon}</td>
-                    <td className="px-2 py-2">{selectedTemu}</td>
-                    <td className="px-2 py-2">{selectedCombined}</td>
-                    <td className={`px-2 py-2 ${selectedDelta > 0 ? "text-emerald-700" : selectedDelta < 0 ? "text-rose-700" : ""}`}>
-                      {selectedDelta >= 0 ? "+" : ""}
-                      {selectedDelta}
+                    <td className="px-2 py-2">
+                      <div>
+                        <p>{selectedAmazon}</p>
+                        <p className={`text-[10px] ${selectedAmazon - previousAmazon > 0 ? "text-emerald-700" : selectedAmazon - previousAmazon < 0 ? "text-rose-700" : "text-slate-500"}`}>
+                          vs last: {selectedAmazon - previousAmazon > 0 ? "+" : ""}
+                          {selectedAmazon - previousAmazon}
+                        </p>
+                      </div>
                     </td>
-                    <td className="px-2 py-2">{ytd}</td>
-                    <td className={`px-2 py-2 ${ytdDelta > 0 ? "text-emerald-700" : ytdDelta < 0 ? "text-rose-700" : ""}`}>
-                      {ytdDelta >= 0 ? "+" : ""}
-                      {ytdDelta}
+                    <td className="px-2 py-2">
+                      <div>
+                        <p>{selectedTemu}</p>
+                        <p className={`text-[10px] ${selectedTemu - previousTemu > 0 ? "text-emerald-700" : selectedTemu - previousTemu < 0 ? "text-rose-700" : "text-slate-500"}`}>
+                          vs last: {selectedTemu - previousTemu > 0 ? "+" : ""}
+                          {selectedTemu - previousTemu}
+                        </p>
+                      </div>
+                    </td>
+                    <td className="px-2 py-2">
+                      <div>
+                        <p>{selectedCombined}</p>
+                        <p className={`text-[10px] ${selectedDelta > 0 ? "text-emerald-700" : selectedDelta < 0 ? "text-rose-700" : "text-slate-500"}`}>
+                          vs last: {selectedDelta > 0 ? "+" : ""}
+                          {selectedDelta}
+                        </p>
+                      </div>
+                    </td>
+                    <td className="px-2 py-2">
+                      <div>
+                        <p>{ytd}</p>
+                        <p className={`text-[10px] ${ytdDelta > 0 ? "text-emerald-700" : ytdDelta < 0 ? "text-rose-700" : "text-slate-500"}`}>
+                          vs last: {ytdDelta > 0 ? "+" : ""}
+                          {ytdDelta}
+                        </p>
+                      </div>
                     </td>
                     <td className="px-2 py-2">{row.yearAvgPerMonth}</td>
                     <td className="px-2 py-2">

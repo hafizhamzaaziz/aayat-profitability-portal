@@ -7,6 +7,7 @@ import { pushClientNotification } from "@/lib/notifications/client";
 
 type Metric = {
   id: string;
+  created_at: string;
   recorded_date: string;
   product_name: string;
   asin: string | null;
@@ -58,6 +59,18 @@ function weekRangeLabel(weekStart: string) {
   return `${formatUkDate(weekStart)} to ${formatUkDate(addDays(weekStart, 6))}`;
 }
 
+function deltaText(current: number | null, previous: number | null, mode: "higher_better" | "lower_better" | "neutral", decimals = 2) {
+  if (current == null || previous == null) {
+    return { text: "vs last: -", className: "text-slate-500" };
+  }
+  const diff = current - previous;
+  const sign = diff > 0 ? "+" : "";
+  const text = `vs last: ${sign}${diff.toFixed(decimals)}`;
+  if (diff === 0 || mode === "neutral") return { text, className: "text-slate-500" };
+  if (mode === "higher_better") return { text, className: diff > 0 ? "text-emerald-700" : "text-rose-700" };
+  return { text, className: diff < 0 ? "text-emerald-700" : "text-rose-700" };
+}
+
 export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const PAGE_SIZE = 20;
   const [rows, setRows] = useState<Metric[]>([]);
@@ -83,9 +96,10 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
 
     const { data, error: fetchError } = await supabase
       .from("performance_metrics")
-      .select("id, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales")
+      .select("id, created_at, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales")
       .eq("account_id", accountId)
-      .order("recorded_date", { ascending: false });
+      .order("recorded_date", { ascending: false })
+      .order("created_at", { ascending: false });
 
     if (fetchError) {
       setError(fetchError.message);
@@ -252,14 +266,21 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
     const selected = rows.filter((row) => row.recorded_date === reportWeekStart);
     const previousWeekStart = addDays(reportWeekStart, -7);
     const previousByKey = new Map<string, Metric>();
+    const selectedByKey = new Map<string, Metric>();
 
     rows.forEach((row) => {
-      if (row.recorded_date !== previousWeekStart) return;
       const key = `${row.asin || ""}::${row.product_name.trim().toLowerCase()}`;
-      if (!previousByKey.has(key)) previousByKey.set(key, row);
+      if (row.recorded_date === previousWeekStart && !previousByKey.has(key)) {
+        previousByKey.set(key, row);
+      }
     });
 
-    return selected
+    selected.forEach((row) => {
+      const key = `${row.asin || ""}::${row.product_name.trim().toLowerCase()}`;
+      if (!selectedByKey.has(key)) selectedByKey.set(key, row);
+    });
+
+    return Array.from(selectedByKey.values())
       .map((row) => {
         const key = `${row.asin || ""}::${row.product_name.trim().toLowerCase()}`;
         const previous = previousByKey.get(key) || null;
@@ -463,15 +484,14 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
               <th className="px-4 py-3">Week</th>
               <th className="px-4 py-3">Product</th>
               <th className="px-4 py-3">ASIN</th>
-              <th className="px-4 py-3">BSR</th>
-              <th className="px-4 py-3">Reviews</th>
-              <th className="px-4 py-3">Rating</th>
               <th className="px-4 py-3">PPC Spend</th>
               <th className="px-4 py-3">PPC Sales</th>
               <th className="px-4 py-3">Total Sales</th>
               <th className="px-4 py-3">ACOS</th>
               <th className="px-4 py-3">TACOS</th>
-              <th className="px-4 py-3">Trends</th>
+              <th className="px-4 py-3">BSR</th>
+              <th className="px-4 py-3">Reviews</th>
+              <th className="px-4 py-3">Rating</th>
               {canEdit ? <th className="px-4 py-3">Actions</th> : null}
             </tr>
           </thead>
@@ -492,14 +512,16 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
               pagedWeekRows.map(({ current, previous }) => {
                 const acos = current.ppc_spend && current.ppc_sales ? (current.ppc_spend / current.ppc_sales) * 100 : null;
                 const tacos = current.ppc_spend && current.total_sales ? (current.ppc_spend / current.total_sales) * 100 : null;
-                const bsrTrend =
-                  current.bsr != null && previous?.bsr != null
-                    ? previous.bsr - current.bsr
-                    : null;
-                const reviewTrend =
-                  current.review_count != null && previous?.review_count != null
-                    ? current.review_count - previous.review_count
-                    : null;
+                const prevAcos = previous?.ppc_spend && previous?.ppc_sales ? (previous.ppc_spend / previous.ppc_sales) * 100 : null;
+                const prevTacos = previous?.ppc_spend && previous?.total_sales ? (previous.ppc_spend / previous.total_sales) * 100 : null;
+                const spendDelta = deltaText(current.ppc_spend, previous?.ppc_spend ?? null, "neutral");
+                const ppcSalesDelta = deltaText(current.ppc_sales, previous?.ppc_sales ?? null, "higher_better");
+                const totalSalesDelta = deltaText(current.total_sales, previous?.total_sales ?? null, "higher_better");
+                const acosDelta = deltaText(acos, prevAcos, "lower_better");
+                const tacosDelta = deltaText(tacos, prevTacos, "lower_better");
+                const bsrDelta = deltaText(current.bsr, previous?.bsr ?? null, "lower_better", 0);
+                const reviewsDelta = deltaText(current.review_count, previous?.review_count ?? null, "higher_better", 0);
+                const ratingDelta = deltaText(current.rating, previous?.rating ?? null, "higher_better");
                 return (
                   <tr key={current.id} className="border-t border-slate-100">
                     <td className="px-4 py-3">{weekRangeLabel(current.recorded_date)}</td>
@@ -518,34 +540,52 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
                         "-"
                       )}
                     </td>
-                    <td className="px-4 py-3">{current.bsr ?? "-"}</td>
-                    <td className="px-4 py-3">{current.review_count ?? "-"}</td>
-                    <td className="px-4 py-3">{current.rating ?? "-"}</td>
-                    <td className="px-4 py-3">{current.ppc_spend == null ? "-" : Number(current.ppc_spend).toFixed(2)}</td>
-                    <td className="px-4 py-3">{current.ppc_sales == null ? "-" : Number(current.ppc_sales).toFixed(2)}</td>
-                    <td className="px-4 py-3">{current.total_sales == null ? "-" : Number(current.total_sales).toFixed(2)}</td>
-                    <td className="px-4 py-3">{acos == null ? "-" : `${acos.toFixed(2)}%`}</td>
-                    <td className="px-4 py-3">{tacos == null ? "-" : `${tacos.toFixed(2)}%`}</td>
                     <td className="px-4 py-3">
-                      <div className="space-y-1 text-xs text-slate-600">
-                        <p>
-                          {bsrTrend == null
-                            ? "No prior BSR data"
-                            : bsrTrend > 0
-                              ? `BSR improved by ${bsrTrend}`
-                              : bsrTrend < 0
-                                ? `BSR dropped by ${Math.abs(bsrTrend)}`
-                                : "BSR unchanged"}
-                        </p>
-                        <p>
-                          {reviewTrend == null
-                            ? "No prior review data"
-                            : reviewTrend > 0
-                              ? `Reviews increased by ${reviewTrend}`
-                              : reviewTrend < 0
-                                ? `Reviews decreased by ${Math.abs(reviewTrend)}`
-                                : "Review count unchanged"}
-                        </p>
+                      <div>
+                        <p>{current.ppc_spend == null ? "-" : Number(current.ppc_spend).toFixed(2)}</p>
+                        <p className={`text-xs ${spendDelta.className}`}>{spendDelta.text}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div>
+                        <p>{current.ppc_sales == null ? "-" : Number(current.ppc_sales).toFixed(2)}</p>
+                        <p className={`text-xs ${ppcSalesDelta.className}`}>{ppcSalesDelta.text}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div>
+                        <p>{current.total_sales == null ? "-" : Number(current.total_sales).toFixed(2)}</p>
+                        <p className={`text-xs ${totalSalesDelta.className}`}>{totalSalesDelta.text}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div>
+                        <p>{acos == null ? "-" : `${acos.toFixed(2)}%`}</p>
+                        <p className={`text-xs ${acosDelta.className}`}>{acosDelta.text}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div>
+                        <p>{tacos == null ? "-" : `${tacos.toFixed(2)}%`}</p>
+                        <p className={`text-xs ${tacosDelta.className}`}>{tacosDelta.text}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div>
+                        <p>{current.bsr ?? "-"}</p>
+                        <p className={`text-xs ${bsrDelta.className}`}>{bsrDelta.text}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div>
+                        <p>{current.review_count ?? "-"}</p>
+                        <p className={`text-xs ${reviewsDelta.className}`}>{reviewsDelta.text}</p>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div>
+                        <p>{current.rating ?? "-"}</p>
+                        <p className={`text-xs ${ratingDelta.className}`}>{ratingDelta.text}</p>
                       </div>
                     </td>
                     {canEdit ? (

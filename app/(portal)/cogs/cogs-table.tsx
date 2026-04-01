@@ -9,6 +9,7 @@ import FileDropzone from "@/components/ui/file-dropzone";
 
 type CogsRow = {
   id: string;
+  product_name: string;
   sku: string;
   sku_mapping_id: string | null;
   unit_cost: number;
@@ -37,6 +38,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [rows, setRows] = useState<CogsRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [newProductName, setNewProductName] = useState("");
   const [newSku, setNewSku] = useState("");
   const [newCost, setNewCost] = useState("");
   const [newIncludesVat, setNewIncludesVat] = useState(false);
@@ -47,6 +49,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [importFileName, setImportFileName] = useState("");
   const [importRows, setImportRows] = useState<Record<string, unknown>[]>([]);
   const [importHeaders, setImportHeaders] = useState<string[]>([]);
+  const [importNameCol, setImportNameCol] = useState("");
   const [importSkuCol, setImportSkuCol] = useState("");
   const [importCostCol, setImportCostCol] = useState("");
   const [message, setMessage] = useState<string | null>(null);
@@ -79,7 +82,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     setError(null);
     try {
       const supabase = createClient();
-      const [{ data, error: fetchError }, { count }] = await Promise.all([
+      const [{ data, error: fetchError }, { count }, { data: mappingRows, error: mappingError }] = await Promise.all([
         supabase
           .from("cogs")
           .select("id, sku, sku_mapping_id, unit_cost, includes_vat, effective_from, updated_at")
@@ -87,11 +90,30 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           .order("sku", { ascending: true })
           .range(nextOffset, nextOffset + PAGE_SIZE - 1),
         supabase.from("cogs").select("id", { count: "exact", head: true }).eq("account_id", accountId),
+        supabase
+          .from("sku_mappings")
+          .select("id, amazon_sku, sku_catalog:sku_catalog_id(product_name)")
+          .eq("account_id", accountId),
       ]);
 
       if (fetchError) throw fetchError;
+      if (mappingError) throw mappingError;
+      const mapByMappingId: Record<string, string> = {};
+      const mapByAmazonSku: Record<string, string> = {};
+      (mappingRows || []).forEach((row) => {
+        const rec = row as { id?: string; amazon_sku?: string | null; sku_catalog?: { product_name?: string } | null };
+        if (!rec.id) return;
+        const productName = String(rec.sku_catalog?.product_name || "").trim();
+        mapByMappingId[String(rec.id)] = productName;
+        if (rec.amazon_sku) mapByAmazonSku[String(rec.amazon_sku).trim().toUpperCase()] = String(rec.id);
+      });
+      setMappingByAmazonSku(mapByAmazonSku);
       const normalized = (data || []).map((row) => ({
         id: String(row.id),
+        product_name:
+          (row.sku_mapping_id ? mapByMappingId[String(row.sku_mapping_id)] : "") ||
+          (mapByAmazonSku[String(row.sku).trim().toUpperCase()] ? mapByMappingId[mapByAmazonSku[String(row.sku).trim().toUpperCase()]] : "") ||
+          String(row.sku),
         sku: String(row.sku),
         sku_mapping_id: row.sku_mapping_id ? String(row.sku_mapping_id) : null,
         unit_cost: Number(row.unit_cost || 0),
@@ -114,24 +136,63 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
-  useEffect(() => {
-    const loadMappings = async () => {
-      const supabase = createClient();
-      const { data } = await supabase
-        .from("sku_mappings")
-        .select("id, amazon_sku")
-        .eq("account_id", accountId);
-      const map: Record<string, string> = {};
-      (data || []).forEach((row) => {
-        const rec = row as { id?: string; amazon_sku?: string | null };
-        if (rec.amazon_sku && rec.id) map[String(rec.amazon_sku).trim().toUpperCase()] = String(rec.id);
-      });
-      setMappingByAmazonSku(map);
-    };
-    void loadMappings();
-  }, [accountId]);
+  const upsertProductAndMapping = async (supabase: ReturnType<typeof createClient>, sku: string, productName: string) => {
+    const normalizedSku = sku.trim().toUpperCase();
+    const normalizedName = productName.trim();
+    if (!normalizedName) throw new Error("Product name is required.");
+
+    const { data: existingMapping } = await supabase
+      .from("sku_mappings")
+      .select("id, sku_catalog_id")
+      .eq("account_id", accountId)
+      .eq("amazon_sku", normalizedSku)
+      .maybeSingle();
+
+    if (existingMapping?.id && existingMapping?.sku_catalog_id) {
+      await supabase
+        .from("sku_catalog")
+        .update({ product_name: normalizedName })
+        .eq("id", String(existingMapping.sku_catalog_id));
+      return String(existingMapping.id);
+    }
+
+    const { data: existingCatalog } = await supabase
+      .from("sku_catalog")
+      .select("id")
+      .eq("account_id", accountId)
+      .eq("product_name", normalizedName)
+      .maybeSingle();
+    const catalogId =
+      existingCatalog?.id ||
+      (
+        await supabase
+          .from("sku_catalog")
+          .insert({ account_id: accountId, product_name: normalizedName })
+          .select("id")
+          .single()
+      ).data?.id;
+    if (!catalogId) throw new Error("Failed to resolve product catalog for COGS.");
+
+    const { data: mappingRow, error: mappingError } = await supabase
+      .from("sku_mappings")
+      .upsert(
+        {
+          account_id: accountId,
+          sku_catalog_id: String(catalogId),
+          amazon_sku: normalizedSku,
+          temu_sku_id: null,
+          lead_time_days: null,
+        },
+        { onConflict: "account_id,amazon_sku" }
+      )
+      .select("id")
+      .single();
+    if (mappingError || !mappingRow?.id) throw mappingError || new Error("Failed to create SKU mapping.");
+    return String(mappingRow.id);
+  };
 
   const applyCogsVersion = async (input: {
+    productName: string;
     sku: string;
     unitCost: number;
     includesVat: boolean;
@@ -139,8 +200,11 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   }) => {
     const supabase = createClient();
     const normalizedSku = input.sku.trim().toUpperCase();
+    const normalizedName = input.productName.trim();
     if (!normalizedSku) throw new Error("SKU is required.");
+    if (!normalizedName) throw new Error("Product name is required.");
     if (!input.effectiveFrom) throw new Error("Effective from date is required.");
+    const mappingId = await upsertProductAndMapping(supabase, normalizedSku, normalizedName);
 
     const {
       data: { user },
@@ -150,7 +214,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       {
         account_id: accountId,
         sku: normalizedSku,
-        sku_mapping_id: mappingByAmazonSku[normalizedSku] || null,
+        sku_mapping_id: mappingId || mappingByAmazonSku[normalizedSku] || null,
         unit_cost: Number(input.unitCost.toFixed(2)),
         includes_vat: input.includesVat,
         effective_from: input.effectiveFrom,
@@ -195,14 +259,16 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   };
 
   const addRow = async () => {
-    if (!newSku.trim() || !newCost.trim()) return;
+    if (!newProductName.trim() || !newSku.trim() || !newCost.trim()) return;
     try {
       await applyCogsVersion({
+        productName: newProductName,
         sku: newSku,
         unitCost: Number(newCost),
         includesVat: newIncludesVat,
         effectiveFrom: newEffectiveFrom,
       });
+      setNewProductName("");
       setNewSku("");
       setNewCost("");
       setNewIncludesVat(false);
@@ -220,9 +286,9 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     }
   };
 
-  const updateRow = async (id: string, sku: string, unitCost: number, includesVat: boolean, effectiveFrom: string) => {
+  const updateRow = async (id: string, productName: string, sku: string, unitCost: number, includesVat: boolean, effectiveFrom: string) => {
     try {
-      await applyCogsVersion({ sku, unitCost, includesVat, effectiveFrom });
+      await applyCogsVersion({ productName, sku, unitCost, includesVat, effectiveFrom });
       setMessage("COGS version saved.");
       await loadRows();
       if (historySku === sku.trim().toUpperCase()) {
@@ -321,9 +387,10 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       setImportRows(parsedRows);
       setImportHeaders(headers);
       setImportFileName(file.name);
+      setImportNameCol(pickColumn(headers, ["productname", "name", "title", "description", "itemname"]));
       setImportSkuCol(pickColumn(headers, ["sku", "asin", "itemid", "reference", "itemcode"]));
       setImportCostCol(pickColumn(headers, ["unitcost", "cost", "cogs", "buyingprice", "purchasecost"]));
-      setMessage("File loaded. Confirm SKU and Cost columns, then click Import.");
+      setMessage("File loaded. Confirm Product Name, SKU and Cost columns, then click Import.");
     } catch (err) {
       const msg = getErrorMessage(err, "Failed to import COGS file.");
       const columnHint = msg.includes("includes_vat")
@@ -343,8 +410,8 @@ export default function CogsTable({ accountId, canEdit }: Props) {
 
   const runImport = async () => {
     if (!importRows.length) return;
-    if (!importSkuCol || !importCostCol) {
-      setError("Please select both SKU Column and COG Column.");
+    if (!importNameCol || !importSkuCol || !importCostCol) {
+      setError("Please select Product Name, SKU Column and COG Column.");
       return;
     }
 
@@ -354,14 +421,15 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     try {
       const dedup = new Map<
         string,
-        { account_id: string; sku: string; unit_cost: number; includes_vat: boolean; effective_from: string }
+        { product_name: string; sku: string; unit_cost: number; includes_vat: boolean; effective_from: string }
       >();
       for (const row of importRows) {
+        const productName = String(row[importNameCol] ?? "").trim();
         const sku = String(row[importSkuCol] ?? "").trim().toUpperCase();
         const unitCost = Number(parseMoney(row[importCostCol]).toFixed(2));
-        if (!sku || unitCost <= 0) continue;
+        if (!productName || !sku || unitCost <= 0) continue;
         dedup.set(sku, {
-          account_id: accountId,
+          product_name: productName,
           sku,
           unit_cost: unitCost,
           includes_vat: importIncludesVat,
@@ -374,17 +442,15 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         throw new Error("No valid SKU + cost rows found after parsing selected columns.");
       }
 
-      const supabase = createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      const { error: upsertError } = await supabase.from("cogs").upsert(payload, { onConflict: "account_id,sku" });
-      if (upsertError) throw upsertError;
-      const historyPayload = payload.map((item) => ({ ...item, changed_by: user?.id || null }));
-      const { error: historyError } = await supabase.from("cogs_history").upsert(historyPayload, {
-        onConflict: "account_id,sku,effective_from",
-      });
-      if (historyError) throw historyError;
+      for (const item of payload) {
+        await applyCogsVersion({
+          productName: item.product_name,
+          sku: item.sku,
+          unitCost: item.unit_cost,
+          includesVat: item.includes_vat,
+          effectiveFrom: item.effective_from,
+        });
+      }
 
       setMessage(
         `Imported ${payload.length} unique SKUs successfully${payload.length < importRows.length ? " (duplicates merged)." : ""}`
@@ -411,7 +477,13 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     <div className="space-y-4">
       {canEdit ? (
         <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
-          <div className="grid gap-3 md:grid-cols-[1fr_160px_180px_180px_auto]">
+          <div className="grid gap-3 md:grid-cols-[1.2fr_1fr_160px_180px_180px_auto]">
+            <input
+              value={newProductName}
+              onChange={(event) => setNewProductName(event.target.value)}
+              placeholder="Product name"
+              className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+            />
             <input
               value={newSku}
               onChange={(event) => setNewSku(event.target.value)}
@@ -485,7 +557,22 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           </div>
 
           {importRows.length > 0 ? (
-            <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-3 md:grid-cols-[1fr_1fr_auto]">
+            <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-3 md:grid-cols-[1fr_1fr_1fr_auto]">
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Name Column</label>
+                <select
+                  value={importNameCol}
+                  onChange={(event) => setImportNameCol(event.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">Select column</option>
+                  {importHeaders.map((header) => (
+                    <option key={header} value={header}>
+                      {header}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">SKU Column</label>
                 <select
@@ -542,6 +629,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         <table className="min-w-full text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
+              <th className="px-4 py-3">Product Name</th>
               <th className="px-4 py-3">SKU</th>
               <th className="px-4 py-3">Mapped</th>
               <th className="px-4 py-3">Unit Cost</th>
@@ -554,13 +642,13 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 7 : 6}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 8 : 7}>
                   Loading COGS...
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 7 : 6}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 8 : 7}>
                   No COGS rows found for this account.
                 </td>
               </tr>
@@ -682,10 +770,11 @@ function EditableCogsRow({
 }: {
   row: CogsRow;
   canEdit: boolean;
-  onSave: (id: string, sku: string, unitCost: number, includesVat: boolean, effectiveFrom: string) => Promise<void>;
+  onSave: (id: string, productName: string, sku: string, unitCost: number, includesVat: boolean, effectiveFrom: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onHistory: (sku: string) => Promise<void>;
 }) {
+  const [productName, setProductName] = useState(row.product_name || row.sku);
   const [sku, setSku] = useState(row.sku);
   const [unitCost, setUnitCost] = useState(String(row.unit_cost));
   const [includesVat, setIncludesVat] = useState(Boolean(row.includes_vat));
@@ -694,6 +783,17 @@ function EditableCogsRow({
 
   return (
     <tr className="border-t border-slate-100">
+      <td className="px-4 py-3">
+        {canEdit ? (
+          <input
+            value={productName}
+            onChange={(event) => setProductName(event.target.value)}
+            className="w-full rounded-lg border border-slate-300 px-2 py-1"
+          />
+        ) : (
+          <span>{row.product_name || row.sku}</span>
+        )}
+      </td>
       <td className="px-4 py-3">
         {canEdit ? (
           <input
@@ -771,7 +871,7 @@ function EditableCogsRow({
                   type="button"
                   onClick={() => {
                     setMenuOpen(false);
-                    void onSave(row.id, sku, Number(unitCost), includesVat, effectiveFrom);
+                    void onSave(row.id, productName, sku, Number(unitCost), includesVat, effectiveFrom);
                   }}
                   className="block w-full rounded-md px-3 py-1.5 text-left text-xs font-semibold text-slate-700 hover:bg-slate-100"
                 >

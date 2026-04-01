@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
@@ -206,9 +206,19 @@ function normalizeReportTransactions(input: {
   platform: Platform;
 }) {
   return input.rows.map((row) => {
-    const sku = String(row[input.skuCol] ?? "")
+    const selectedSku = String(row[input.skuCol] ?? "")
       .trim()
       .toUpperCase();
+    const fallbackSkuKey =
+      input.platform === "temu"
+        ? findHeaderAnyIncludes(row, ["sku id", "skuid", "temu sku"])
+        : findHeaderAnyIncludes(row, ["sku", "seller sku", "merchant sku", "msku"]);
+    const fallbackSku = fallbackSkuKey
+      ? String(row[fallbackSkuKey] ?? "")
+          .trim()
+          .toUpperCase()
+      : "";
+    const sku = selectedSku || fallbackSku;
     const qty = parseMoney(row[input.qtyCol]);
     const txDate = extractTransactionDate(row, input.periodStartIso);
     return {
@@ -627,6 +637,14 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
     return Number(fromBreakdown ?? preview.grossSales ?? 0);
   }, [preview, platform]);
 
+  useEffect(() => {
+    if (!headers.length) return;
+    const temuSku = autoPickHeader(headers, ["skuid", "temuskuid"]);
+    const genericSku = autoPickHeader(headers, ["sku", "asin", "itemid", "reference"]);
+    setSkuCol(platform === "temu" ? (temuSku || genericSku) : genericSku);
+    setQtyCol(autoPickHeader(headers, ["qty", "quantity", "units"]));
+  }, [platform, headers]);
+
   const parseFile = async (file: File): Promise<RowData[]> => {
     if (file.name.toLowerCase().endsWith(".csv")) {
       return new Promise<RowData[]>((resolve, reject) => {
@@ -663,7 +681,9 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       setRows(parsedRows);
       setHeaders(nextHeaders);
       setFileName(file.name);
-      setSkuCol(autoPickHeader(nextHeaders, ["sku", "asin", "itemid", "reference"]));
+      const temuSku = autoPickHeader(nextHeaders, ["skuid", "temuskuid"]);
+      const genericSku = autoPickHeader(nextHeaders, ["sku", "asin", "itemid", "reference"]);
+      setSkuCol(platform === "temu" ? (temuSku || genericSku) : genericSku);
       setQtyCol(autoPickHeader(nextHeaders, ["qty", "quantity", "units"]));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to parse file.");
