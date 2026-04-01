@@ -58,6 +58,13 @@ function monthStartFromDateIso(input: string) {
   return `${input.slice(0, 7)}-01`;
 }
 
+function daysBetweenInclusive(startIso: string, endIso: string) {
+  const start = new Date(`${startIso}T00:00:00Z`);
+  const end = new Date(`${endIso}T00:00:00Z`);
+  const ms = end.getTime() - start.getTime();
+  return Math.max(1, Math.floor(ms / (24 * 60 * 60 * 1000)) + 1);
+}
+
 function shortenName(input: string, max = 28) {
   const value = String(input || "").trim();
   if (value.length <= max) return value;
@@ -201,6 +208,7 @@ async function ensureAmazonOnlyMappingsFromData(input: {
 }
 
 export default function InventoryDashboard({ accountId, canEdit, currency }: Props) {
+  const OVERVIEW_PAGE_SIZE = 25;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -211,6 +219,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [periodStartDate, setPeriodStartDate] = useState(addDays(todayIsoUtc(), -29));
   const [periodEndDate, setPeriodEndDate] = useState(todayIsoUtc());
+  const [overviewOffset, setOverviewOffset] = useState(0);
 
   const [mappings, setMappings] = useState<SkuRef[]>([]);
   const [cogs, setCogs] = useState<CogsRow[]>([]);
@@ -615,6 +624,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     return computedRows.filter((row) => selectedMappingIds.includes(row.mappingId));
   }, [computedRows, selectedMappingIds]);
 
+  const overviewTotalCount = visibleRows.length;
+  const overviewTotalPages = Math.max(1, Math.ceil(overviewTotalCount / OVERVIEW_PAGE_SIZE));
+  const overviewCurrentPage = Math.floor(overviewOffset / OVERVIEW_PAGE_SIZE) + 1;
+  const overviewRows = visibleRows.slice(overviewOffset, overviewOffset + OVERVIEW_PAGE_SIZE);
+
   const plannerVisibleRows = useMemo(() => {
     if (!plannerSearch.trim()) return computedRows;
     const q = plannerSearch.trim().toLowerCase();
@@ -659,6 +673,44 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
     return map;
   }, [txFacts, periodStartDate, periodEndDate]);
+
+  const previousPeriodRange = useMemo(() => {
+    const spanDays = daysBetweenInclusive(periodStartDate, periodEndDate);
+    const prevEnd = addDays(periodStartDate, -1);
+    const prevStart = addDays(prevEnd, -(spanDays - 1));
+    return { prevStart, prevEnd };
+  }, [periodStartDate, periodEndDate]);
+
+  const previousPeriodUnitsByMapping = useMemo(() => {
+    const map = new Map<string, { amazon: number; temu: number }>();
+    txFacts.forEach((tx) => {
+      if (tx.date < previousPeriodRange.prevStart || tx.date > previousPeriodRange.prevEnd) return;
+      const prev = map.get(tx.mappingId) || { amazon: 0, temu: 0 };
+      if (tx.platform === "temu") prev.temu += Number(tx.quantity || 0);
+      else prev.amazon += Number(tx.quantity || 0);
+      map.set(tx.mappingId, prev);
+    });
+    return map;
+  }, [txFacts, previousPeriodRange]);
+
+  const ytdComparisonByMapping = useMemo(() => {
+    const currentYearStart = `${nowIso.slice(0, 4)}-01-01`;
+    const prevNowIso = addDays(nowIso, -365);
+    const previousYearStart = `${prevNowIso.slice(0, 4)}-01-01`;
+    const map = new Map<string, { current: number; previous: number }>();
+
+    txFacts.forEach((tx) => {
+      const current = map.get(tx.mappingId) || { current: 0, previous: 0 };
+      if (tx.date >= currentYearStart && tx.date <= nowIso) current.current += Number(tx.quantity || 0);
+      if (tx.date >= previousYearStart && tx.date <= prevNowIso) current.previous += Number(tx.quantity || 0);
+      map.set(tx.mappingId, current);
+    });
+    return map;
+  }, [txFacts, nowIso]);
+
+  useEffect(() => {
+    setOverviewOffset(0);
+  }, [search, sortColumn, sortDirection, periodStartDate, periodEndDate]);
 
   const onSortClick = (column: SortColumn) => {
     if (sortColumn === column) {
@@ -1088,12 +1140,14 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     <span className="text-[10px]">{sortColumn === "selected_combined" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
+                <th className="px-2 py-2">Vs Previous Period</th>
                 <th className="px-2 py-2">
                   <button type="button" onClick={() => onSortClick("ytd")} className="inline-flex items-center gap-1">
                     YTD Units
                     <span className="text-[10px]">{sortColumn === "ytd" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
+                <th className="px-2 py-2">YTD Vs Previous Year</th>
                 <th className="px-2 py-2">
                   <button type="button" onClick={() => onSortClick("avg_month")} className="inline-flex items-center gap-1">
                     Avg/Mo
@@ -1147,12 +1201,23 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             <tbody>
               {visibleRows.length === 0 ? (
                 <tr>
-                  <td className="px-2 py-3 text-slate-500" colSpan={16}>
+                  <td className="px-2 py-3 text-slate-500" colSpan={18}>
                     No SKU mappings found yet. Create mappings in COGS first.
                   </td>
                 </tr>
               ) : (
-                visibleRows.map((row) => (
+                overviewRows.map((row) => {
+                  const selectedAmazon = periodUnitsByMapping.get(row.mappingId)?.amazon || 0;
+                  const selectedTemu = periodUnitsByMapping.get(row.mappingId)?.temu || 0;
+                  const selectedCombined = selectedAmazon + selectedTemu;
+                  const previousAmazon = previousPeriodUnitsByMapping.get(row.mappingId)?.amazon || 0;
+                  const previousTemu = previousPeriodUnitsByMapping.get(row.mappingId)?.temu || 0;
+                  const previousCombined = previousAmazon + previousTemu;
+                  const selectedDelta = selectedCombined - previousCombined;
+                  const ytd = ytdComparisonByMapping.get(row.mappingId)?.current || 0;
+                  const ytdPrevious = ytdComparisonByMapping.get(row.mappingId)?.previous || 0;
+                  const ytdDelta = ytd - ytdPrevious;
+                  return (
                   <tr key={row.mappingId} className="border-t border-slate-100">
                     <td className="px-2 py-2">
                       <input
@@ -1170,12 +1235,18 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     </td>
                     <td className="px-2 py-2">{row.amazonSku || "-"}</td>
                     <td className="px-2 py-2">{row.temuSkuId || "-"}</td>
-                    <td className="px-2 py-2">{periodUnitsByMapping.get(row.mappingId)?.amazon || 0}</td>
-                    <td className="px-2 py-2">{periodUnitsByMapping.get(row.mappingId)?.temu || 0}</td>
-                    <td className="px-2 py-2">
-                      {(periodUnitsByMapping.get(row.mappingId)?.amazon || 0) + (periodUnitsByMapping.get(row.mappingId)?.temu || 0)}
+                    <td className="px-2 py-2">{selectedAmazon}</td>
+                    <td className="px-2 py-2">{selectedTemu}</td>
+                    <td className="px-2 py-2">{selectedCombined}</td>
+                    <td className={`px-2 py-2 ${selectedDelta > 0 ? "text-emerald-700" : selectedDelta < 0 ? "text-rose-700" : ""}`}>
+                      {selectedDelta >= 0 ? "+" : ""}
+                      {selectedDelta}
                     </td>
-                    <td className="px-2 py-2">{row.yearTotalUnits}</td>
+                    <td className="px-2 py-2">{ytd}</td>
+                    <td className={`px-2 py-2 ${ytdDelta > 0 ? "text-emerald-700" : ytdDelta < 0 ? "text-rose-700" : ""}`}>
+                      {ytdDelta >= 0 ? "+" : ""}
+                      {ytdDelta}
+                    </td>
                     <td className="px-2 py-2">{row.yearAvgPerMonth}</td>
                     <td className="px-2 py-2">
                       {canEdit ? (
@@ -1232,59 +1303,44 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                       {row.potentialProfitValue.toFixed(2)}
                     </td>
                   </tr>
-                ))
+                );
+                })
               )}
             </tbody>
           </table>
         </div>
-          {canEdit ? (
-            <section className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <h4 className="text-sm font-semibold text-slate-800">Monthly Units Sold (Auto from Uploaded Transactions)</h4>
-              <p className="text-xs text-slate-500">
-                Monthly velocity is now calculated from `report_transactions` (saved from uploaded Amazon/Temu report rows). If you re-upload and
-                save reports, this section updates automatically.
-              </p>
-              <p className="text-xs text-slate-500">
-                Potential Sales/Potential Profit are estimated from stock value using a default 18% target net margin model.
-              </p>
-              <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
-                <table className="min-w-full text-xs">
-                  <thead className="bg-slate-50 text-left uppercase tracking-wide text-slate-500">
-                    <tr>
-                      <th className="px-2 py-2">Product</th>
-                      <th className="px-2 py-2">Amazon SKU</th>
-                      <th className="px-2 py-2">Temu SKU ID</th>
-                      <th className="px-2 py-2">Prev Month Amazon</th>
-                      <th className="px-2 py-2">Prev Month Temu</th>
-                      <th className="px-2 py-2">Prev Month Combined</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleRows.length === 0 ? (
-                      <tr>
-                        <td className="px-2 py-3 text-slate-500" colSpan={6}>
-                          No mapped SKUs available.
-                        </td>
-                      </tr>
-                    ) : (
-                      visibleRows.map((row) => (
-                        <tr key={`monthly-${row.mappingId}`} className="border-t border-slate-100">
-                          <td className="px-2 py-2 font-medium" title={row.productName}>{shortenName(row.productName)}</td>
-                          <td className="px-2 py-2">{row.amazonSku || "-"}</td>
-                          <td className="px-2 py-2">{row.temuSkuId || "-"}</td>
-                          <td className="px-2 py-2">{periodUnitsByMapping.get(row.mappingId)?.amazon || 0}</td>
-                          <td className="px-2 py-2">{periodUnitsByMapping.get(row.mappingId)?.temu || 0}</td>
-                          <td className="px-2 py-2">
-                            {(periodUnitsByMapping.get(row.mappingId)?.amazon || 0) + (periodUnitsByMapping.get(row.mappingId)?.temu || 0)}
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          ) : null}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <span className="text-xs text-slate-500">
+              Page {overviewCurrentPage} of {overviewTotalPages} ({overviewTotalCount} items)
+            </span>
+            <select
+              value={overviewCurrentPage}
+              onChange={(e) => setOverviewOffset((Number(e.target.value) - 1) * OVERVIEW_PAGE_SIZE)}
+              className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+            >
+              {Array.from({ length: overviewTotalPages }, (_, idx) => idx + 1).map((page) => (
+                <option key={page} value={page}>
+                  {page}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => setOverviewOffset((prev) => Math.max(0, prev - OVERVIEW_PAGE_SIZE))}
+              disabled={overviewOffset === 0}
+              className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setOverviewOffset((prev) => prev + OVERVIEW_PAGE_SIZE)}
+              disabled={overviewCurrentPage >= overviewTotalPages}
+              className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
         </section>
       ) : null}
 

@@ -71,28 +71,21 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const [downloadingWeekly, setDownloadingWeekly] = useState(false);
   const [reportWeekStart, setReportWeekStart] = useState<string>(lastCompletedWeekMonday());
   const [pageOffset, setPageOffset] = useState(0);
-  const [totalCount, setTotalCount] = useState(0);
-
-  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const currentPage = Math.floor(pageOffset / PAGE_SIZE) + 1;
   const reportingWeekStart = lastCompletedWeekMonday();
   const reportingWeekEnd = addDays(reportingWeekStart, 6);
   const selectedWeekEnd = addDays(reportWeekStart, 6);
 
-  const loadRows = async (offset = pageOffset) => {
+  const loadRows = async () => {
     setLoading(true);
     setError(null);
     const supabase = createClient();
 
-    const [{ data, error: fetchError }, { count }] = await Promise.all([
-      supabase
-        .from("performance_metrics")
-        .select("id, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales")
-        .eq("account_id", accountId)
-        .order("recorded_date", { ascending: false })
-        .range(offset, offset + PAGE_SIZE - 1),
-      supabase.from("performance_metrics").select("id", { count: "exact", head: true }).eq("account_id", accountId),
-    ]);
+    const { data, error: fetchError } = await supabase
+      .from("performance_metrics")
+      .select("id, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales")
+      .eq("account_id", accountId)
+      .order("recorded_date", { ascending: false });
 
     if (fetchError) {
       setError(fetchError.message);
@@ -102,18 +95,24 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
 
     const nextRows = (data || []) as Metric[];
     setRows(nextRows);
-    setTotalCount(Number(count || 0));
     setLoading(false);
   };
 
   useEffect(() => {
     setPageOffset(0);
-    void loadRows(0);
+    void loadRows();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
   const saveMetric = async () => {
-    if (!form.product_name.trim()) return;
+    if (!form.product_name.trim()) {
+      setError("Product name is required.");
+      return;
+    }
+    if (!form.asin.trim()) {
+      setError("ASIN is required.");
+      return;
+    }
 
     setSaving(true);
     setError(null);
@@ -163,7 +162,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
       setForm(initialForm());
       setEditingId(null);
       setMessage(editingId ? "Performance metric updated." : "Performance metric saved.");
-      await loadRows(pageOffset);
+      await loadRows();
     } catch (err) {
       const text = err instanceof Error ? err.message : "Failed to save metric.";
       setError(text);
@@ -194,7 +193,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
       return;
     }
 
-    await loadRows(pageOffset);
+    await loadRows();
   };
 
   const editMetric = (row: Metric) => {
@@ -249,49 +248,33 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
     }
   };
 
-  const trendByProduct = useMemo(() => {
-    const grouped = new Map<string, Metric[]>();
+  const selectedWeekRows = useMemo(() => {
+    const selected = rows.filter((row) => row.recorded_date === reportWeekStart);
+    const previousWeekStart = addDays(reportWeekStart, -7);
+    const previousByKey = new Map<string, Metric>();
 
     rows.forEach((row) => {
-      const key = row.product_name.trim().toLowerCase();
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key)?.push(row);
+      if (row.recorded_date !== previousWeekStart) return;
+      const key = `${row.asin || ""}::${row.product_name.trim().toLowerCase()}`;
+      if (!previousByKey.has(key)) previousByKey.set(key, row);
     });
 
-    const trends = new Map<
-      string,
-      {
-        bsrTrend: string;
-        reviewTrend: string;
-      }
-    >();
+    return selected
+      .map((row) => {
+        const key = `${row.asin || ""}::${row.product_name.trim().toLowerCase()}`;
+        const previous = previousByKey.get(key) || null;
+        return { current: row, previous };
+      })
+      .sort((a, b) => a.current.product_name.localeCompare(b.current.product_name));
+  }, [rows, reportWeekStart]);
 
-    grouped.forEach((items, key) => {
-      const sorted = [...items].sort((a, b) => (a.recorded_date < b.recorded_date ? 1 : -1));
-      const current = sorted[0];
-      const previous = sorted[1];
+  useEffect(() => {
+    setPageOffset(0);
+  }, [reportWeekStart]);
 
-      let bsrTrend = "No prior BSR data";
-      if (current?.bsr != null && previous?.bsr != null) {
-        const delta = previous.bsr - current.bsr;
-        if (delta > 0) bsrTrend = `BSR improved by ${delta} since last record`;
-        else if (delta < 0) bsrTrend = `BSR dropped by ${Math.abs(delta)} since last record`;
-        else bsrTrend = "BSR unchanged since last record";
-      }
-
-      let reviewTrend = "No prior review data";
-      if (current?.review_count != null && previous?.review_count != null) {
-        const delta = current.review_count - previous.review_count;
-        if (delta > 0) reviewTrend = `Reviews increased by ${delta}`;
-        else if (delta < 0) reviewTrend = `Reviews decreased by ${Math.abs(delta)}`;
-        else reviewTrend = "Review count unchanged";
-      }
-
-      trends.set(key, { bsrTrend, reviewTrend });
-    });
-
-    return trends;
-  }, [rows]);
+  const totalCount = selectedWeekRows.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const pagedWeekRows = selectedWeekRows.slice(pageOffset, pageOffset + PAGE_SIZE);
 
   return (
     <div className="space-y-4">
@@ -423,33 +406,43 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
       <div className="rounded-2xl border border-slate-200 bg-white p-3 md:hidden">
         {loading ? (
           <p className="text-sm text-slate-500">Loading performance data...</p>
-        ) : rows.length === 0 ? (
+        ) : pagedWeekRows.length === 0 ? (
           <p className="text-sm text-slate-500">No performance metrics saved for this account.</p>
         ) : (
           <div className="space-y-2">
-            {rows.map((row) => {
-              const acos = row.ppc_spend && row.ppc_sales ? (row.ppc_spend / row.ppc_sales) * 100 : null;
-              const tacos = row.ppc_spend && row.total_sales ? (row.ppc_spend / row.total_sales) * 100 : null;
+            {pagedWeekRows.map(({ current, previous }) => {
+              const acos = current.ppc_spend && current.ppc_sales ? (current.ppc_spend / current.ppc_sales) * 100 : null;
+              const tacos = current.ppc_spend && current.total_sales ? (current.ppc_spend / current.total_sales) * 100 : null;
+              const bsrTrend =
+                current.bsr != null && previous?.bsr != null
+                  ? previous.bsr - current.bsr
+                  : null;
+              const reviewTrend =
+                current.review_count != null && previous?.review_count != null
+                  ? current.review_count - previous.review_count
+                  : null;
               return (
-                <div key={row.id} className="rounded-xl border border-slate-200 p-3 text-sm">
-                  <p className="font-semibold">{row.product_name}</p>
-                  <p className="text-xs text-slate-500">{weekRangeLabel(row.recorded_date)}</p>
-                  <p className="mt-1">ASIN: {row.asin || "-"}</p>
-                  <p>BSR: {row.bsr ?? "-"}</p>
-                  <p>Reviews: {row.review_count ?? "-"}</p>
-                  <p>Rating: {row.rating ?? "-"}</p>
-                  <p>PPC Spend: {row.ppc_spend == null ? "-" : Number(row.ppc_spend).toFixed(2)}</p>
-                  <p>PPC Sales: {row.ppc_sales == null ? "-" : Number(row.ppc_sales).toFixed(2)}</p>
-                  <p>Total Sales: {row.total_sales == null ? "-" : Number(row.total_sales).toFixed(2)}</p>
+                <div key={current.id} className="rounded-xl border border-slate-200 p-3 text-sm">
+                  <p className="font-semibold">{current.product_name}</p>
+                  <p className="text-xs text-slate-500">{weekRangeLabel(current.recorded_date)}</p>
+                  <p className="mt-1">ASIN: {current.asin || "-"}</p>
+                  <p>BSR: {current.bsr ?? "-"}</p>
+                  <p>Reviews: {current.review_count ?? "-"}</p>
+                  <p>Rating: {current.rating ?? "-"}</p>
+                  <p>PPC Spend: {current.ppc_spend == null ? "-" : Number(current.ppc_spend).toFixed(2)}</p>
+                  <p>PPC Sales: {current.ppc_sales == null ? "-" : Number(current.ppc_sales).toFixed(2)}</p>
+                  <p>Total Sales: {current.total_sales == null ? "-" : Number(current.total_sales).toFixed(2)}</p>
                   <p>ACOS: {acos == null ? "-" : `${acos.toFixed(2)}%`}</p>
                   <p>TACOS: {tacos == null ? "-" : `${tacos.toFixed(2)}%`}</p>
+                  <p>Trend: {bsrTrend == null ? "No prior BSR data" : bsrTrend > 0 ? `BSR improved by ${bsrTrend}` : bsrTrend < 0 ? `BSR dropped by ${Math.abs(bsrTrend)}` : "BSR unchanged"}</p>
+                  <p>Trend: {reviewTrend == null ? "No prior review data" : reviewTrend > 0 ? `Reviews increased by ${reviewTrend}` : reviewTrend < 0 ? `Reviews decreased by ${Math.abs(reviewTrend)}` : "Review count unchanged"}</p>
                   {canEdit ? (
                     <div className="mt-2 flex gap-2">
-                      <button onClick={() => editMetric(row)} className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">
+                      <button onClick={() => editMetric(current)} className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">
                         Edit
                       </button>
                       <button
-                        onClick={() => deleteMetric(row.id)}
+                        onClick={() => deleteMetric(current.id)}
                         className="rounded-lg bg-red-50 px-2 py-1 text-xs font-semibold text-red-700"
                       >
                         Delete
@@ -489,59 +482,82 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
                   Loading performance data...
                 </td>
               </tr>
-            ) : rows.length === 0 ? (
+            ) : pagedWeekRows.length === 0 ? (
               <tr>
                 <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 13 : 12}>
                   No performance metrics saved for this account.
                 </td>
               </tr>
             ) : (
-              rows.map((row) => {
-                const trend = trendByProduct.get(row.product_name.trim().toLowerCase());
-                const acos = row.ppc_spend && row.ppc_sales ? (row.ppc_spend / row.ppc_sales) * 100 : null;
-                const tacos = row.ppc_spend && row.total_sales ? (row.ppc_spend / row.total_sales) * 100 : null;
+              pagedWeekRows.map(({ current, previous }) => {
+                const acos = current.ppc_spend && current.ppc_sales ? (current.ppc_spend / current.ppc_sales) * 100 : null;
+                const tacos = current.ppc_spend && current.total_sales ? (current.ppc_spend / current.total_sales) * 100 : null;
+                const bsrTrend =
+                  current.bsr != null && previous?.bsr != null
+                    ? previous.bsr - current.bsr
+                    : null;
+                const reviewTrend =
+                  current.review_count != null && previous?.review_count != null
+                    ? current.review_count - previous.review_count
+                    : null;
                 return (
-                  <tr key={row.id} className="border-t border-slate-100">
-                    <td className="px-4 py-3">{weekRangeLabel(row.recorded_date)}</td>
-                    <td className="px-4 py-3">{row.product_name}</td>
+                  <tr key={current.id} className="border-t border-slate-100">
+                    <td className="px-4 py-3">{weekRangeLabel(current.recorded_date)}</td>
+                    <td className="px-4 py-3">{current.product_name}</td>
                     <td className="px-4 py-3">
-                      {row.asin ? (
+                      {current.asin ? (
                         <a
-                          href={`https://www.amazon.co.uk/dp/${row.asin}`}
+                          href={`https://www.amazon.co.uk/dp/${current.asin}`}
                           target="_blank"
                           rel="noreferrer"
                           className="text-[var(--md-primary)] underline"
                         >
-                          {row.asin}
+                          {current.asin}
                         </a>
                       ) : (
                         "-"
                       )}
                     </td>
-                    <td className="px-4 py-3">{row.bsr ?? "-"}</td>
-                    <td className="px-4 py-3">{row.review_count ?? "-"}</td>
-                    <td className="px-4 py-3">{row.rating ?? "-"}</td>
-                    <td className="px-4 py-3">{row.ppc_spend == null ? "-" : Number(row.ppc_spend).toFixed(2)}</td>
-                    <td className="px-4 py-3">{row.ppc_sales == null ? "-" : Number(row.ppc_sales).toFixed(2)}</td>
-                    <td className="px-4 py-3">{row.total_sales == null ? "-" : Number(row.total_sales).toFixed(2)}</td>
+                    <td className="px-4 py-3">{current.bsr ?? "-"}</td>
+                    <td className="px-4 py-3">{current.review_count ?? "-"}</td>
+                    <td className="px-4 py-3">{current.rating ?? "-"}</td>
+                    <td className="px-4 py-3">{current.ppc_spend == null ? "-" : Number(current.ppc_spend).toFixed(2)}</td>
+                    <td className="px-4 py-3">{current.ppc_sales == null ? "-" : Number(current.ppc_sales).toFixed(2)}</td>
+                    <td className="px-4 py-3">{current.total_sales == null ? "-" : Number(current.total_sales).toFixed(2)}</td>
                     <td className="px-4 py-3">{acos == null ? "-" : `${acos.toFixed(2)}%`}</td>
                     <td className="px-4 py-3">{tacos == null ? "-" : `${tacos.toFixed(2)}%`}</td>
                     <td className="px-4 py-3">
                       <div className="space-y-1 text-xs text-slate-600">
-                        <p>{trend?.bsrTrend ?? "No trend"}</p>
-                        <p>{trend?.reviewTrend ?? "No trend"}</p>
+                        <p>
+                          {bsrTrend == null
+                            ? "No prior BSR data"
+                            : bsrTrend > 0
+                              ? `BSR improved by ${bsrTrend}`
+                              : bsrTrend < 0
+                                ? `BSR dropped by ${Math.abs(bsrTrend)}`
+                                : "BSR unchanged"}
+                        </p>
+                        <p>
+                          {reviewTrend == null
+                            ? "No prior review data"
+                            : reviewTrend > 0
+                              ? `Reviews increased by ${reviewTrend}`
+                              : reviewTrend < 0
+                                ? `Reviews decreased by ${Math.abs(reviewTrend)}`
+                                : "Review count unchanged"}
+                        </p>
                       </div>
                     </td>
                     {canEdit ? (
                       <td className="px-4 py-3">
                         <button
-                          onClick={() => editMetric(row)}
+                          onClick={() => editMetric(current)}
                           className="mr-2 rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700"
                         >
                           Edit
                         </button>
                         <button
-                          onClick={() => deleteMetric(row.id)}
+                          onClick={() => deleteMetric(current.id)}
                           className="rounded-lg bg-red-50 px-2 py-1 text-xs font-semibold text-red-700"
                         >
                           Delete
@@ -565,7 +581,6 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             const targetPage = Number(e.target.value);
             const next = Math.max(0, (targetPage - 1) * PAGE_SIZE);
             setPageOffset(next);
-            void loadRows(next);
           }}
           className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
         >
@@ -580,7 +595,6 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
           onClick={() => {
             const next = Math.max(0, pageOffset - PAGE_SIZE);
             setPageOffset(next);
-            void loadRows(next);
           }}
           disabled={pageOffset === 0 || loading}
           className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
@@ -592,7 +606,6 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
           onClick={() => {
             const next = pageOffset + PAGE_SIZE;
             setPageOffset(next);
-            void loadRows(next);
           }}
           disabled={currentPage >= totalPages || loading}
           className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"

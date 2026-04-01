@@ -52,8 +52,8 @@ export default async function CogsPage({
       <p className="text-slate-600">
         Account: <span className="font-semibold">{account.name}</span>
       </p>
-      <SkuMappingsPanel accountId={account.id} canEdit={canEdit} />
       <CogsTable accountId={account.id} canEdit={canEdit} />
+      <SkuMappingsPanel accountId={account.id} canEdit={canEdit} />
     </div>
   );
 }
