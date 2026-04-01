@@ -150,6 +150,12 @@ function dateUk(value: string) {
   return new Intl.DateTimeFormat("en-GB").format(date);
 }
 
+function addDaysIso(iso: string, days: number) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 function titleCase(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
 }
@@ -168,7 +174,44 @@ function MetricRow({ currency, label, value }: { currency: string; label: string
 }
 
 function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl: string | null }) {
-  const perf = data.performance.slice(0, 8);
+  const perfRows = data.performance || [];
+  const weekStartsInRange = Array.from(
+    new Set(
+      perfRows
+        .map((p) => String(p.recorded_date || "").slice(0, 10))
+        .filter((d) => d >= data.periodStart && d <= data.periodEnd)
+    )
+  ).sort();
+  const currentWeekStart = weekStartsInRange.length > 0 ? weekStartsInRange[weekStartsInRange.length - 1] : null;
+  const previousWeekStart = currentWeekStart ? addDaysIso(currentWeekStart, -7) : null;
+
+  const perfSnapshot = (() => {
+    if (!currentWeekStart) return [];
+    const currentRows = perfRows.filter((p) => String(p.recorded_date || "").slice(0, 10) === currentWeekStart);
+    const previousByProduct = new Map<string, PerformanceLine>();
+    perfRows
+      .filter((p) => String(p.recorded_date || "").slice(0, 10) === previousWeekStart)
+      .forEach((p) => {
+        const key = p.product_name.trim().toLowerCase();
+        if (!previousByProduct.has(key)) previousByProduct.set(key, p);
+      });
+    return currentRows
+      .map((row) => {
+        const key = row.product_name.trim().toLowerCase();
+        const prev = previousByProduct.get(key) || null;
+        return {
+          product_name: row.product_name,
+          bsr: row.bsr,
+          review_count: row.review_count,
+          rating: row.rating,
+          bsrDelta: row.bsr != null && prev?.bsr != null ? prev.bsr - row.bsr : null,
+          reviewDelta: row.review_count != null && prev?.review_count != null ? row.review_count - prev.review_count : null,
+          ratingDelta: row.rating != null && prev?.rating != null ? row.rating - prev.rating : null,
+        };
+      })
+      .sort((a, b) => a.product_name.localeCompare(b.product_name))
+      .slice(0, 8);
+  })();
   const showVatSummary = Number(data.vatRate || 0) > 0;
 
   return (
@@ -285,24 +328,51 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
         {data.platform === "amazon" ? (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Performance Metrics Snapshot</Text>
-            {perf.length === 0 ? (
+            {perfSnapshot.length === 0 ? (
               <Text style={styles.sub}>No performance metrics available.</Text>
             ) : (
               <>
+                <Text style={styles.sub}>
+                  Week: {dateUk(currentWeekStart || "")} to {dateUk(currentWeekStart ? addDaysIso(currentWeekStart, 6) : "")}
+                  {previousWeekStart ? ` (vs ${dateUk(previousWeekStart)} to ${dateUk(addDaysIso(previousWeekStart, 6))})` : ""}
+                </Text>
                 <View style={styles.tableHead}>
-                  <Text style={styles.c1}>Date</Text>
-                  <Text style={styles.c2}>Product</Text>
-                  <Text style={styles.c3}>BSR</Text>
-                  <Text style={styles.c4}>Reviews</Text>
-                  <Text style={styles.c5}>Rating</Text>
+                  <Text style={styles.c1}>Product</Text>
+                  <Text style={styles.c2}>BSR</Text>
+                  <Text style={styles.c3}>Reviews</Text>
+                  <Text style={styles.c4}>Rating</Text>
+                  <Text style={styles.c5}>Trend</Text>
                 </View>
-                {perf.map((p, idx) => (
+                {perfSnapshot.map((p, idx) => (
                   <View key={`${p.product_name}-${idx}`} style={styles.tr}>
-                    <Text style={styles.c1}>{dateUk(p.recorded_date)}</Text>
-                    <Text style={styles.c2}>{p.product_name}</Text>
-                    <Text style={styles.c3}>{p.bsr ?? "-"}</Text>
-                    <Text style={styles.c4}>{p.review_count ?? "-"}</Text>
-                    <Text style={styles.c5}>{p.rating ?? "-"}</Text>
+                    <Text style={styles.c1}>{p.product_name}</Text>
+                    <View style={styles.c2}>
+                      <Text>{p.bsr ?? "-"}</Text>
+                      <Text style={{ fontSize: 8, color: p.bsrDelta == null ? "#64748b" : p.bsrDelta > 0 ? "#15803d" : p.bsrDelta < 0 ? "#dc2626" : "#64748b" }}>
+                        {p.bsrDelta == null ? "vs last: -" : `vs last: ${p.bsrDelta > 0 ? "+" : ""}${p.bsrDelta}`}
+                      </Text>
+                    </View>
+                    <View style={styles.c3}>
+                      <Text>{p.review_count ?? "-"}</Text>
+                      <Text style={{ fontSize: 8, color: p.reviewDelta == null ? "#64748b" : p.reviewDelta > 0 ? "#15803d" : p.reviewDelta < 0 ? "#dc2626" : "#64748b" }}>
+                        {p.reviewDelta == null ? "vs last: -" : `vs last: ${p.reviewDelta > 0 ? "+" : ""}${p.reviewDelta}`}
+                      </Text>
+                    </View>
+                    <View style={styles.c4}>
+                      <Text>{p.rating ?? "-"}</Text>
+                      <Text style={{ fontSize: 8, color: p.ratingDelta == null ? "#64748b" : p.ratingDelta > 0 ? "#15803d" : p.ratingDelta < 0 ? "#dc2626" : "#64748b" }}>
+                        {p.ratingDelta == null ? "vs last: -" : `vs last: ${p.ratingDelta > 0 ? "+" : ""}${p.ratingDelta.toFixed(2)}`}
+                      </Text>
+                    </View>
+                    <View style={styles.c5}>
+                      <Text style={{ fontSize: 9, color: p.bsrDelta == null || p.reviewDelta == null ? "#64748b" : p.bsrDelta > 0 && p.reviewDelta > 0 ? "#15803d" : "#dc2626" }}>
+                        {p.bsrDelta == null || p.reviewDelta == null
+                          ? "No prior week"
+                          : p.bsrDelta > 0 && p.reviewDelta > 0
+                            ? "Improved"
+                            : "Mixed"}
+                      </Text>
+                    </View>
                   </View>
                 ))}
               </>
