@@ -39,6 +39,16 @@ function normalizeProductName(input: unknown) {
     .trim();
 }
 
+async function removeCatalogIfUnused(supabase: ReturnType<typeof createClient>, catalogId: string) {
+  const { count } = await supabase
+    .from("sku_mappings")
+    .select("id", { count: "exact", head: true })
+    .eq("sku_catalog_id", catalogId);
+  if (Number(count || 0) === 0) {
+    await supabase.from("sku_catalog").delete().eq("id", catalogId);
+  }
+}
+
 export default function CogsTable({ accountId, canEdit }: Props) {
   const todayIso = new Date().toISOString().slice(0, 10);
   const PAGE_SIZE = 30;
@@ -156,10 +166,29 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       .maybeSingle();
 
     if (existingMapping?.id && existingMapping?.sku_catalog_id) {
-      await supabase
+      const { data: existingCatalogByName, error: existingCatalogByNameError } = await supabase
         .from("sku_catalog")
-        .update({ product_name: normalizedName })
-        .eq("id", String(existingMapping.sku_catalog_id));
+        .select("id")
+        .eq("account_id", accountId)
+        .eq("product_name", normalizedName)
+        .maybeSingle();
+      if (existingCatalogByNameError) throw existingCatalogByNameError;
+
+      const currentCatalogId = String(existingMapping.sku_catalog_id);
+      if (existingCatalogByName?.id && String(existingCatalogByName.id) !== currentCatalogId) {
+        const { error: moveError } = await supabase
+          .from("sku_mappings")
+          .update({ sku_catalog_id: String(existingCatalogByName.id) })
+          .eq("id", String(existingMapping.id));
+        if (moveError) throw moveError;
+        await removeCatalogIfUnused(supabase, currentCatalogId);
+      } else {
+        const { error: renameError } = await supabase
+          .from("sku_catalog")
+          .update({ product_name: normalizedName })
+          .eq("id", currentCatalogId);
+        if (renameError) throw renameError;
+      }
       return String(existingMapping.id);
     }
 
@@ -223,7 +252,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   }) => {
     const supabase = createClient();
     const normalizedSku = input.sku.trim().toUpperCase();
-    const normalizedName = input.productName.trim();
+    const normalizedName = normalizeProductName(input.productName);
     if (!normalizedSku) throw new Error("SKU is required.");
     if (!normalizedName) throw new Error("Product name is required.");
     if (!input.effectiveFrom) throw new Error("Effective from date is required.");

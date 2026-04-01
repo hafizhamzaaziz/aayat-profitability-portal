@@ -86,6 +86,37 @@ type Props = {
   canProcess: boolean;
 };
 
+function applyZeroVatPresentation(result: CalculationPreview, vatRatePct: number, expensesNet: number): CalculationPreview {
+  if (Number(vatRatePct) !== 0) return result;
+  const uplift = (value: number) => Number((value * 1.2).toFixed(2));
+  const upliftedSettlement = uplift(result.breakdown.pnl.settlementNet);
+  return {
+    ...result,
+    grossSales: uplift(result.grossSales),
+    totalFees: uplift(result.totalFees),
+    outputVat: 0,
+    inputVat: 0,
+    netProfit: Number((upliftedSettlement - result.breakdown.pnl.purchaseCost - expensesNet).toFixed(2)),
+    breakdown: {
+      ...result.breakdown,
+      summaryLines: result.breakdown.summaryLines.map((line) => ({ ...line, value: uplift(line.value) })),
+      settlementValue: uplift(result.breakdown.settlementValue),
+      transferValue: uplift(result.breakdown.transferValue),
+      pnl: {
+        ...result.breakdown.pnl,
+        settlementNet: upliftedSettlement,
+        netProfit: Number((upliftedSettlement - result.breakdown.pnl.purchaseCost - expensesNet).toFixed(2)),
+      },
+      vat: {
+        outputVat: 0,
+        inputVatFees: 0,
+        inputVatPurchases: 0,
+        finalVat: 0,
+      },
+    },
+  };
+}
+
 function parseMoney(value: unknown) {
   if (value === null || value === undefined || value === "") return 0;
   const cleaned = String(value).replace(/[^0-9.-]/g, "");
@@ -620,6 +651,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
   const [preview, setPreview] = useState<CalculationPreview | null>(null);
   const [expenses, setExpenses] = useState<ExpenseRow[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const isZeroVatAccount = Number(account.vat_rate || 0) === 0;
 
   const currency = account.currency || "£";
 
@@ -648,6 +680,12 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
     setSkuCol(platform === "temu" ? (temuSku || genericSku) : genericSku);
     setQtyCol(autoPickHeader(headers, ["qty", "quantity", "units"]));
   }, [platform, headers]);
+
+  useEffect(() => {
+    if (isZeroVatAccount && platform !== "amazon") {
+      setPlatform("amazon");
+    }
+  }, [isZeroVatAccount, platform]);
 
   const parseFile = async (file: File): Promise<RowData[]> => {
     if (file.name.toLowerCase().endsWith(".csv")) {
@@ -779,10 +817,11 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
 
       const expenseTotals = computeExpenses(expenses, account.vat_rate);
 
-      const result =
+      const computed =
         platform === "amazon"
           ? processAmazon(rows, skuCol, qtyCol, cogsLookup, account.vat_rate, expenseTotals, periodStart)
           : processTemu(rows, skuCol, qtyCol, cogsLookup, account.vat_rate, expenseTotals, periodStart);
+      const result = applyZeroVatPresentation(computed, account.vat_rate, expenseTotals.net);
 
       const breakdownError = validateBreakdown(platform, result.breakdown);
       if (breakdownError) throw new Error(breakdownError);
@@ -958,7 +997,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
             disabled={!canProcess}
           >
             <option value="amazon">Amazon</option>
-            <option value="temu">Temu</option>
+            {!isZeroVatAccount ? <option value="temu">Temu</option> : null}
           </select>
         </div>
 
@@ -1143,14 +1182,18 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
               <p className="text-xs text-slate-500">Total Fees</p>
               <p className="text-xl font-semibold">{currency}{preview.totalFees.toFixed(2)}</p>
             </div>
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-xs text-slate-500">Output VAT</p>
-              <p className="text-xl font-semibold">{currency}{preview.outputVat.toFixed(2)}</p>
-            </div>
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <p className="text-xs text-slate-500">Input VAT</p>
-              <p className="text-xl font-semibold">{currency}{preview.inputVat.toFixed(2)}</p>
-            </div>
+            {!isZeroVatAccount ? (
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <p className="text-xs text-slate-500">Output VAT</p>
+                <p className="text-xl font-semibold">{currency}{preview.outputVat.toFixed(2)}</p>
+              </div>
+            ) : null}
+            {!isZeroVatAccount ? (
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <p className="text-xs text-slate-500">Input VAT</p>
+                <p className="text-xl font-semibold">{currency}{preview.inputVat.toFixed(2)}</p>
+              </div>
+            ) : null}
             <div className="rounded-2xl bg-slate-50 p-4">
               <p className="text-xs text-slate-500">Units Sold</p>
               <p className="text-xl font-semibold">{preview.unitsSold.toLocaleString()}</p>

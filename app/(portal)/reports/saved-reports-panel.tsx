@@ -102,6 +102,7 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
     payable_vat: "0",
     net_profit: "0",
   });
+  const isZeroVatAccount = Number(vatRate || 0) === 0;
 
   const loadReports = async (offset = pageOffset) => {
     setLoading(true);
@@ -207,8 +208,8 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
         gross_sales: money(Number(form.gross_sales)),
         total_cogs: money(Number(form.total_cogs)),
         total_fees: money(Number(form.total_fees)),
-        output_vat: money(Number(selected.output_vat || 0)),
-        input_vat: money(Number(selected.output_vat || 0) - Number(form.payable_vat)),
+        output_vat: isZeroVatAccount ? 0 : money(Number(selected.output_vat || 0)),
+        input_vat: isZeroVatAccount ? 0 : money(Number(selected.output_vat || 0) - Number(form.payable_vat)),
         net_profit: money(Number(form.net_profit)),
       };
 
@@ -510,7 +511,9 @@ export default function SavedReportsPanel({ accountId, canEdit, currency, vatRat
                   { key: "total_fees", label: "Total Fees" },
                   { key: "payable_vat", label: "Payable VAT" },
                   { key: "net_profit", label: "Net Profit" },
-                ].map(({ key, label }) => (
+                ]
+                  .filter((field) => !(isZeroVatAccount && field.key === "payable_vat"))
+                  .map(({ key, label }) => (
                   <label key={key} className="text-xs text-slate-600">
                     <span className="mb-1 block uppercase tracking-wide text-slate-500">{label}</span>
                     <input

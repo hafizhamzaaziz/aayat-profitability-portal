@@ -22,6 +22,7 @@ type Input = {
   accountLogoUrl: string | null;
   currency: string;
   platform: string;
+  vatRate: number;
   periodStart: string;
   periodEnd: string;
   report: {
@@ -168,6 +169,7 @@ function MetricRow({ currency, label, value }: { currency: string; label: string
 
 function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl: string | null }) {
   const perf = data.performance.slice(0, 8);
+  const showVatSummary = Number(data.vatRate || 0) > 0;
 
   return (
     <Document>
@@ -215,8 +217,8 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
             <View style={{ ...styles.col, ...styles.colRight }}>
               <View style={styles.colStack}>
                 <View style={styles.tightSection}>
-                  <Text style={styles.sectionTitle}>Profit & Loss (excl. VAT)</Text>
-                  <MetricRow currency={data.currency} label="Settlement (excl. VAT)" value={data.breakdown.pnl.settlementNet} />
+                  <Text style={styles.sectionTitle}>{showVatSummary ? "Profit & Loss (excl. VAT)" : "Profit & Loss"}</Text>
+                  <MetricRow currency={data.currency} label={showVatSummary ? "Settlement (excl. VAT)" : "Settlement"} value={data.breakdown.pnl.settlementNet} />
                   <MetricRow
                     currency={data.currency}
                     label="Your Purchase Cost (excl. VAT)"
@@ -229,18 +231,20 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
                     </Text>
                   </View>
                 </View>
-                <View style={{ ...styles.tightSection, ...styles.sectionGap }}>
-                  <Text style={styles.sectionTitle}>VAT Summary</Text>
-                  <MetricRow currency={data.currency} label="VAT on Sales (Output)" value={data.breakdown.vat.outputVat} />
-                  <MetricRow currency={data.currency} label="VAT on Fees/Inputs (Input)" value={-Math.abs(data.breakdown.vat.inputVatFees)} />
-                  <MetricRow currency={data.currency} label="VAT on Purchases (Input)" value={-Math.abs(data.breakdown.vat.inputVatPurchases)} />
-                  <View style={{ ...styles.row, borderBottomWidth: 0 }}>
-                    <Text style={{ ...styles.label, fontWeight: 700 }}>Final VAT to Pay / Reclaim</Text>
-                    <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.breakdown.vat.finalVat) }}>
-                      {m(data.currency, data.breakdown.vat.finalVat)}
-                    </Text>
+                {showVatSummary ? (
+                  <View style={{ ...styles.tightSection, ...styles.sectionGap }}>
+                    <Text style={styles.sectionTitle}>VAT Summary</Text>
+                    <MetricRow currency={data.currency} label="VAT on Sales (Output)" value={data.breakdown.vat.outputVat} />
+                    <MetricRow currency={data.currency} label="VAT on Fees/Inputs (Input)" value={-Math.abs(data.breakdown.vat.inputVatFees)} />
+                    <MetricRow currency={data.currency} label="VAT on Purchases (Input)" value={-Math.abs(data.breakdown.vat.inputVatPurchases)} />
+                    <View style={{ ...styles.row, borderBottomWidth: 0 }}>
+                      <Text style={{ ...styles.label, fontWeight: 700 }}>Final VAT to Pay / Reclaim</Text>
+                      <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.breakdown.vat.finalVat) }}>
+                        {m(data.currency, data.breakdown.vat.finalVat)}
+                      </Text>
+                    </View>
                   </View>
-                </View>
+                ) : null}
               </View>
             </View>
           </View>

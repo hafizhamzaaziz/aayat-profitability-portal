@@ -33,7 +33,7 @@ export async function GET(
 
   const { data: account } = await supabase
     .from("accounts")
-    .select("id, name, currency, logo_url")
+    .select("id, name, currency, vat_rate, logo_url")
     .eq("id", report.account_id)
     .single();
 
@@ -63,6 +63,7 @@ export async function GET(
     accountName: account.name,
     accountLogoUrl: account.logo_url,
     currency: account.currency,
+    vatRate: Number(account.vat_rate || 0),
     platform: report.platform,
     periodStart: report.period_start,
     periodEnd: report.period_end,

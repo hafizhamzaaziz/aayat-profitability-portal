@@ -77,7 +77,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const { data: account } = await supabase.from("accounts").select("name, currency, logo_url").eq("id", first.account_id).single();
+    const { data: account } = await supabase.from("accounts").select("name, currency, vat_rate, logo_url").eq("id", first.account_id).single();
     if (!account) return new Response("Account not found", { status: 404 });
 
     const reportIdSet = sorted.map((r) => r.id);
@@ -113,6 +113,7 @@ export async function POST(request: NextRequest) {
       accountName: account.name,
       accountLogoUrl: account.logo_url,
       currency: account.currency,
+      vatRate: Number(account.vat_rate || 0),
       platform: first.platform,
       periodStart: sorted[0].period_start,
       periodEnd: sorted[sorted.length - 1].period_end,

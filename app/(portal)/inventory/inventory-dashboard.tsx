@@ -123,7 +123,6 @@ async function ensureAmazonOnlyMappingsFromData(input: {
   accountId: string;
   canEdit: boolean;
   mappings: Array<{ id: string; amazon_sku: string | null }>;
-  cogs: Array<{ sku: string | null; sku_mapping_id: string | null }>;
   reportTransactions: Array<{ platform: string | null; sku: string | null }>;
 }) {
   if (!input.canEdit) return 0;
@@ -135,11 +134,6 @@ async function ensureAmazonOnlyMappingsFromData(input: {
   );
 
   const candidates = new Set<string>();
-  input.cogs.forEach((row) => {
-    if (row.sku_mapping_id) return;
-    const sku = String(row.sku || "").trim().toUpperCase();
-    if (sku) candidates.add(sku);
-  });
   input.reportTransactions.forEach((row) => {
     const platform = String(row.platform || "").trim().toLowerCase();
     if (!platform.startsWith("amazon")) return;
@@ -200,6 +194,41 @@ async function ensureAmazonOnlyMappingsFromData(input: {
   }
 
   return created;
+}
+
+async function repairTemuMappingsFromTransactionData(input: {
+  accountId: string;
+  canEdit: boolean;
+  mappings: Array<{ id: string; amazon_sku: string | null; temu_sku_id: string | null }>;
+  reportTransactions: Array<{ platform: string | null; sku: string | null; raw_row?: Record<string, unknown> | null }>;
+}) {
+  if (!input.canEdit) return 0;
+  const amazonSkuSet = new Set<string>();
+  const temuSkuSet = new Set<string>();
+  input.reportTransactions.forEach((row) => {
+    const platform = String(row.platform || "").trim().toLowerCase();
+    const sku =
+      platform.startsWith("temu")
+        ? normalizeSkuToken(findRawValue((row.raw_row || {}) as Record<string, unknown>, ["sku id", "temu sku", "sku"]) ?? row.sku ?? "")
+        : normalizeSkuToken(row.sku || "");
+    if (!sku) return;
+    if (platform.startsWith("amazon")) amazonSkuSet.add(sku);
+    if (platform.startsWith("temu")) temuSkuSet.add(sku);
+  });
+
+  const supabase = createClient();
+  let repaired = 0;
+  for (const m of input.mappings) {
+    const amazonSku = normalizeSkuToken(m.amazon_sku || "");
+    if (!amazonSku || m.temu_sku_id) continue;
+    if (!temuSkuSet.has(amazonSku) || amazonSkuSet.has(amazonSku)) continue;
+    const { error } = await supabase
+      .from("sku_mappings")
+      .update({ amazon_sku: null, temu_sku_id: amazonSku })
+      .eq("id", m.id);
+    if (!error) repaired += 1;
+  }
+  return repaired;
 }
 
 export default function InventoryDashboard({ accountId, canEdit, currency }: Props) {
@@ -305,10 +334,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       accountId,
       canEdit,
       mappings: (mappingRes.data || []) as Array<{ id: string; amazon_sku: string | null }>,
-      cogs: (cogsRes.data || []) as Array<{ sku: string | null; sku_mapping_id: string | null }>,
       reportTransactions: (reportTxRes.data || []) as Array<{ platform: string | null; sku: string | null }>,
     });
-    if (createdMissing > 0) {
+    const repairedTemu = await repairTemuMappingsFromTransactionData({
+      accountId,
+      canEdit,
+      mappings: (mappingRes.data || []) as Array<{ id: string; amazon_sku: string | null; temu_sku_id: string | null }>,
+      reportTransactions: (reportTxRes.data || []) as Array<{ platform: string | null; sku: string | null; raw_row?: Record<string, unknown> | null }>,
+    });
+    if (createdMissing > 0 || repairedTemu > 0) {
       await loadAll();
       return;
     }
@@ -1084,18 +1118,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     <span className="text-[10px]">{sortColumn === "product" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">
-                  <button type="button" onClick={() => onSortClick("amazon_sku")} className="inline-flex items-center gap-1">
-                    Amazon SKU
-                    <span className="text-[10px]">{sortColumn === "amazon_sku" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
-                  </button>
-                </th>
-                <th className="px-2 py-2">
-                  <button type="button" onClick={() => onSortClick("temu_sku")} className="inline-flex items-center gap-1">
-                    Temu SKU ID
-                    <span className="text-[10px]">{sortColumn === "temu_sku" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
-                  </button>
-                </th>
+                <th className="px-2 py-2">SKU</th>
                 <th className="px-2 py-2">
                   <button type="button" onClick={() => onSortClick("selected_amazon")} className="inline-flex items-center gap-1">
                     Selected Period Amazon
@@ -1173,7 +1196,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             <tbody>
               {visibleRows.length === 0 ? (
                 <tr>
-                  <td className="px-2 py-3 text-slate-500" colSpan={16}>
+                  <td className="px-2 py-3 text-slate-500" colSpan={15}>
                     No SKU mappings found yet. Create mappings in COGS first.
                   </td>
                 </tr>
@@ -1205,8 +1228,10 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     <td className="px-2 py-2 font-medium" title={row.productName}>
                       {shortenName(row.productName)}
                     </td>
-                    <td className="px-2 py-2">{row.amazonSku || "-"}</td>
-                    <td className="px-2 py-2">{row.temuSkuId || "-"}</td>
+                    <td className="px-2 py-2">
+                      {row.amazonSku || row.temuSkuId || "-"}
+                      {row.amazonSku && row.temuSkuId ? <span className="ml-1 text-[10px] text-slate-500">(A+T)</span> : null}
+                    </td>
                     <td className="px-2 py-2">
                       <div>
                         <p>{selectedAmazon}</p>
