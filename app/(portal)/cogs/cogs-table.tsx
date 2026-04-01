@@ -173,6 +173,22 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       ).data?.id;
     if (!catalogId) throw new Error("Failed to resolve product catalog for COGS.");
 
+    const { data: reusableMapping } = await supabase
+      .from("sku_mappings")
+      .select("id")
+      .eq("account_id", accountId)
+      .eq("sku_catalog_id", String(catalogId))
+      .is("amazon_sku", null)
+      .limit(1)
+      .maybeSingle();
+    if (reusableMapping?.id) {
+      const { error: patchErr } = await supabase
+        .from("sku_mappings")
+        .update({ amazon_sku: normalizedSku })
+        .eq("id", String(reusableMapping.id));
+      if (!patchErr) return String(reusableMapping.id);
+    }
+
     const { data: mappingRow, error: mappingError } = await supabase
       .from("sku_mappings")
       .upsert(

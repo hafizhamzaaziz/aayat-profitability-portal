@@ -76,11 +76,16 @@ function normalizeKey(input: string) {
 }
 
 function findRawValue(rawRow: Record<string, unknown>, terms: string[]) {
-  const key = Object.keys(rawRow).find((k) => {
-    const n = normalizeKey(k);
-    return terms.some((term) => n.includes(term));
-  });
-  return key ? rawRow[key] : undefined;
+  const keys = Object.keys(rawRow);
+  for (const term of terms) {
+    const match = keys.find((k) => normalizeKey(k) === term);
+    if (match) return rawRow[match];
+  }
+  for (const term of terms) {
+    const match = keys.find((k) => normalizeKey(k).includes(term));
+    if (match) return rawRow[match];
+  }
+  return undefined;
 }
 
 function extractSkuFromRaw(platform: string, rawRow: Record<string, unknown> | null, fallbackSku: string | null) {

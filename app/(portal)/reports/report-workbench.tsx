@@ -218,7 +218,7 @@ function normalizeReportTransactions(input: {
           .trim()
           .toUpperCase()
       : "";
-    const sku = selectedSku || fallbackSku;
+    const sku = input.platform === "temu" ? (fallbackSku || selectedSku) : (selectedSku || fallbackSku);
     const qty = parseMoney(row[input.qtyCol]);
     const txDate = extractTransactionDate(row, input.periodStartIso);
     return {
