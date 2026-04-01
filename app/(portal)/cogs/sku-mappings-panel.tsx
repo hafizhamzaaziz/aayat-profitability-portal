@@ -26,42 +26,6 @@ function shortenText(text: string, max = 30) {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
-function pickProductNameFromRawRow(platform: string, rawRow: Record<string, unknown> | null): string | null {
-  if (!rawRow) return null;
-  const keys = Object.keys(rawRow);
-  const find = (terms: string[]) =>
-    keys.find((key) => {
-      const normalized = key.trim().toLowerCase();
-      return terms.some((term) => normalized.includes(term));
-    });
-  if (platform.startsWith("amazon")) {
-    const key = find(["description", "item description", "product description", "product name", "item name", "title"]);
-    const value = key ? String(rawRow[key] ?? "").trim() : "";
-    return value || null;
-  }
-  const key = find(["product", "title", "description", "item"]) || keys.find((k) => k.trim().toLowerCase() === "sku");
-  const value = key ? String(rawRow[key] ?? "").trim() : "";
-  return value || null;
-}
-
-function extractSkuFromRaw(platform: string, rawRow: Record<string, unknown> | null, fallbackSku: string | null) {
-  if (!rawRow) return String(fallbackSku || "").trim().toUpperCase();
-  const keys = Object.keys(rawRow);
-  const find = (terms: string[]) =>
-    keys.find((key) => {
-      const normalized = key.trim().toLowerCase();
-      return terms.some((term) => normalized.includes(term));
-    });
-  const key =
-    platform.startsWith("amazon")
-      ? find(["seller sku", "merchant sku", "sku"])
-      : find(["sku id", "temu sku", "sku"]);
-  const value = key ? rawRow[key] : fallbackSku;
-  return String(value ?? "")
-    .trim()
-    .toUpperCase();
-}
-
 export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   const PAGE_SIZE = 20;
   const [rows, setRows] = useState<MappingRow[]>([]);
@@ -84,7 +48,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
     setLoading(true);
     setError(null);
     const supabase = createClient();
-    const [{ data, error: fetchError }, { count }, { data: txData }] = await Promise.all([
+    const [{ data, error: fetchError }, { count }] = await Promise.all([
       supabase
       .from("sku_mappings")
       .select("id, sku_catalog_id, amazon_sku, temu_sku_id, lead_time_days, created_at, sku_catalog:sku_catalog_id(product_name)")
@@ -92,29 +56,12 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       .order("created_at", { ascending: false })
       .range(offset, offset + PAGE_SIZE - 1),
       supabase.from("sku_mappings").select("id", { count: "exact", head: true }).eq("account_id", accountId),
-      supabase.from("report_transactions").select("platform, sku, raw_row").eq("account_id", accountId),
     ]);
     if (fetchError) {
       setError(fetchError.message);
       setLoading(false);
       return;
     }
-    const amazonNameBySku = new Map<string, string>();
-    const temuNameBySku = new Map<string, string>();
-    (txData || []).forEach((row) => {
-      const rec = row as { platform?: string | null; sku?: string | null; raw_row?: Record<string, unknown> | null };
-      const platform = String(rec.platform || "").trim().toLowerCase();
-      const sku = extractSkuFromRaw(platform, rec.raw_row || null, rec.sku || null);
-      if (!sku) return;
-      const candidate = pickProductNameFromRawRow(platform, rec.raw_row || null);
-      if (!candidate) return;
-      if (platform.startsWith("amazon")) {
-        if (!amazonNameBySku.has(sku)) amazonNameBySku.set(sku, candidate);
-      } else if (platform.startsWith("temu")) {
-        if (!temuNameBySku.has(sku) && candidate.toUpperCase() !== sku) temuNameBySku.set(sku, candidate);
-      }
-    });
-
     const mapped = (data || []).map((row) => {
       const rec = row as unknown as {
         id: string;
@@ -125,15 +72,10 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         created_at: string;
         sku_catalog?: { product_name?: string } | null;
       };
-      const amazonSkuNorm = String(rec.amazon_sku || "").trim().toUpperCase();
-      const temuSkuNorm = String(rec.temu_sku_id || "").trim().toUpperCase();
-      const amazonName = amazonSkuNorm ? amazonNameBySku.get(amazonSkuNorm) : null;
-      const temuNameRaw = temuSkuNorm ? temuNameBySku.get(temuSkuNorm) : null;
-      const temuName = temuNameRaw && temuNameRaw.toUpperCase() !== temuSkuNorm ? temuNameRaw : null;
       return {
         id: rec.id,
         sku_catalog_id: rec.sku_catalog_id,
-        product_name: amazonName || temuName || rec.sku_catalog?.product_name || "Unnamed product",
+        product_name: rec.sku_catalog?.product_name || "Unnamed product",
         amazon_sku: rec.amazon_sku,
         temu_sku_id: rec.temu_sku_id,
         lead_time_days: rec.lead_time_days,
@@ -253,12 +195,16 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
 
       const byAmazon = new Map<string, { id: string; sku_catalog_id: string }>();
       const byTemu = new Map<string, { id: string; sku_catalog_id: string }>();
+      const byCatalog = new Map<string, { id: string; amazon_sku: string | null; temu_sku_id: string | null }[]>();
       (existingData || []).forEach((row) => {
         const rec = row as { id?: string; sku_catalog_id?: string; amazon_sku?: string | null; temu_sku_id?: string | null };
         if (!rec.id || !rec.sku_catalog_id) return;
         const payload = { id: rec.id, sku_catalog_id: rec.sku_catalog_id };
         if (rec.amazon_sku) byAmazon.set(rec.amazon_sku.trim().toUpperCase(), payload);
         if (rec.temu_sku_id) byTemu.set(rec.temu_sku_id.trim().toUpperCase(), payload);
+        const list = byCatalog.get(rec.sku_catalog_id) || [];
+        list.push({ id: rec.id, amazon_sku: rec.amazon_sku || null, temu_sku_id: rec.temu_sku_id || null });
+        byCatalog.set(rec.sku_catalog_id, list);
       });
 
       let created = 0;
@@ -296,18 +242,49 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
           if (mappingError) throw mappingError;
           updated += 1;
         } else {
-          const { data: catalog, error: catalogError } = await supabase
+          const { data: existingCatalog, error: existingCatalogError } = await supabase
             .from("sku_catalog")
-            .insert({ account_id: accountId, product_name: productName })
             .select("id")
-            .single();
-          if (catalogError || !catalog?.id) throw catalogError || new Error("Failed to create product.");
+            .eq("account_id", accountId)
+            .eq("product_name", productName)
+            .maybeSingle();
+          if (existingCatalogError) throw existingCatalogError;
+          let catalogId = existingCatalog?.id ? String(existingCatalog.id) : "";
+          if (!catalogId) {
+            const { data: catalog, error: catalogError } = await supabase
+              .from("sku_catalog")
+              .insert({ account_id: accountId, product_name: productName })
+              .select("id")
+              .single();
+            if (catalogError || !catalog?.id) throw catalogError || new Error("Failed to create product.");
+            catalogId = String(catalog.id);
+          }
+
+          const reusable = (byCatalog.get(catalogId) || []).find(
+            (m) => (!m.amazon_sku && Boolean(amazonSku)) || (!m.temu_sku_id && Boolean(temuSkuId))
+          );
+          if (reusable) {
+            const { error: mappingPatchError } = await supabase
+              .from("sku_mappings")
+              .update({
+                amazon_sku: amazonSku || null,
+                temu_sku_id: temuSkuId || null,
+                lead_time_days: Number.isFinite(leadTimeDays) ? leadTimeDays : null,
+              })
+              .eq("id", reusable.id);
+            if (mappingPatchError) throw mappingPatchError;
+            const payload = { id: reusable.id, sku_catalog_id: catalogId };
+            if (amazonSku) byAmazon.set(amazonSku, payload);
+            if (temuSkuId) byTemu.set(temuSkuId, payload);
+            updated += 1;
+            continue;
+          }
 
           const { data: mapping, error: mappingError } = await supabase
             .from("sku_mappings")
             .insert({
               account_id: accountId,
-              sku_catalog_id: String(catalog.id),
+              sku_catalog_id: catalogId,
               amazon_sku: amazonSku || null,
               temu_sku_id: temuSkuId || null,
               lead_time_days: Number.isFinite(leadTimeDays) ? leadTimeDays : null,
@@ -315,9 +292,12 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
             .select("id")
             .single();
           if (mappingError || !mapping?.id) throw mappingError || new Error("Failed to create mapping.");
-          const payload = { id: String(mapping.id), sku_catalog_id: String(catalog.id) };
+          const payload = { id: String(mapping.id), sku_catalog_id: catalogId };
           if (amazonSku) byAmazon.set(amazonSku, payload);
           if (temuSkuId) byTemu.set(temuSkuId, payload);
+          const nextList = byCatalog.get(catalogId) || [];
+          nextList.push({ id: String(mapping.id), amazon_sku: amazonSku || null, temu_sku_id: temuSkuId || null });
+          byCatalog.set(catalogId, nextList);
           created += 1;
         }
       }
@@ -334,17 +314,34 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   const saveRow = async (row: MappingRow) => {
     if (!canEdit) return;
     const supabase = createClient();
-    const { error: catalogError } = await supabase
+    const normalizedName = row.product_name.trim();
+    const { data: sameNameCatalog, error: sameNameCatalogError } = await supabase
       .from("sku_catalog")
-      .update({ product_name: row.product_name.trim() })
-      .eq("id", row.sku_catalog_id);
-    if (catalogError) {
-      setError(catalogError.message);
+      .select("id")
+      .eq("account_id", accountId)
+      .eq("product_name", normalizedName)
+      .maybeSingle();
+    if (sameNameCatalogError) {
+      setError(sameNameCatalogError.message);
       return;
+    }
+    let targetCatalogId = row.sku_catalog_id;
+    if (sameNameCatalog?.id) {
+      targetCatalogId = String(sameNameCatalog.id);
+    } else {
+      const { error: catalogError } = await supabase
+        .from("sku_catalog")
+        .update({ product_name: normalizedName })
+        .eq("id", row.sku_catalog_id);
+      if (catalogError) {
+        setError(catalogError.message);
+        return;
+      }
     }
     const { error: mappingError } = await supabase
       .from("sku_mappings")
       .update({
+        sku_catalog_id: targetCatalogId,
         amazon_sku: row.amazon_sku?.trim().toUpperCase() || null,
         temu_sku_id: row.temu_sku_id?.trim().toUpperCase() || null,
         lead_time_days: row.lead_time_days ?? null,
