@@ -225,7 +225,27 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
         net_profit: money(reportPatchInput.net_profit - deltaNet),
       };
 
-      const { error: reportError } = await supabase.from("reports").update(reportPatch).eq("id", selected.id);
+      const nextBreakdown =
+        selected.breakdown && typeof selected.breakdown === "object"
+          ? {
+              ...selected.breakdown,
+              pnl: {
+                ...((selected.breakdown as { pnl?: Record<string, unknown> }).pnl || {}),
+                purchaseCost: reportPatch.total_cogs,
+                netProfit: reportPatch.net_profit,
+              },
+              vat: {
+                ...((selected.breakdown as { vat?: Record<string, unknown> }).vat || {}),
+                outputVat: reportPatch.output_vat,
+                finalVat: money(reportPatch.output_vat - reportPatch.input_vat),
+              },
+            }
+          : selected.breakdown;
+
+      const { error: reportError } = await supabase
+        .from("reports")
+        .update({ ...reportPatch, breakdown: nextBreakdown })
+        .eq("id", selected.id);
       if (reportError) throw reportError;
 
       const { error: clearError } = await supabase.from("expenses").delete().eq("report_id", selected.id);

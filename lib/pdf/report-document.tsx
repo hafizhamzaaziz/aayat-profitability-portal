@@ -269,21 +269,21 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
                   />
                   <View style={{ ...styles.row, borderBottomWidth: 0 }}>
                     <Text style={{ ...styles.label, fontWeight: 700 }}>Total Net Profit</Text>
-                    <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.breakdown.pnl.netProfit) }}>
-                      {m(data.currency, data.breakdown.pnl.netProfit)}
+                    <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.report.net_profit) }}>
+                      {m(data.currency, data.report.net_profit)}
                     </Text>
                   </View>
                 </View>
                 {showVatSummary ? (
                   <View style={{ ...styles.tightSection, ...styles.sectionGap }}>
                     <Text style={styles.sectionTitle}>VAT Summary</Text>
-                    <MetricRow currency={data.currency} label="VAT on Sales (Output)" value={data.breakdown.vat.outputVat} />
-                    <MetricRow currency={data.currency} label="VAT on Fees/Inputs (Input)" value={-Math.abs(data.breakdown.vat.inputVatFees)} />
-                    <MetricRow currency={data.currency} label="VAT on Purchases (Input)" value={-Math.abs(data.breakdown.vat.inputVatPurchases)} />
+                    <MetricRow currency={data.currency} label="VAT on Sales (Output)" value={data.report.output_vat} />
+                    <MetricRow currency={data.currency} label="VAT on Fees/Inputs (Input)" value={-Math.abs(data.breakdown.vat.inputVatFees || 0)} />
+                    <MetricRow currency={data.currency} label="VAT on Purchases (Input)" value={-Math.abs(data.breakdown.vat.inputVatPurchases || 0)} />
                     <View style={{ ...styles.row, borderBottomWidth: 0 }}>
                       <Text style={{ ...styles.label, fontWeight: 700 }}>Final VAT to Pay / Reclaim</Text>
-                      <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.breakdown.vat.finalVat) }}>
-                        {m(data.currency, data.breakdown.vat.finalVat)}
+                      <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.report.output_vat - data.report.input_vat) }}>
+                        {m(data.currency, data.report.output_vat - data.report.input_vat)}
                       </Text>
                     </View>
                   </View>
