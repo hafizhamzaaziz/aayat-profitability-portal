@@ -32,11 +32,105 @@ type Props = {
   canEdit: boolean;
 };
 
+type CogsVersion = {
+  unitCost: number;
+  includesVat: boolean;
+  effectiveFrom: string;
+};
+
+type ReportRow = {
+  id: string;
+  period_start: string;
+  platform: "amazon" | "temu";
+  output_vat: number;
+  input_vat: number;
+  net_profit: number;
+  total_cogs: number;
+  breakdown: Record<string, unknown> | null;
+};
+
+type ReportTxRow = {
+  platform: "amazon" | "temu";
+  transaction_date: string | null;
+  sku: string | null;
+  quantity: number | null;
+  raw_row: Record<string, unknown> | null;
+};
+
 function normalizeProductName(input: unknown) {
   return String(input ?? "")
     .replace(/\u00a0/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function round2(value: number) {
+  return Number((value || 0).toFixed(2));
+}
+
+function normalizeSku(input: unknown) {
+  return String(input ?? "")
+    .replace(/\u00a0/g, " ")
+    .trim()
+    .toUpperCase();
+}
+
+function normalizeKey(input: string) {
+  return input.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function findRawValue(rawRow: Record<string, unknown>, terms: string[]) {
+  const keys = Object.keys(rawRow || {});
+  for (const term of terms) {
+    const key = keys.find((k) => normalizeKey(k) === term);
+    if (key) return rawRow[key];
+  }
+  for (const term of terms) {
+    const key = keys.find((k) => normalizeKey(k).includes(term));
+    if (key) return rawRow[key];
+  }
+  return undefined;
+}
+
+function isUnitsSaleTx(platform: "amazon" | "temu", rawRow: Record<string, unknown> | null) {
+  if (!rawRow) return true;
+  const txType = String(findRawValue(rawRow, ["transaction type", "type"]) ?? "")
+    .trim()
+    .toLowerCase();
+  if (!txType) return true;
+  if (platform === "amazon") {
+    return txType.includes("order") && !txType.includes("refund") && !txType.includes("adjustment") && !txType.includes("transfer");
+  }
+  return txType.includes("order payment") || txType === "order";
+}
+
+function resolveCogsVersion(lookup: Map<string, CogsVersion[]>, sku: string, txDateIso: string) {
+  const versions = lookup.get(sku);
+  if (!versions || versions.length === 0) return null;
+  let selected: CogsVersion | null = null;
+  for (const version of versions) {
+    if (version.effectiveFrom <= txDateIso) selected = version;
+    else break;
+  }
+  return selected || versions[0] || null;
+}
+
+function computeExpenseTotals(expenses: Array<{ amount: number; includes_vat: boolean }>, vatRatePct: number) {
+  const vatRate = (Number(vatRatePct) || 0) / 100;
+  let net = 0;
+  let vat = 0;
+  for (const row of expenses) {
+    const amount = Number(row.amount || 0);
+    if (!amount) continue;
+    if (row.includes_vat && vatRate > 0) {
+      const vatPart = amount * (vatRate / (1 + vatRate));
+      vat += vatPart;
+      net += amount - vatPart;
+    } else {
+      net += amount;
+    }
+  }
+  return { net: round2(net), vat: round2(vat) };
 }
 
 async function removeCatalogIfUnused(supabase: ReturnType<typeof createClient>, catalogId: string) {
@@ -251,13 +345,165 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     return String(insertedMapping.id);
   };
 
+  const recalculateReportsFromEffectiveDate = async (supabase: ReturnType<typeof createClient>, effectiveFrom: string) => {
+    const { data: accountRow, error: accountError } = await supabase
+      .from("accounts")
+      .select("vat_rate")
+      .eq("id", accountId)
+      .single();
+    if (accountError) throw accountError;
+    const vatRatePct = Number(accountRow?.vat_rate || 0);
+
+    const { data: cogsHistory, error: cogsHistoryError } = await supabase
+      .from("cogs_history")
+      .select("sku, unit_cost, includes_vat, effective_from")
+      .eq("account_id", accountId)
+      .order("effective_from", { ascending: true });
+    if (cogsHistoryError) throw cogsHistoryError;
+    const lookup = new Map<string, CogsVersion[]>();
+    (cogsHistory || []).forEach((row) => {
+      const sku = normalizeSku(row.sku);
+      if (!sku) return;
+      const list = lookup.get(sku) || [];
+      list.push({
+        unitCost: Number(row.unit_cost || 0),
+        includesVat: Boolean(row.includes_vat),
+        effectiveFrom: String(row.effective_from || effectiveFrom),
+      });
+      lookup.set(sku, list);
+    });
+    lookup.forEach((rows, sku) => {
+      lookup.set(
+        sku,
+        rows.sort((a, b) => (a.effectiveFrom < b.effectiveFrom ? -1 : 1))
+      );
+    });
+
+    const { data: reports, error: reportsError } = await supabase
+      .from("reports")
+      .select("id, period_start, platform, output_vat, input_vat, net_profit, total_cogs, breakdown")
+      .eq("account_id", accountId)
+      .gte("period_end", effectiveFrom);
+    if (reportsError) throw reportsError;
+
+    let updatedCount = 0;
+    for (const rawReport of (reports || []) as unknown as ReportRow[]) {
+      const report = rawReport;
+      const { data: txRows, error: txError } = await supabase
+        .from("report_transactions")
+        .select("platform, transaction_date, sku, quantity, raw_row")
+        .eq("report_id", report.id);
+      if (txError) throw txError;
+
+      const { data: expenseRows, error: expenseError } = await supabase
+        .from("expenses")
+        .select("amount, includes_vat")
+        .eq("report_id", report.id);
+      if (expenseError) throw expenseError;
+
+      let purchaseCost = 0;
+      let purchaseVat = 0;
+      const cogsSnapshotMap = new Map<string, { sku: string; quantity: number; unit_cost: number; includes_vat: boolean; effective_from: string }>();
+
+      ((txRows || []) as unknown as ReportTxRow[]).forEach((tx) => {
+        const platform = tx.platform === "temu" ? "temu" : "amazon";
+        if (!isUnitsSaleTx(platform, tx.raw_row || null)) return;
+        const sku = normalizeSku(tx.sku || "");
+        const qty = Math.abs(Number(tx.quantity || 0));
+        if (!sku || !qty) return;
+        const txDate = String(tx.transaction_date || report.period_start || effectiveFrom).slice(0, 10);
+        const cogs = resolveCogsVersion(lookup, sku, txDate);
+        if (!cogs) return;
+
+        const vatRate = vatRatePct > 0 ? vatRatePct / 100 : 0;
+        if (cogs.includesVat && vatRate > 0) {
+          const unitNet = cogs.unitCost / (1 + vatRate);
+          const unitVat = cogs.unitCost - unitNet;
+          purchaseCost += unitNet * qty;
+          purchaseVat += unitVat * qty;
+        } else {
+          purchaseCost += cogs.unitCost * qty;
+        }
+
+        const snapshotKey = `${sku}|${cogs.unitCost}|${cogs.includesVat ? "1" : "0"}|${cogs.effectiveFrom}`;
+        const current = cogsSnapshotMap.get(snapshotKey) || {
+          sku,
+          quantity: 0,
+          unit_cost: cogs.unitCost,
+          includes_vat: cogs.includesVat,
+          effective_from: cogs.effectiveFrom,
+        };
+        current.quantity += qty;
+        cogsSnapshotMap.set(snapshotKey, current);
+      });
+
+      const breakdown = (report.breakdown || {}) as Record<string, unknown>;
+      const pnl = (breakdown.pnl || {}) as Record<string, number>;
+      const vat = (breakdown.vat || {}) as Record<string, number>;
+      const expenseTotals = computeExpenseTotals(
+        ((expenseRows || []) as Array<{ amount: number; includes_vat: boolean }>).map((e) => ({
+          amount: Number(e.amount || 0),
+          includes_vat: Boolean(e.includes_vat),
+        })),
+        vatRatePct
+      );
+      const settlementNet = Number(pnl.settlementNet || report.net_profit + report.total_cogs + expenseTotals.net);
+      const inputVatFees = Number(vat.inputVatFees || 0);
+      const inputVatPurchases = vatRatePct > 0 ? round2(purchaseVat + expenseTotals.vat) : 0;
+      const inputVat = vatRatePct > 0 ? round2(inputVatFees + inputVatPurchases) : 0;
+      const outputVat = vatRatePct > 0 ? Number(report.output_vat || 0) : 0;
+      const finalVat = vatRatePct > 0 ? round2(outputVat - inputVat) : 0;
+      const nextPurchaseCost = round2(purchaseCost);
+      const nextNetProfit = round2(settlementNet - nextPurchaseCost - expenseTotals.net);
+
+      const nextBreakdown = {
+        ...breakdown,
+        pnl: {
+          ...(breakdown.pnl as object),
+          settlementNet: round2(settlementNet),
+          purchaseCost: nextPurchaseCost,
+          netProfit: nextNetProfit,
+        },
+        vat: vatRatePct > 0
+          ? {
+              ...(breakdown.vat as object),
+              outputVat: round2(outputVat),
+              inputVatFees: round2(inputVatFees),
+              inputVatPurchases,
+              finalVat,
+            }
+          : {
+              outputVat: 0,
+              inputVatFees: 0,
+              inputVatPurchases: 0,
+              finalVat: 0,
+            },
+      };
+
+      const { error: updateError } = await supabase
+        .from("reports")
+        .update({
+          total_cogs: nextPurchaseCost,
+          input_vat: inputVat,
+          output_vat: round2(outputVat),
+          net_profit: nextNetProfit,
+          cogs_snapshot: Array.from(cogsSnapshotMap.values()),
+          breakdown: nextBreakdown,
+        })
+        .eq("id", report.id);
+      if (updateError) throw updateError;
+      updatedCount += 1;
+    }
+    return updatedCount;
+  };
+
   const applyCogsVersion = async (input: {
     productName: string;
     sku: string;
     unitCost: number;
     includesVat: boolean;
     effectiveFrom: string;
-  }) => {
+  }, options?: { skipRecalc?: boolean }) => {
     const supabase = createClient();
     const normalizedSku = input.sku.trim().toUpperCase();
     const normalizedName = normalizeProductName(input.productName);
@@ -295,6 +541,9 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       { onConflict: "account_id,sku,effective_from" }
     );
     if (historyError) throw historyError;
+
+    if (options?.skipRecalc) return 0;
+    return recalculateReportsFromEffectiveDate(supabase, input.effectiveFrom);
   };
 
   const loadHistory = async (sku: string) => {
@@ -321,7 +570,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const addRow = async () => {
     if (!newProductName.trim() || !newSku.trim() || !newCost.trim()) return;
     try {
-      await applyCogsVersion({
+      const touchedReports = await applyCogsVersion({
         productName: newProductName,
         sku: newSku,
         unitCost: Number(newCost),
@@ -332,7 +581,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       setNewSku("");
       setNewCost("");
       setNewIncludesVat(false);
-      setMessage("COGS version added.");
+      setMessage(`COGS version added.${touchedReports > 0 ? ` Recalculated ${touchedReports} report(s).` : ""}`);
       await loadRows();
     } catch (err) {
       const text = getErrorMessage(err, "Failed to add SKU cost.");
@@ -348,8 +597,8 @@ export default function CogsTable({ accountId, canEdit }: Props) {
 
   const updateRow = async (id: string, productName: string, sku: string, unitCost: number, includesVat: boolean, effectiveFrom: string) => {
     try {
-      await applyCogsVersion({ productName, sku, unitCost, includesVat, effectiveFrom });
-      setMessage("COGS version saved.");
+      const touchedReports = await applyCogsVersion({ productName, sku, unitCost, includesVat, effectiveFrom });
+      setMessage(`COGS version saved.${touchedReports > 0 ? ` Recalculated ${touchedReports} report(s).` : ""}`);
       await loadRows();
       if (historySku === sku.trim().toUpperCase()) {
         await loadHistory(sku.trim().toUpperCase());
@@ -509,11 +758,17 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           unitCost: item.unit_cost,
           includesVat: item.includes_vat,
           effectiveFrom: item.effective_from,
-        });
+        }, { skipRecalc: true });
       }
+      const earliestEffective = payload
+        .map((item) => String(item.effective_from || todayIso))
+        .sort()[0] || todayIso;
+      const touchedReports = await recalculateReportsFromEffectiveDate(createClient(), earliestEffective);
 
       setMessage(
-        `Imported ${payload.length} unique SKUs successfully${payload.length < importRows.length ? " (duplicates merged)." : ""}`
+        `Imported ${payload.length} unique SKUs successfully${payload.length < importRows.length ? " (duplicates merged)." : ""}${
+          touchedReports > 0 ? ` Recalculated ${touchedReports} report(s).` : ""
+        }`
       );
       await loadRows();
     } catch (err) {
