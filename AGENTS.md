@@ -6,14 +6,24 @@
 Aayat Profitability Portal — a multi-tenant Next.js 14 profitability dashboard for Amazon/Temu seller accounts. Uses Supabase (auth, DB, storage) as sole backend dependency.
 
 ### Required environment variables
-The app requires a `.env.local` file with:
-- `NEXT_PUBLIC_SUPABASE_URL` — Supabase project URL
+These are injected as Cursor Cloud secrets and must also be in `.env.local`:
+- `NEXT_PUBLIC_SUPABASE_URL` — Supabase project URL (format: `https://<ref>.supabase.co`; the ref can be extracted from the anon key JWT payload field `ref`)
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Supabase anon/public key
-- `SUPABASE_SERVICE_ROLE_KEY` — Supabase service role key (admin API routes)
+- `SUPABASE_SERVICE_ROLE_KEY` — Supabase service role key (admin API routes, user creation)
 
 Optional:
 - `RESEND_API_KEY` — for email notifications (gracefully skipped if absent)
 - `NOTIFICATION_FROM_EMAIL` — sender address for notification emails
+
+### Creating a test user for manual testing
+Public signup is disabled. To create a test admin user for login, use the service role key:
+```js
+const { createClient } = require('@supabase/supabase-js');
+const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { autoRefreshToken: false, persistSession: false } });
+await admin.auth.admin.createUser({ email, password, email_confirm: true, user_metadata: { full_name: 'Test' } });
+await admin.from('users').insert({ id: authUser.user.id, role: 'admin', full_name: 'Test', email });
+```
+Remember to clean up test users after testing.
 
 ### Running the dev server
 ```
