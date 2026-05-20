@@ -111,6 +111,31 @@ export const CSV_HEADER_ORDER: string[] = [
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Some SP-API endpoints (Finance especially) return text fields that came
+ * from an underlying XML response, with `&`, `<`, `>`, `'`, `"` still
+ * HTML-entity-encoded — e.g. SellerSKU `K&A-COT-PNK` arrives as
+ * `K&amp;A-COT-PNK`. Decoding it here keeps SKUs consistent with what the
+ * COGS/mappings tables (and the manual CSV upload path) expect.
+ */
+function decodeHtmlEntities(value: string | null | undefined): string {
+  if (!value) return "";
+  return String(value)
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const n = Number(dec);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : "";
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      const n = parseInt(hex, 16);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : "";
+    });
+}
+
 function amount(value: CurrencyAmount | undefined | null): number {
   if (!value) return 0;
   const n = Number(value.CurrencyAmount);
@@ -236,7 +261,8 @@ function tallyShipmentItem(item: ShipmentItem) {
 // ---------------------------------------------------------------------------
 
 function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[] {
-  const orderId = ev.AmazonOrderId || "";
+  const orderId = decodeHtmlEntities(ev.AmazonOrderId);
+  const marketplace = decodeHtmlEntities(ev.MarketplaceName);
   const posted = postedDateOnly(ev.PostedDate);
   const eventIdBase = `${kind}:${orderId}:${ev.PostedDate || ""}`;
   const out: CsvRow[] = [];
@@ -251,13 +277,14 @@ function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[]
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     const tally = tallyShipmentItem(item);
+    const sku = decodeHtmlEntities(item.SellerSKU);
     const row = blankCsvRow();
     row[COL.date] = ev.PostedDate || "";
     row[COL.type] = kind;
     row[COL.orderId] = orderId;
-    row[COL.sku] = item.SellerSKU || "";
+    row[COL.sku] = sku;
     row[COL.quantity] = Number(item.QuantityShipped || 0);
-    row[COL.marketplace] = ev.MarketplaceName || "";
+    row[COL.marketplace] = marketplace;
     row[COL.productSales] = tally.productSalesExvat;
     row[COL.productSalesTax] = tally.productSalesTax;
     row[COL.shippingCredits] = tally.shippingExvat;
@@ -275,7 +302,7 @@ function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[]
       ...row,
       __amazon_event_id: `${eventIdBase}:item:${item.OrderItemId || i}`,
       __posted_date: posted,
-      __sku: item.SellerSKU || null,
+      __sku: sku || null,
       __quantity: Number(item.QuantityShipped || 0) || null,
     });
   }
@@ -295,7 +322,7 @@ function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[]
     row[COL.date] = ev.PostedDate || "";
     row[COL.type] = kind;
     row[COL.orderId] = orderId;
-    row[COL.marketplace] = ev.MarketplaceName || "";
+    row[COL.marketplace] = marketplace;
     row[COL.productSales] = sumCharges(orderCharges, (t) => t === "Principal");
     row[COL.productSalesTax] = sumCharges(orderCharges, (t) => t === "Tax");
     row[COL.shippingCredits] = sumCharges(orderCharges, (t) => t === "Shipping" || t === "ShippingChargeback");
@@ -329,12 +356,15 @@ function mapServiceFeeEvent(ev: ServiceFeeEvent): CsvRow | null {
   const totalFees = (ev.FeeList || []).reduce((acc, f) => acc + amount(f.FeeAmount), 0);
   if (Math.abs(totalFees) < 0.001) return null;
 
+  const sku = decodeHtmlEntities(ev.SellerSKU);
+  const orderIdDecoded = decodeHtmlEntities(ev.AmazonOrderId);
+  const description = decodeHtmlEntities(ev.FeeReason || ev.FeeDescription);
   const row = blankCsvRow();
   row[COL.date] = ev.PostedDate || "";
   row[COL.type] = "Service Fee";
-  row[COL.orderId] = ev.AmazonOrderId || "";
-  row[COL.sku] = ev.SellerSKU || "";
-  row[COL.description] = ev.FeeReason || ev.FeeDescription || "";
+  row[COL.orderId] = orderIdDecoded;
+  row[COL.sku] = sku;
+  row[COL.description] = description;
   // CSV convention: full VAT-inclusive amount lands in "other" — the P&L
   // engine splits at 20% based on the FeeReason.
   row[COL.other] = totalFees;
@@ -342,9 +372,9 @@ function mapServiceFeeEvent(ev: ServiceFeeEvent): CsvRow | null {
 
   return {
     ...row,
-    __amazon_event_id: `ServiceFee:${ev.PostedDate || ""}:${ev.FeeReason || ""}:${ev.SellerSKU || ""}:${ev.AmazonOrderId || ""}:${totalFees.toFixed(4)}`,
+    __amazon_event_id: `ServiceFee:${ev.PostedDate || ""}:${ev.FeeReason || ""}:${sku}:${orderIdDecoded}:${totalFees.toFixed(4)}`,
     __posted_date: postedDateOnly(ev.PostedDate),
-    __sku: ev.SellerSKU || null,
+    __sku: sku || null,
     __quantity: null,
   };
 }
@@ -352,7 +382,8 @@ function mapServiceFeeEvent(ev: ServiceFeeEvent): CsvRow | null {
 function mapAdjustmentEvent(ev: AdjustmentEvent): CsvRow[] {
   const items: AdjustmentItem[] = ev.AdjustmentItemList || [];
   const out: CsvRow[] = [];
-  const eventIdBase = `Adjustment:${ev.AdjustmentType || ""}:${ev.PostedDate || ""}`;
+  const adjType = decodeHtmlEntities(ev.AdjustmentType);
+  const eventIdBase = `Adjustment:${adjType}:${ev.PostedDate || ""}`;
 
   if (items.length === 0) {
     const summary = amount(ev.AdjustmentAmount);
@@ -360,7 +391,7 @@ function mapAdjustmentEvent(ev: AdjustmentEvent): CsvRow[] {
     const row = blankCsvRow();
     row[COL.date] = ev.PostedDate || "";
     row[COL.type] = "Adjustment";
-    row[COL.description] = ev.AdjustmentType || "";
+    row[COL.description] = adjType;
     row[COL.other] = summary;
     row[COL.total] = rowTotal(row);
     out.push({
@@ -378,19 +409,20 @@ function mapAdjustmentEvent(ev: AdjustmentEvent): CsvRow[] {
     const itemAmount = amount(item.TotalAmount);
     if (Math.abs(itemAmount) < 0.001) continue;
     const qty = Number(item.Quantity || 0);
+    const sku = decodeHtmlEntities(item.SellerSKU);
     const row = blankCsvRow();
     row[COL.date] = ev.PostedDate || "";
     row[COL.type] = "Adjustment";
-    row[COL.sku] = item.SellerSKU || "";
-    row[COL.description] = ev.AdjustmentType || item.ProductDescription || "";
+    row[COL.sku] = sku;
+    row[COL.description] = adjType || decodeHtmlEntities(item.ProductDescription);
     row[COL.quantity] = Number.isFinite(qty) && qty !== 0 ? qty : null;
     row[COL.other] = itemAmount;
     row[COL.total] = rowTotal(row);
     out.push({
       ...row,
-      __amazon_event_id: `${eventIdBase}:item:${item.SellerSKU || i}:${itemAmount.toFixed(4)}`,
+      __amazon_event_id: `${eventIdBase}:item:${sku || i}:${itemAmount.toFixed(4)}`,
       __posted_date: postedDateOnly(ev.PostedDate),
-      __sku: item.SellerSKU || null,
+      __sku: sku || null,
       __quantity: Number.isFinite(qty) && qty !== 0 ? qty : null,
     });
   }
@@ -406,16 +438,17 @@ function mapRetrochargeEvent(ev: RetrochargeEvent): CsvRow | null {
     sumTaxesWithheld(ev.RetrochargeTaxWithheldList);
   if (Math.abs(taxSum) < 0.001) return null;
 
+  const orderIdDecoded = decodeHtmlEntities(ev.AmazonOrderId);
   const row = blankCsvRow();
   row[COL.date] = ev.PostedDate || "";
   row[COL.type] = isRefund ? "Refund_Retrocharge" : "Order_Retrocharge";
-  row[COL.orderId] = ev.AmazonOrderId || "";
+  row[COL.orderId] = orderIdDecoded;
   row[COL.other] = taxSum;
   row[COL.total] = rowTotal(row);
 
   return {
     ...row,
-    __amazon_event_id: `Retrocharge:${ev.AmazonOrderId || ""}:${ev.PostedDate || ""}:${isRefund ? "rev" : "fwd"}`,
+    __amazon_event_id: `Retrocharge:${orderIdDecoded}:${ev.PostedDate || ""}:${isRefund ? "rev" : "fwd"}`,
     __posted_date: postedDateOnly(ev.PostedDate),
     __sku: null,
     __quantity: null,
