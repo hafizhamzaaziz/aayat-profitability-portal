@@ -56,6 +56,31 @@ create table if not exists public.account_team_members (
   created_at timestamptz not null default now(),
   unique(account_id, team_id)
 );
+-- 2d) account-client mapping (multiple client users per account)
+create table if not exists public.account_client_members (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  client_id uuid not null references public.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  unique(account_id, client_id)
+);
+create index if not exists idx_account_client_members_account on public.account_client_members(account_id);
+create index if not exists idx_account_client_members_client on public.account_client_members(client_id);
+-- 2e) Amazon SP-API / Ads-API credentials per account (refresh_token encrypted with TOKEN_ENC_KEY)
+create table if not exists public.account_amazon_credentials (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  provider text not null default 'sp-api',
+  selling_partner_id text,
+  marketplace_ids text[] not null default '{}',
+  refresh_token_encrypted text not null,
+  connected_at timestamptz not null default now(),
+  connected_by uuid references public.users(id) on delete set null,
+  last_synced_at timestamptz,
+  last_sync_error text,
+  unique(account_id, provider)
+);
+create index if not exists idx_account_amazon_credentials_account on public.account_amazon_credentials(account_id);
 -- 3) cogs
 create table if not exists public.cogs (
   id uuid primary key default gen_random_uuid(),
@@ -129,10 +154,12 @@ create table if not exists public.reports (
   cogs_snapshot jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique(account_id, period_start, period_end, platform)
+  unique(account_id, period_start, period_end, platform, source)
 );
 alter table public.reports add column if not exists breakdown jsonb;
 alter table public.reports add column if not exists cogs_snapshot jsonb;
+alter table public.reports add column if not exists source text not null default 'manual';
+create index if not exists idx_reports_account_source on public.reports(account_id, source);
 
 -- 4b) parsed row-level report transactions (raw jsonb)
 create table if not exists public.report_transactions (
@@ -144,8 +171,13 @@ create table if not exists public.report_transactions (
   sku text,
   quantity numeric(14,4),
   raw_row jsonb not null,
+  source text not null default 'manual',
+  amazon_event_id text,
   created_at timestamptz not null default now()
 );
+create index if not exists idx_report_transactions_account_amazon_event
+  on public.report_transactions(account_id, amazon_event_id)
+  where amazon_event_id is not null;
 -- 5) expenses
 create table if not exists public.expenses (
   id uuid primary key default gen_random_uuid(),
@@ -156,6 +188,27 @@ create table if not exists public.expenses (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+-- 5b) account-level expense ledger (used by reports for one-time + recurring)
+create table if not exists public.expense_ledger (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  description text not null,
+  expense_date date not null,
+  amount numeric(14,2) not null,
+  includes_vat boolean not null default false,
+  marketplace text not null check (marketplace in ('amazon', 'temu', 'tiktok')),
+  expense_type text not null default 'one_time' check (expense_type in ('one_time', 'recurring')),
+  recurring_end_date date,
+  source_legacy_expense_id uuid unique,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (recurring_end_date is null or recurring_end_date >= expense_date)
+);
+create index if not exists expense_ledger_account_marketplace_date_idx
+  on public.expense_ledger(account_id, marketplace, expense_date);
+create index if not exists expense_ledger_recurring_end_idx
+  on public.expense_ledger(account_id, recurring_end_date)
+  where expense_type = 'recurring';
 -- 6) performance_metrics
 create table if not exists public.performance_metrics (
   id uuid primary key default gen_random_uuid(),
@@ -232,6 +285,13 @@ create unique index if not exists sku_mappings_temu_unique
 
 -- Optional link from COGS rows to canonical mapping.
 alter table public.cogs add column if not exists sku_mapping_id uuid references public.sku_mappings(id) on delete set null;
+
+-- Temu parent product identifier (Goods ID). One Goods ID groups many Temu
+-- SKU IDs (variants). Used by the Temu ads-report flow to bucket per-Goods
+-- ad spend and split within the bucket pro-rata to constituent SKUs.
+alter table public.sku_catalog add column if not exists temu_goods_id text;
+create index if not exists sku_catalog_temu_goods_id_idx
+  on public.sku_catalog(account_id, temu_goods_id) where temu_goods_id is not null;
 
 -- 10) inventory planning datasets
 create table if not exists public.sku_monthly_sales (
@@ -326,6 +386,34 @@ create table if not exists public.shipment_plan_items (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.inventory_warehouses (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  name text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(account_id, name)
+);
+
+create table if not exists public.inventory_daily_sales (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  sku_mapping_id uuid not null references public.sku_mappings(id) on delete cascade,
+  sale_date date not null,
+  platform text not null,
+  warehouse_id uuid references public.inventory_warehouses(id) on delete set null,
+  sold_units integer not null default 0,
+  returns_units integer not null default 0,
+  collected_units integer not null default 0,
+  notes text,
+  created_by uuid references public.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table if exists public.inventory_daily_sales
+  add column if not exists sold_units integer not null default 0;
+
 -- performance and query indexes
 create index if not exists reports_account_platform_period_idx on public.reports(account_id, platform, period_start, period_end);
 create index if not exists reports_account_period_idx on public.reports(account_id, period_start, period_end);
@@ -343,6 +431,9 @@ create index if not exists inventory_movements_mapping_date_idx on public.invent
 create index if not exists pack_profiles_account_idx on public.pack_profiles(account_id, profile_name);
 create index if not exists shipment_plans_account_date_idx on public.shipment_plans(account_id, plan_date desc);
 create index if not exists shipment_plan_items_plan_idx on public.shipment_plan_items(shipment_plan_id);
+create index if not exists inventory_warehouses_account_name_idx on public.inventory_warehouses(account_id, name);
+create index if not exists inventory_daily_sales_account_date_idx on public.inventory_daily_sales(account_id, sale_date desc);
+create index if not exists inventory_daily_sales_mapping_date_idx on public.inventory_daily_sales(sku_mapping_id, sale_date desc);
 create index if not exists performance_account_date_idx on public.performance_metrics(account_id, recorded_date desc);
 create index if not exists expenses_report_idx on public.expenses(report_id);
 create index if not exists notifications_user_read_created_idx on public.notifications(user_id, read_at, created_at desc);
@@ -378,6 +469,10 @@ DO $$ BEGIN
     CREATE TRIGGER set_expenses_updated_at BEFORE UPDATE ON public.expenses
     FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_expense_ledger_updated_at') THEN
+    CREATE TRIGGER set_expense_ledger_updated_at BEFORE UPDATE ON public.expense_ledger
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_performance_metrics_updated_at') THEN
     CREATE TRIGGER set_performance_metrics_updated_at BEFORE UPDATE ON public.performance_metrics
     FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -410,6 +505,14 @@ DO $$ BEGIN
     CREATE TRIGGER set_pack_profiles_updated_at BEFORE UPDATE ON public.pack_profiles
     FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_inventory_warehouses_updated_at') THEN
+    CREATE TRIGGER set_inventory_warehouses_updated_at BEFORE UPDATE ON public.inventory_warehouses
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_inventory_daily_sales_updated_at') THEN
+    CREATE TRIGGER set_inventory_daily_sales_updated_at BEFORE UPDATE ON public.inventory_daily_sales
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_shipment_plans_updated_at') THEN
     CREATE TRIGGER set_shipment_plans_updated_at BEFORE UPDATE ON public.shipment_plans
     FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -420,6 +523,8 @@ alter table public.users enable row level security;
 alter table public.accounts enable row level security;
 alter table public.client_team_members enable row level security;
 alter table public.account_team_members enable row level security;
+alter table public.account_client_members enable row level security;
+alter table public.account_amazon_credentials enable row level security;
 alter table public.cogs enable row level security;
 alter table public.cogs_history enable row level security;
 alter table public.sku_catalog enable row level security;
@@ -429,11 +534,14 @@ alter table public.inventory_defaults enable row level security;
 alter table public.inventory_levels enable row level security;
 alter table public.pack_profiles enable row level security;
 alter table public.inventory_movements enable row level security;
+alter table public.inventory_warehouses enable row level security;
+alter table public.inventory_daily_sales enable row level security;
 alter table public.shipment_plans enable row level security;
 alter table public.shipment_plan_items enable row level security;
 alter table public.reports enable row level security;
 alter table public.report_transactions enable row level security;
 alter table public.expenses enable row level security;
+alter table public.expense_ledger enable row level security;
 alter table public.performance_metrics enable row level security;
 alter table public.audit_events enable row level security;
 alter table public.notifications enable row level security;
@@ -503,6 +611,38 @@ using (true);
 drop policy if exists "account_team_members_modify_admin_only" on public.account_team_members;
 create policy "account_team_members_modify_admin_only"
 on public.account_team_members
+for all
+to authenticated
+using (public.current_user_role() = 'admin')
+with check (public.current_user_role() = 'admin');
+
+-- account_client_members policies
+drop policy if exists "account_client_members_select_authenticated" on public.account_client_members;
+create policy "account_client_members_select_authenticated"
+on public.account_client_members
+for select
+to authenticated
+using (true);
+
+drop policy if exists "account_client_members_modify_admin_only" on public.account_client_members;
+create policy "account_client_members_modify_admin_only"
+on public.account_client_members
+for all
+to authenticated
+using (public.current_user_role() = 'admin')
+with check (public.current_user_role() = 'admin');
+
+-- account_amazon_credentials policies
+drop policy if exists "account_amazon_credentials_select_staff" on public.account_amazon_credentials;
+create policy "account_amazon_credentials_select_staff"
+on public.account_amazon_credentials
+for select
+to authenticated
+using (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "account_amazon_credentials_modify_admin_only" on public.account_amazon_credentials;
+create policy "account_amazon_credentials_modify_admin_only"
+on public.account_amazon_credentials
 for all
 to authenticated
 using (public.current_user_role() = 'admin')
@@ -646,6 +786,36 @@ to authenticated
 using (public.current_user_role() in ('admin', 'team'))
 with check (public.current_user_role() in ('admin', 'team'));
 
+drop policy if exists "inventory_warehouses_select_authenticated" on public.inventory_warehouses;
+create policy "inventory_warehouses_select_authenticated"
+on public.inventory_warehouses
+for select
+to authenticated
+using (true);
+
+drop policy if exists "inventory_warehouses_modify_admin_team" on public.inventory_warehouses;
+create policy "inventory_warehouses_modify_admin_team"
+on public.inventory_warehouses
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "inventory_daily_sales_select_authenticated" on public.inventory_daily_sales;
+create policy "inventory_daily_sales_select_authenticated"
+on public.inventory_daily_sales
+for select
+to authenticated
+using (true);
+
+drop policy if exists "inventory_daily_sales_modify_admin_team" on public.inventory_daily_sales;
+create policy "inventory_daily_sales_modify_admin_team"
+on public.inventory_daily_sales
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
 drop policy if exists "shipment_plans_select_authenticated" on public.shipment_plans;
 create policy "shipment_plans_select_authenticated"
 on public.shipment_plans
@@ -719,6 +889,22 @@ using (true);
 drop policy if exists "expenses_modify_admin_team" on public.expenses;
 create policy "expenses_modify_admin_team"
 on public.expenses
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+-- expense_ledger policies
+drop policy if exists "expense_ledger_select_authenticated" on public.expense_ledger;
+create policy "expense_ledger_select_authenticated"
+on public.expense_ledger
+for select
+to authenticated
+using (true);
+
+drop policy if exists "expense_ledger_modify_admin_team" on public.expense_ledger;
+create policy "expense_ledger_modify_admin_team"
+on public.expense_ledger
 for all
 to authenticated
 using (public.current_user_role() in ('admin', 'team'))
@@ -865,11 +1051,11 @@ DO $$ BEGIN
     AFTER INSERT OR UPDATE OR DELETE ON public.reports
     FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_report_transactions_changes') THEN
-    CREATE TRIGGER audit_report_transactions_changes
-    AFTER INSERT OR UPDATE OR DELETE ON public.report_transactions
-    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
-  END IF;
+  -- Intentionally NOT auditing public.report_transactions.
+  -- Each report upload inserts thousands of rows; the audit copy would
+  -- balloon the database (we hit ~929 MB of audit_events from this one trigger).
+  -- The reports themselves are the source of truth; per-row audit is noise.
+  DROP TRIGGER IF EXISTS audit_report_transactions_changes ON public.report_transactions;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_expenses_changes') THEN
     CREATE TRIGGER audit_expenses_changes
     AFTER INSERT OR UPDATE OR DELETE ON public.expenses
@@ -934,5 +1120,183 @@ DO $$ BEGIN
     CREATE TRIGGER audit_shipment_plan_items_changes
     AFTER INSERT OR UPDATE OR DELETE ON public.shipment_plan_items
     FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- 11) Per-SKU profitability breakdown for each saved report
+--     One row per (report, SKU). Powers the per-SKU table in the workbench
+--     and saved-reports panel. All amounts ex-VAT, signs follow P&L
+--     convention (cost components negative).
+-- ---------------------------------------------------------------------------
+create table if not exists public.report_sku_breakdowns (
+  id uuid primary key default gen_random_uuid(),
+  report_id uuid not null references public.reports(id) on delete cascade,
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  sku text not null,
+  description text,
+  units numeric(14,4) not null default 0,
+  refund_units numeric(14,4) not null default 0,
+  product_sales numeric(14,2) not null default 0,
+  postage_credits numeric(14,2) not null default 0,
+  promo_rebates numeric(14,2) not null default 0,
+  net_sales numeric(14,2) not null default 0,
+  cogs numeric(14,2) not null default 0,
+  selling_fees_exvat numeric(14,2) not null default 0,
+  fba_fees_exvat numeric(14,2) not null default 0,
+  other_tx_fees_exvat numeric(14,2) not null default 0,
+  delivery_services_exvat numeric(14,2) not null default 0,
+  advertising_alloc numeric(14,2) not null default 0,
+  fba_inventory_alloc numeric(14,2) not null default 0,
+  subscription_alloc numeric(14,2) not null default 0,
+  deal_fees_alloc numeric(14,2) not null default 0,
+  fba_reimbursements numeric(14,2) not null default 0,
+  output_vat numeric(14,2) not null default 0,
+  marketplace_withheld_vat numeric(14,2) not null default 0,
+  retrocharge_vat numeric(14,2) not null default 0,
+  net_profit numeric(14,2) not null default 0,
+  cost_known boolean not null default false,
+  ad_only boolean not null default false,
+  created_at timestamptz not null default now(),
+  unique(report_id, sku)
+);
+
+-- ---------------------------------------------------------------------------
+-- 12) Ads-report metadata (one row per saved report when an ads file was
+--     uploaded). Replaces the transaction-sheet 'Cost of Advertising' line
+--     so account totals + per-SKU view stay consistent.
+-- ---------------------------------------------------------------------------
+create table if not exists public.report_ad_meta (
+  report_id uuid primary key references public.reports(id) on delete cascade,
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  source_filename text,
+  total_spend_exvat numeric(14,2) not null default 0,
+  blank_sku_spend numeric(14,2) not null default 0,
+  matched_sku_count integer not null default 0,
+  unmatched_sku_count integer not null default 0,
+  uploaded_at timestamptz not null default now(),
+  uploaded_by uuid references public.users(id) on delete set null
+);
+
+-- ---------------------------------------------------------------------------
+-- 13) Per-SKU ads spend rows from the uploaded ads report. Persisted so the
+--     report can be re-rendered without re-uploading.
+-- ---------------------------------------------------------------------------
+create table if not exists public.report_ad_spend (
+  id uuid primary key default gen_random_uuid(),
+  report_id uuid not null references public.reports(id) on delete cascade,
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  sku text,                          -- nullable: blank-SKU rows (e.g. SB keyword campaigns)
+  spend_exvat numeric(14,2) not null,
+  matched boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+-- Temu ads-report support: when persisting a Temu ads upload, rows are stored
+-- one-per-Goods (the dashboard's natural granularity). The per-SKU allocation
+-- is recomputed at render-time from `temu_goods_id` + the sku_mappings table.
+alter table public.report_ad_spend add column if not exists temu_goods_id text;
+alter table public.report_ad_spend add column if not exists goods_name text;
+alter table public.report_ad_spend add column if not exists source_kind text;
+-- source_kind values: 'amazon_sku' (default for Amazon) | 'temu_goods' (Temu)
+
+-- Indexes for the new tables
+create index if not exists report_sku_breakdowns_report_idx on public.report_sku_breakdowns(report_id);
+create index if not exists report_sku_breakdowns_account_sku_idx on public.report_sku_breakdowns(account_id, sku);
+create index if not exists report_ad_spend_report_idx on public.report_ad_spend(report_id);
+create index if not exists report_ad_spend_account_sku_idx on public.report_ad_spend(account_id, sku);
+create index if not exists report_ad_spend_temu_goods_idx on public.report_ad_spend(report_id, temu_goods_id) where temu_goods_id is not null;
+
+-- RLS for the new tables (mirrors reports/expenses: read for all authenticated, write for admin/team)
+alter table public.report_sku_breakdowns enable row level security;
+alter table public.report_ad_meta enable row level security;
+alter table public.report_ad_spend enable row level security;
+
+drop policy if exists "report_sku_breakdowns_select_authenticated" on public.report_sku_breakdowns;
+create policy "report_sku_breakdowns_select_authenticated"
+on public.report_sku_breakdowns
+for select
+to authenticated
+using (true);
+
+drop policy if exists "report_sku_breakdowns_modify_admin_team" on public.report_sku_breakdowns;
+create policy "report_sku_breakdowns_modify_admin_team"
+on public.report_sku_breakdowns
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "report_ad_meta_select_authenticated" on public.report_ad_meta;
+create policy "report_ad_meta_select_authenticated"
+on public.report_ad_meta
+for select
+to authenticated
+using (true);
+
+drop policy if exists "report_ad_meta_modify_admin_team" on public.report_ad_meta;
+create policy "report_ad_meta_modify_admin_team"
+on public.report_ad_meta
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "report_ad_spend_select_authenticated" on public.report_ad_spend;
+create policy "report_ad_spend_select_authenticated"
+on public.report_ad_spend
+for select
+to authenticated
+using (true);
+
+drop policy if exists "report_ad_spend_modify_admin_team" on public.report_ad_spend;
+create policy "report_ad_spend_modify_admin_team"
+on public.report_ad_spend
+for all
+to authenticated
+using (public.current_user_role() in ('admin', 'team'))
+with check (public.current_user_role() in ('admin', 'team'));
+
+-- Audit triggers for the new tables
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_report_sku_breakdowns_changes') THEN
+    CREATE TRIGGER audit_report_sku_breakdowns_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.report_sku_breakdowns
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_report_ad_meta_changes') THEN
+    CREATE TRIGGER audit_report_ad_meta_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.report_ad_meta
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_report_ad_spend_changes') THEN
+    CREATE TRIGGER audit_report_ad_spend_changes
+    AFTER INSERT OR UPDATE OR DELETE ON public.report_ad_spend
+    FOR EACH ROW EXECUTE FUNCTION public.log_audit_event();
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- 14) COGS-VAT reclaim percentage
+--   Percentage of inventory bought from UK VAT-registered suppliers; applied
+--   on top of ex-VAT COGS as reclaimable Input VAT. Default 100 (matches the
+--   prior portal behaviour where 20% of total COGS was always reclaimed).
+--   Per-account default + per-report override.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'cogs_vat_reclaim_pct'
+  ) THEN
+    ALTER TABLE public.accounts
+      ADD COLUMN cogs_vat_reclaim_pct numeric(5,2) NOT NULL DEFAULT 100;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'reports' AND column_name = 'cogs_vat_reclaim_pct'
+  ) THEN
+    ALTER TABLE public.reports
+      ADD COLUMN cogs_vat_reclaim_pct numeric(5,2);
   END IF;
 END $$;
