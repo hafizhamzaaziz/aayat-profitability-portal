@@ -38,10 +38,16 @@ export type ShipmentItem = {
   SellerSKU?: string;
   OrderItemId?: string;
   QuantityShipped?: number;
+  // Forward shipment buckets
   ItemChargeList?: ChargeComponent[];
   ItemFeeList?: FeeComponent[];
-  ItemTaxWithheldList?: TaxWithheldComponent[];
   PromotionList?: PromotionComponent[];
+  // Refund/adjustment buckets — Amazon places refund principal/tax/fees
+  // here (NOT in the *List fields above) so the mapper must sum both.
+  ItemChargeAdjustmentList?: ChargeComponent[];
+  ItemFeeAdjustmentList?: FeeComponent[];
+  PromotionAdjustmentList?: PromotionComponent[];
+  ItemTaxWithheldList?: TaxWithheldComponent[];
 };
 
 export type ShipmentEvent = {

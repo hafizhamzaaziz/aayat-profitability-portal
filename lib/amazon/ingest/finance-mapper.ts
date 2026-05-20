@@ -219,25 +219,44 @@ function blankCsvRow(): Record<string, string | number | null> {
 /**
  * For a ShipmentItem (or its adjustment-list counterpart) tally up the
  * canonical column buckets. Sign of charges/fees is preserved as Amazon
- * returns it (e.g. fees are negative).
+ * returns it (e.g. forward fees are negative; refund commissions positive).
+ *
+ * CRITICAL: refund events place their per-item amounts in the
+ * ItemChargeAdjustmentList / ItemFeeAdjustmentList / PromotionAdjustmentList
+ * fields — NOT the forward *List fields. We sum both so the same routine
+ * works for ShipmentEvent (forward orders) and RefundEvent (returns).
  */
 function tallyShipmentItem(item: ShipmentItem) {
+  const charges = [...(item.ItemChargeList || []), ...(item.ItemChargeAdjustmentList || [])];
+  const fees = [...(item.ItemFeeList || []), ...(item.ItemFeeAdjustmentList || [])];
+  const promotions = [...(item.PromotionList || []), ...(item.PromotionAdjustmentList || [])];
+
   const productSalesExvat =
-    sumCharges(item.ItemChargeList, (t) => t === "Principal") +
-    sumCharges(item.ItemChargeList, (t) => t === "GoodwillAdjustment");
-  const productSalesTax = sumCharges(item.ItemChargeList, (t) => t === "Tax");
+    sumCharges(charges, (t) => t === "Principal") +
+    sumCharges(charges, (t) => t === "GoodwillAdjustment");
+  const productSalesTax = sumCharges(charges, (t) => t === "Tax");
   const shippingExvat =
-    sumCharges(item.ItemChargeList, (t) => t === "Shipping") +
-    sumCharges(item.ItemChargeList, (t) => t === "ShippingChargeback");
-  const shippingTax = sumCharges(item.ItemChargeList, (t) => t === "ShippingTax");
-  const giftWrapExvat = sumCharges(item.ItemChargeList, (t) => t === "GiftWrap");
-  const giftWrapTax = sumCharges(item.ItemChargeList, (t) => t === "GiftWrapTax");
-  const promoRebates = sumPromotionAmounts(item.PromotionList);
+    sumCharges(charges, (t) => t === "Shipping") +
+    sumCharges(charges, (t) => t === "ShippingChargeback");
+  const shippingTax = sumCharges(charges, (t) => t === "ShippingTax");
+  const giftWrapExvat = sumCharges(charges, (t) => t === "GiftWrap");
+  const giftWrapTax = sumCharges(charges, (t) => t === "GiftWrapTax");
+  const promoRebates = sumPromotionAmounts(promotions);
   const withheldTax = sumTaxesWithheld(item.ItemTaxWithheldList);
-  const sellingFees = sumFees(item.ItemFeeList, (t) => t === "Commission" || t === "FixedClosingFee" || t === "VariableClosingFee");
-  const fbaFees = sumFees(item.ItemFeeList, (t) => t.startsWith("FBA"));
-  const otherTxFees = sumFees(item.ItemFeeList, (t) => {
-    if (t === "Commission" || t === "FixedClosingFee" || t === "VariableClosingFee") return false;
+  const sellingFees = sumFees(
+    fees,
+    (t) => t === "Commission" || t === "FixedClosingFee" || t === "VariableClosingFee" || t === "RefundCommission"
+  );
+  const fbaFees = sumFees(fees, (t) => t.startsWith("FBA"));
+  const otherTxFees = sumFees(fees, (t) => {
+    if (
+      t === "Commission" ||
+      t === "FixedClosingFee" ||
+      t === "VariableClosingFee" ||
+      t === "RefundCommission"
+    ) {
+      return false;
+    }
     if (t.startsWith("FBA")) return false;
     return true;
   });
@@ -345,10 +364,21 @@ function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[]
   return out;
 }
 
+/**
+ * ServiceFeeEvent → P&L row.
+ *
+ * The downstream engine recognises THREE distinct row types here:
+ *   - type="FBA Inventory Fee"   → goes into fbaInventoryFeesGross
+ *   - type="Service Fee" + desc not containing 'advertising' → subscription
+ *   - type="Service Fee" + desc containing 'advertising' → ad spend (SKIPPED;
+ *     PPC comes from the separate Ads report so we don't double-count)
+ *
+ * Amazon's FeeReason values are inconsistent across marketplaces — match by
+ * substring rather than equality.
+ */
 function mapServiceFeeEvent(ev: ServiceFeeEvent): CsvRow | null {
   const reason = String(ev.FeeReason || "").toLowerCase();
-  // Cost of Advertising comes from the separate Ads report — never ingest it
-  // here, otherwise the portal would double-count PPC spend.
+  // Cost of Advertising comes from the separate Ads report.
   if (reason.includes("advertising") || reason.includes("ppc") || reason.includes("sponsored")) {
     return null;
   }
@@ -359,14 +389,29 @@ function mapServiceFeeEvent(ev: ServiceFeeEvent): CsvRow | null {
   const sku = decodeHtmlEntities(ev.SellerSKU);
   const orderIdDecoded = decodeHtmlEntities(ev.AmazonOrderId);
   const description = decodeHtmlEntities(ev.FeeReason || ev.FeeDescription);
+
+  // Decide which engine bucket this fee belongs to.
+  let rowType: string = "Service Fee";
+  if (
+    reason.includes("fba inventory") ||
+    reason.includes("fba storage") ||
+    reason.includes("long term storage") ||
+    reason.includes("monthly inventory") ||
+    reason.includes("storage fee") ||
+    reason.includes("aged inventory") ||
+    reason.includes("removal fee") ||
+    reason.includes("disposal fee")
+  ) {
+    rowType = "FBA Inventory Fee";
+  }
+
   const row = blankCsvRow();
   row[COL.date] = ev.PostedDate || "";
-  row[COL.type] = "Service Fee";
+  row[COL.type] = rowType;
   row[COL.orderId] = orderIdDecoded;
   row[COL.sku] = sku;
   row[COL.description] = description;
-  // CSV convention: full VAT-inclusive amount lands in "other" — the P&L
-  // engine splits at 20% based on the FeeReason.
+  // VAT-inclusive amount lands in "other" — engine splits at 20%.
   row[COL.other] = totalFees;
   row[COL.total] = rowTotal(row);
 
@@ -379,10 +424,52 @@ function mapServiceFeeEvent(ev: ServiceFeeEvent): CsvRow | null {
   };
 }
 
+/**
+ * Classify an Amazon AdjustmentEvent.AdjustmentType into the engine's row
+ * type vocabulary. This is critical because Amazon bundles three completely
+ * different things into `AdjustmentEvent`:
+ *
+ *   1. FBA inventory reimbursements (REVERSAL_REIMBURSEMENT, WAREHOUSE_LOST,
+ *      WAREHOUSE_DAMAGE, etc.) — credits coming back to the seller.
+ *      → engine bucket: "adjustment" (fbaReimbursements)
+ *
+ *   2. Postage billing for SFP/FBM (PostageBilling_*, ReturnPostageBilling_*)
+ *      — VAT-inclusive shipping label costs that the engine treats as a
+ *      separate line and VAT-splits at 20%.
+ *      → engine bucket: "delivery services"
+ *
+ *   3. Cash reserve movements (ReserveCredit / ReserveDebit) — informational
+ *      ledger entries, no P&L impact (they net to zero over time).
+ *      → SKIPPED
+ *
+ * Unknown adjustment types fall through to "adjustment" (the safer default —
+ * better to surface an unrecognised amount than silently drop it).
+ */
+type AdjustmentRouting = "adjustment" | "delivery_services" | "skip";
+
+function classifyAdjustmentType(type: string): AdjustmentRouting {
+  const t = type.toLowerCase();
+  if (t.startsWith("postagebilling") || t.startsWith("returnpostagebilling")) {
+    return "delivery_services";
+  }
+  if (t === "reservecredit" || t === "reservedebit") {
+    return "skip";
+  }
+  return "adjustment";
+}
+
 function mapAdjustmentEvent(ev: AdjustmentEvent): CsvRow[] {
   const items: AdjustmentItem[] = ev.AdjustmentItemList || [];
   const out: CsvRow[] = [];
   const adjType = decodeHtmlEntities(ev.AdjustmentType);
+  const routing = classifyAdjustmentType(adjType);
+  if (routing === "skip") return out;
+
+  // Engine bucket name + how to describe the row for the per-SKU PDF.
+  const rowType = routing === "delivery_services" ? "Delivery Services" : "Adjustment";
+  const description = routing === "delivery_services"
+    ? `Delivery Services (${adjType})`
+    : `FBA Inventory Reimbursement - ${adjType}`;
   const eventIdBase = `Adjustment:${adjType}:${ev.PostedDate || ""}`;
 
   if (items.length === 0) {
@@ -390,8 +477,8 @@ function mapAdjustmentEvent(ev: AdjustmentEvent): CsvRow[] {
     if (Math.abs(summary) < 0.001) return out;
     const row = blankCsvRow();
     row[COL.date] = ev.PostedDate || "";
-    row[COL.type] = "Adjustment";
-    row[COL.description] = adjType;
+    row[COL.type] = rowType;
+    row[COL.description] = description;
     row[COL.other] = summary;
     row[COL.total] = rowTotal(row);
     out.push({
@@ -412,9 +499,9 @@ function mapAdjustmentEvent(ev: AdjustmentEvent): CsvRow[] {
     const sku = decodeHtmlEntities(item.SellerSKU);
     const row = blankCsvRow();
     row[COL.date] = ev.PostedDate || "";
-    row[COL.type] = "Adjustment";
+    row[COL.type] = rowType;
     row[COL.sku] = sku;
-    row[COL.description] = adjType || decodeHtmlEntities(item.ProductDescription);
+    row[COL.description] = description || decodeHtmlEntities(item.ProductDescription);
     row[COL.quantity] = Number.isFinite(qty) && qty !== 0 ? qty : null;
     row[COL.other] = itemAmount;
     row[COL.total] = rowTotal(row);
