@@ -2,6 +2,7 @@ import React from "react";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Document, Image, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
+import { computeExpenseTotals } from "@/lib/reports/expense-totals";
 
 type ExpenseLine = {
   description: string;
@@ -15,6 +16,28 @@ type PerformanceLine = {
   bsr: number | null;
   review_count: number | null;
   rating: number | null;
+  ppc_spend?: number | null;
+  ppc_sales?: number | null;
+  total_sales?: number | null;
+};
+
+type SkuPdfRow = {
+  sku: string;
+  description?: string | null;
+  units: number;
+  netSales: number;
+  cogs: number;
+  advertisingAlloc: number;
+  netProfit: number;
+  netMargin: number;
+};
+
+type AdMetaSummary = {
+  source_filename: string | null;
+  total_spend_exvat: number;
+  blank_sku_spend: number;
+  matched_sku_count: number;
+  unmatched_sku_count: number;
 };
 
 type Input = {
@@ -44,6 +67,8 @@ type Input = {
       settlementNet: number;
       purchaseCost: number;
       netProfit: number;
+      coreOperatingProfit?: number;
+      adjustmentsNet?: number;
     };
     vat: {
       outputVat: number;
@@ -54,7 +79,17 @@ type Input = {
   } | null;
   expenses: ExpenseLine[];
   performance: PerformanceLine[];
+  /**
+   * Performance-metric rows from the previous comparable period (typically the
+   * month immediately preceding `periodStart`). When provided, the snapshot
+   * compares period averages instead of last-week-vs-week-before.
+   */
+  performancePrevious?: PerformanceLine[];
   notes: string;
+  skuLines?: SkuPdfRow[];
+  adMeta?: AdMetaSummary | null;
+  /** Persisted data-quality warnings (from report.breakdown.warnings). */
+  warnings?: string[];
 };
 
 const styles = StyleSheet.create({
@@ -95,6 +130,8 @@ const styles = StyleSheet.create({
   c3: { width: "14%", textAlign: "right" },
   c4: { width: "14%", textAlign: "right" },
   c5: { width: "12%", textAlign: "right" },
+  perfC1: { width: "26%", paddingRight: 4, fontSize: 9 },
+  perfC2: { width: `${(74 / 7).toFixed(2)}%`, paddingRight: 4, textAlign: "right", fontSize: 9 },
   twoCol: {
     flexDirection: "row",
     alignItems: "flex-start",
@@ -156,6 +193,83 @@ function addDaysIso(iso: string, days: number) {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * Aggregate raw weekly performance rows into a single per-product summary,
+ * averaging numeric metrics across all rows in the period. Reviews are
+ * monotonic so we use the latest value rather than the average.
+ */
+type PerfAggregate = {
+  product_name: string;
+  bsr: number | null;
+  reviews: number | null;
+  rating: number | null;
+  ppc_spend: number | null;
+  ppc_sales: number | null;
+  total_sales: number | null;
+  acos: number | null;
+  tacos: number | null;
+};
+
+function aggregatePerformance(rows: PerformanceLine[] | undefined | null): Map<string, PerfAggregate> {
+  const out = new Map<string, PerfAggregate>();
+  if (!rows || rows.length === 0) return out;
+  const byProduct = new Map<string, PerformanceLine[]>();
+  for (const row of rows) {
+    const name = String(row.product_name || "").trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    const list = byProduct.get(key) || [];
+    list.push(row);
+    byProduct.set(key, list);
+  }
+  const avg = (values: Array<number | null | undefined>) => {
+    const nums = values.filter((v): v is number => v != null && Number.isFinite(Number(v))).map((v) => Number(v));
+    if (nums.length === 0) return null;
+    return nums.reduce((a, b) => a + b, 0) / nums.length;
+  };
+  byProduct.forEach((list, key) => {
+    const sorted = [...list].sort((a, b) => String(a.recorded_date).localeCompare(String(b.recorded_date)));
+    const product_name = sorted[sorted.length - 1].product_name;
+    const bsr = avg(sorted.map((r) => r.bsr));
+    const reviews = sorted[sorted.length - 1].review_count ?? null;
+    const rating = avg(sorted.map((r) => r.rating));
+    const ppc_spend = avg(sorted.map((r) => r.ppc_spend ?? null));
+    const ppc_sales = avg(sorted.map((r) => r.ppc_sales ?? null));
+    const total_sales = avg(sorted.map((r) => r.total_sales ?? null));
+    const acos =
+      ppc_spend != null && ppc_sales && ppc_sales !== 0 ? (ppc_spend / ppc_sales) * 100 : null;
+    const tacos =
+      ppc_spend != null && total_sales && total_sales !== 0 ? (ppc_spend / total_sales) * 100 : null;
+    out.set(key, { product_name, bsr, reviews, rating, ppc_spend, ppc_sales, total_sales, acos, tacos });
+  });
+  return out;
+}
+
+type MetricKey = "bsr" | "reviews" | "rating" | "ppc_spend" | "ppc_sales" | "total_sales" | "acos" | "tacos";
+
+function trendForMetric(metric: MetricKey): "higher_better" | "lower_better" {
+  if (metric === "ppc_sales" || metric === "total_sales" || metric === "reviews" || metric === "rating") {
+    return "higher_better";
+  }
+  return "lower_better";
+}
+
+/** Mirrors `valueColorClass` in the Performance tab. */
+function perfColor(metric: MetricKey, current: number | null, previous: number | null): string {
+  if (current == null || previous == null || current === previous) return "#111827";
+  const trend = trendForMetric(metric);
+  const better = trend === "higher_better" ? current > previous : current < previous;
+  return better ? "#15803d" : "#b91c1c";
+}
+
+function fmt(metric: MetricKey, value: number | null): string {
+  if (value == null) return "-";
+  if (metric === "rating") return value.toFixed(2);
+  if (metric === "acos" || metric === "tacos") return `${value.toFixed(1)}%`;
+  if (metric === "bsr" || metric === "reviews") return Math.round(value).toLocaleString();
+  return value.toFixed(2);
+}
+
 function titleCase(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
 }
@@ -174,45 +288,70 @@ function MetricRow({ currency, label, value }: { currency: string; label: string
 }
 
 function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl: string | null }) {
-  const perfRows = data.performance || [];
-  const weekStartsInRange = Array.from(
-    new Set(
-      perfRows
-        .map((p) => String(p.recorded_date || "").slice(0, 10))
-        .filter((d) => d >= data.periodStart && d <= data.periodEnd)
-    )
-  ).sort();
-  const currentWeekStart = weekStartsInRange.length > 0 ? weekStartsInRange[weekStartsInRange.length - 1] : null;
-  const previousWeekStart = currentWeekStart ? addDaysIso(currentWeekStart, -7) : null;
+  const currentRows = (data.performance || []).filter((p) => {
+    const d = String(p.recorded_date || "").slice(0, 10);
+    return d >= data.periodStart && d <= data.periodEnd;
+  });
+  const previousRows = data.performancePrevious || [];
 
-  const perfSnapshot = (() => {
-    if (!currentWeekStart) return [];
-    const currentRows = perfRows.filter((p) => String(p.recorded_date || "").slice(0, 10) === currentWeekStart);
-    const previousByProduct = new Map<string, PerformanceLine>();
-    perfRows
-      .filter((p) => String(p.recorded_date || "").slice(0, 10) === previousWeekStart)
-      .forEach((p) => {
-        const key = p.product_name.trim().toLowerCase();
-        if (!previousByProduct.has(key)) previousByProduct.set(key, p);
+  const currentAgg = aggregatePerformance(currentRows);
+  const previousAgg = aggregatePerformance(previousRows);
+
+  // Period label — show the actual date span (full month) instead of last week.
+  const previousPeriodStart = (() => {
+    const start = new Date(`${data.periodStart}T00:00:00Z`);
+    const end = new Date(`${data.periodEnd}T00:00:00Z`);
+    const days = Math.max(1, Math.round((end.getTime() - start.getTime()) / 86400000) + 1);
+    return addDaysIso(data.periodStart, -days);
+  })();
+  const previousPeriodEnd = addDaysIso(data.periodStart, -1);
+
+  type SnapshotRow = {
+    product_name: string;
+    bsr: number | null;
+    bsrPrev: number | null;
+    reviews: number | null;
+    reviewsPrev: number | null;
+    rating: number | null;
+    ratingPrev: number | null;
+    ppc_spend: number | null;
+    ppc_spendPrev: number | null;
+    ppc_sales: number | null;
+    ppc_salesPrev: number | null;
+    acos: number | null;
+    acosPrev: number | null;
+    tacos: number | null;
+    tacosPrev: number | null;
+    hasPrior: boolean;
+  };
+
+  const perfSnapshot: SnapshotRow[] = (() => {
+    const out: SnapshotRow[] = [];
+    currentAgg.forEach((cur, key) => {
+      const prev = previousAgg.get(key) || null;
+      out.push({
+        product_name: cur.product_name,
+        bsr: cur.bsr,
+        bsrPrev: prev?.bsr ?? null,
+        reviews: cur.reviews,
+        reviewsPrev: prev?.reviews ?? null,
+        rating: cur.rating,
+        ratingPrev: prev?.rating ?? null,
+        ppc_spend: cur.ppc_spend,
+        ppc_spendPrev: prev?.ppc_spend ?? null,
+        ppc_sales: cur.ppc_sales,
+        ppc_salesPrev: prev?.ppc_sales ?? null,
+        acos: cur.acos,
+        acosPrev: prev?.acos ?? null,
+        tacos: cur.tacos,
+        tacosPrev: prev?.tacos ?? null,
+        hasPrior: Boolean(prev),
       });
-    return currentRows
-      .map((row) => {
-        const key = row.product_name.trim().toLowerCase();
-        const prev = previousByProduct.get(key) || null;
-        return {
-          product_name: row.product_name,
-          bsr: row.bsr,
-          review_count: row.review_count,
-          rating: row.rating,
-          bsrDelta: row.bsr != null && prev?.bsr != null ? prev.bsr - row.bsr : null,
-          reviewDelta: row.review_count != null && prev?.review_count != null ? row.review_count - prev.review_count : null,
-          ratingDelta: row.rating != null && prev?.rating != null ? row.rating - prev.rating : null,
-        };
-      })
-      .sort((a, b) => a.product_name.localeCompare(b.product_name))
-      .slice(0, 8);
+    });
+    return out.sort((a, b) => a.product_name.localeCompare(b.product_name));
   })();
   const showVatSummary = Number(data.vatRate || 0) > 0;
+  const expenseTotals = computeExpenseTotals(data.expenses, data.vatRate);
 
   return (
     <Document>
@@ -238,6 +377,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
               <View style={styles.tightSection}>
               <Text style={styles.sectionTitle}>
                 {data.breakdown.platform === "amazon" ? "Amazon Report Summary" : "Temu Report Summary"}
+                {showVatSummary ? " (excl. VAT)" : ""}
               </Text>
               {data.breakdown.summaryLines.map((line) => (
                 <MetricRow key={line.label} currency={data.currency} label={line.label} value={line.value} />
@@ -267,6 +407,27 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
                     label="Your Purchase Cost (excl. VAT)"
                     value={-Math.abs(data.breakdown.pnl.purchaseCost)}
                   />
+                  <MetricRow
+                    currency={data.currency}
+                    label="Total Expenses (excl. VAT)"
+                    value={-Math.abs(expenseTotals.net)}
+                  />
+                  {data.breakdown.platform === "temu" &&
+                  typeof data.breakdown.pnl.coreOperatingProfit === "number" &&
+                  typeof data.breakdown.pnl.adjustmentsNet === "number" ? (
+                    <>
+                      <MetricRow
+                        currency={data.currency}
+                        label="Core Sales Operating Profit"
+                        value={data.breakdown.pnl.coreOperatingProfit}
+                      />
+                      <MetricRow
+                        currency={data.currency}
+                        label="Adjustments Net (labels/repayments/penalties)"
+                        value={data.breakdown.pnl.adjustmentsNet}
+                      />
+                    </>
+                  ) : null}
                   <View style={{ ...styles.row, borderBottomWidth: 0 }}>
                     <Text style={{ ...styles.label, fontWeight: 700 }}>Total Net Profit</Text>
                     <Text style={{ ...styles.value, fontWeight: 700, color: valueColor(data.report.net_profit) }}>
@@ -325,65 +486,207 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
           )}
         </View>
 
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Manual Notes</Text>
+          <Text style={styles.notes}>{data.notes?.trim() ? data.notes.trim() : "No manual notes provided."}</Text>
+        </View>
+
+        {data.warnings && data.warnings.length > 0 ? (
+          <View style={{ ...styles.section, borderColor: "#fde68a", backgroundColor: "#fffbeb" }}>
+            <Text style={styles.sectionTitle}>Data Quality Warnings</Text>
+            {data.warnings.map((warning, idx) => (
+              <View key={`warn-${idx}`} style={{ flexDirection: "row", marginTop: 2 }}>
+                <Text style={{ width: 10, color: "#92400e" }}>•</Text>
+                <Text style={{ flex: 1, color: "#92400e" }}>{warning}</Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+
         {data.platform === "amazon" ? (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Performance Metrics Snapshot</Text>
             {perfSnapshot.length === 0 ? (
-              <Text style={styles.sub}>No performance metrics available.</Text>
+              <Text style={styles.sub}>No performance metrics available for this period.</Text>
             ) : (
               <>
                 <Text style={styles.sub}>
-                  Week: {dateUk(currentWeekStart || "")} to {dateUk(currentWeekStart ? addDaysIso(currentWeekStart, 6) : "")}
-                  {previousWeekStart ? ` (vs ${dateUk(previousWeekStart)} to ${dateUk(addDaysIso(previousWeekStart, 6))})` : ""}
+                  {dateUk(data.periodStart)} to {dateUk(data.periodEnd)} averages, vs{" "}
+                  {dateUk(previousPeriodStart)} to {dateUk(previousPeriodEnd)}
                 </Text>
                 <View style={styles.tableHead}>
-                  <Text style={styles.c1}>Product</Text>
-                  <Text style={styles.c2}>BSR</Text>
-                  <Text style={styles.c3}>Reviews</Text>
-                  <Text style={styles.c4}>Rating</Text>
-                  <Text style={styles.c5}>Trend</Text>
+                  <Text style={styles.perfC1}>Product</Text>
+                  <Text style={styles.perfC2}>BSR</Text>
+                  <Text style={styles.perfC2}>Reviews</Text>
+                  <Text style={styles.perfC2}>Rating</Text>
+                  <Text style={styles.perfC2}>PPC Spend</Text>
+                  <Text style={styles.perfC2}>PPC Sales</Text>
+                  <Text style={styles.perfC2}>ACOS</Text>
+                  <Text style={styles.perfC2}>TACOS</Text>
                 </View>
-                {perfSnapshot.map((p, idx) => (
-                  <View key={`${p.product_name}-${idx}`} style={styles.tr}>
-                    <Text style={styles.c1}>{p.product_name}</Text>
-                    <View style={styles.c2}>
-                      <Text>{p.bsr ?? "-"}</Text>
-                      <Text style={{ fontSize: 8, color: p.bsrDelta == null ? "#64748b" : p.bsrDelta > 0 ? "#15803d" : p.bsrDelta < 0 ? "#dc2626" : "#64748b" }}>
-                        {p.bsrDelta == null ? "vs last: -" : `vs last: ${p.bsrDelta > 0 ? "+" : ""}${p.bsrDelta}`}
+                {perfSnapshot.map((p, idx) => {
+                  const cell = (metric: MetricKey, current: number | null, previous: number | null) => (
+                    <View style={styles.perfC2}>
+                      <Text style={{ color: perfColor(metric, current, previous) }}>{fmt(metric, current)}</Text>
+                      <Text style={{ fontSize: 8, color: "#64748b" }}>
+                        {previous == null ? "vs last: -" : `vs last: ${fmt(metric, previous)}`}
                       </Text>
                     </View>
-                    <View style={styles.c3}>
-                      <Text>{p.review_count ?? "-"}</Text>
-                      <Text style={{ fontSize: 8, color: p.reviewDelta == null ? "#64748b" : p.reviewDelta > 0 ? "#15803d" : p.reviewDelta < 0 ? "#dc2626" : "#64748b" }}>
-                        {p.reviewDelta == null ? "vs last: -" : `vs last: ${p.reviewDelta > 0 ? "+" : ""}${p.reviewDelta}`}
-                      </Text>
+                  );
+                  return (
+                    <View key={`${p.product_name}-${idx}`} style={styles.tr}>
+                      <Text style={styles.perfC1}>{p.product_name}</Text>
+                      {cell("bsr", p.bsr, p.bsrPrev)}
+                      {cell("reviews", p.reviews, p.reviewsPrev)}
+                      {cell("rating", p.rating, p.ratingPrev)}
+                      {cell("ppc_spend", p.ppc_spend, p.ppc_spendPrev)}
+                      {cell("ppc_sales", p.ppc_sales, p.ppc_salesPrev)}
+                      {cell("acos", p.acos, p.acosPrev)}
+                      {cell("tacos", p.tacos, p.tacosPrev)}
                     </View>
-                    <View style={styles.c4}>
-                      <Text>{p.rating ?? "-"}</Text>
-                      <Text style={{ fontSize: 8, color: p.ratingDelta == null ? "#64748b" : p.ratingDelta > 0 ? "#15803d" : p.ratingDelta < 0 ? "#dc2626" : "#64748b" }}>
-                        {p.ratingDelta == null ? "vs last: -" : `vs last: ${p.ratingDelta > 0 ? "+" : ""}${p.ratingDelta.toFixed(2)}`}
-                      </Text>
-                    </View>
-                    <View style={styles.c5}>
-                      <Text style={{ fontSize: 9, color: p.bsrDelta == null || p.reviewDelta == null ? "#64748b" : p.bsrDelta > 0 && p.reviewDelta > 0 ? "#15803d" : "#dc2626" }}>
-                        {p.bsrDelta == null || p.reviewDelta == null
-                          ? "No prior week"
-                          : p.bsrDelta > 0 && p.reviewDelta > 0
-                            ? "Improved"
-                            : "Mixed"}
-                      </Text>
-                    </View>
-                  </View>
-                ))}
+                  );
+                })}
+                <Text style={{ ...styles.sub, marginTop: 6, fontSize: 8 }}>
+                  Green = better than previous period, red = worse. BSR/PPC Spend/ACOS/TACOS lower
+                  is better; Reviews/Rating/PPC Sales higher is better.
+                </Text>
               </>
             )}
           </View>
         ) : null}
 
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Manual Notes</Text>
-          <Text style={styles.notes}>{data.notes?.trim() ? data.notes.trim() : "No manual notes provided."}</Text>
-        </View>
+        {data.skuLines && data.skuLines.length > 0 ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Per-SKU Profitability ({data.skuLines.length} SKUs)</Text>
+            <Text style={styles.sub}>
+              Sorted by net profit. Figures ex-VAT. Per-SKU net profit is marketplace activity only; manual external
+              expenses are not pushed into individual SKUs and are reconciled in the roll-up below.
+            </Text>
+            <View style={{ ...styles.tableHead, marginTop: 6 }} fixed>
+              <Text style={{ width: "32%" }}>SKU</Text>
+              <Text style={{ width: "10%", textAlign: "right" }}>Units</Text>
+              <Text style={{ width: "16%", textAlign: "right" }}>Net Sales</Text>
+              <Text style={{ width: "14%", textAlign: "right" }}>COGS</Text>
+              <Text style={{ width: "14%", textAlign: "right" }}>Ads</Text>
+              <Text style={{ width: "14%", textAlign: "right" }}>Net Profit</Text>
+            </View>
+            {(() => {
+              const sorted = [...data.skuLines].sort((a, b) => b.netProfit - a.netProfit);
+              const totals = sorted.reduce(
+                (acc, row) => {
+                  acc.units += Number(row.units || 0);
+                  acc.netSales += Number(row.netSales || 0);
+                  acc.cogs += Number(row.cogs || 0);
+                  acc.advertisingAlloc += Number(row.advertisingAlloc || 0);
+                  acc.netProfit += Number(row.netProfit || 0);
+                  return acc;
+                },
+                { units: 0, netSales: 0, cogs: 0, advertisingAlloc: 0, netProfit: 0 }
+              );
+              const externalNet = expenseTotals.net;
+              const finalNet = Number(data.report.net_profit || 0);
+              const bridgeCheck = Math.round((totals.netProfit - externalNet - finalNet) * 100) / 100;
+
+              const rollRow = (
+                label: string,
+                vals: { units: string; ns: string; cg: string; ad: string; np: string },
+                profitColor: string,
+                emphasizeBg?: boolean
+              ) => (
+                <View
+                  style={{
+                    ...styles.tr,
+                    borderTopWidth: 1,
+                    borderTopColor: "#cbd5e1",
+                    backgroundColor: emphasizeBg ? "#eef2ff" : "#f8fafc",
+                    borderBottomWidth: 0,
+                  }}
+                  wrap={false}
+                >
+                  <Text style={{ width: "32%", fontWeight: emphasizeBg ? 700 : 600 }}>{label}</Text>
+                  <Text style={{ width: "10%", textAlign: "right", fontWeight: emphasizeBg ? 700 : 600 }}>{vals.units}</Text>
+                  <Text style={{ width: "16%", textAlign: "right", fontWeight: emphasizeBg ? 700 : 600 }}>{vals.ns}</Text>
+                  <Text style={{ width: "14%", textAlign: "right", fontWeight: emphasizeBg ? 700 : 600 }}>{vals.cg}</Text>
+                  <Text style={{ width: "14%", textAlign: "right", fontWeight: emphasizeBg ? 700 : 600 }}>{vals.ad}</Text>
+                  <Text
+                    style={{
+                      width: "14%",
+                      textAlign: "right",
+                      fontWeight: emphasizeBg ? 700 : 600,
+                      color: profitColor,
+                    }}
+                  >
+                    {vals.np}
+                  </Text>
+                </View>
+              );
+
+              return (
+                <>
+                  {sorted.map((row, idx) => (
+                    <View key={`${row.sku}-${idx}`} style={styles.tr} wrap={false}>
+                      <View style={{ width: "32%" }}>
+                        <Text style={{ fontFamily: "Courier" }}>{row.sku}</Text>
+                        {row.description ? (
+                          <Text style={{ fontSize: 8, color: "#64748b" }}>{(row.description || "").slice(0, 80)}</Text>
+                        ) : null}
+                      </View>
+                      <Text style={{ width: "10%", textAlign: "right" }}>{row.units.toLocaleString()}</Text>
+                      <Text style={{ width: "16%", textAlign: "right" }}>{m(data.currency, row.netSales)}</Text>
+                      <Text style={{ width: "14%", textAlign: "right" }}>{m(data.currency, row.cogs)}</Text>
+                      <Text style={{ width: "14%", textAlign: "right" }}>{m(data.currency, row.advertisingAlloc)}</Text>
+                      <Text style={{ width: "14%", textAlign: "right", color: valueColor(row.netProfit), fontWeight: 700 }}>
+                        {m(data.currency, row.netProfit)}
+                      </Text>
+                    </View>
+                  ))}
+                  {rollRow(
+                    "Subtotal — marketplace (sum of SKUs)",
+                    {
+                      units: totals.units.toLocaleString(),
+                      ns: m(data.currency, totals.netSales),
+                      cg: m(data.currency, totals.cogs),
+                      ad: m(data.currency, totals.advertisingAlloc),
+                      np: m(data.currency, totals.netProfit),
+                    },
+                    valueColor(totals.netProfit),
+                    false
+                  )}
+                  {rollRow(
+                    "External expenses (net, not allocated)",
+                    {
+                      units: "—",
+                      ns: "—",
+                      cg: "—",
+                      ad: "—",
+                      np: externalNet > 0 ? m(data.currency, -externalNet) : m(data.currency, 0),
+                    },
+                    "#b91c1c",
+                    false
+                  )}
+                  {rollRow(
+                    "Final net profit (account)",
+                    {
+                      units: "—",
+                      ns: "—",
+                      cg: "—",
+                      ad: "—",
+                      np: m(data.currency, finalNet),
+                    },
+                    valueColor(finalNet),
+                    true
+                  )}
+                  {Math.abs(bridgeCheck) > 0.02 ? (
+                    <Text style={{ ...styles.sub, marginTop: 4, fontSize: 8, color: "#b45309" }}>
+                      Bridge check: SKU subtotal minus external expenses should equal account net profit; residual{" "}
+                      {m(data.currency, bridgeCheck)} — often unsaved edits or legacy data. Click Save edits or Recompute.
+                    </Text>
+                  ) : null}
+                </>
+              );
+            })()}
+          </View>
+        ) : null}
 
         <View style={styles.footer} fixed>
           {footerLogoDataUrl ? (
