@@ -67,6 +67,10 @@ create table if not exists public.account_client_members (
 create index if not exists idx_account_client_members_account on public.account_client_members(account_id);
 create index if not exists idx_account_client_members_client on public.account_client_members(client_id);
 -- 2e) Amazon SP-API / Ads-API credentials per account (refresh_token encrypted with TOKEN_ENC_KEY)
+-- One row per (account_id, provider). `provider` is 'sp-api' for Seller
+-- Central data, 'ads-api' for Sponsored Products / Sponsored Brands data.
+-- The two integrations use separate LWA apps, separate OAuth flows and
+-- separate refresh tokens, so they're tracked independently.
 create table if not exists public.account_amazon_credentials (
   id uuid primary key default gen_random_uuid(),
   account_id uuid not null references public.accounts(id) on delete cascade,
@@ -81,6 +85,12 @@ create table if not exists public.account_amazon_credentials (
   unique(account_id, provider)
 );
 create index if not exists idx_account_amazon_credentials_account on public.account_amazon_credentials(account_id);
+-- Ads-API specific: the Ads API exposes "profiles" which are per-marketplace
+-- advertiser contexts (each profile has a profileId and a countryCode). We
+-- store the selected profile per region as a JSON map so multi-marketplace
+-- sellers can have GB / DE / FR profiles all under one credential row.
+-- Example: {"GB": 1234567890, "DE": 9876543210}
+alter table public.account_amazon_credentials add column if not exists ads_profile_ids jsonb not null default '{}'::jsonb;
 -- 3) cogs
 create table if not exists public.cogs (
   id uuid primary key default gen_random_uuid(),

@@ -17,6 +17,14 @@ type AmazonCredential = {
   last_synced_at: string | null;
   last_sync_error: string | null;
 };
+type AmazonAdsCredential = {
+  account_id: string;
+  provider: string;
+  connected_at: string;
+  last_synced_at: string | null;
+  last_sync_error: string | null;
+  ads_profile_ids: Record<string, number>;
+};
 
 const emptyAccount: AccountForm = { name: "", currency: "£", vatRate: "20", assignedClientIds: [], assignedTeamIds: [] };
 const emptyUser: UserForm = { fullName: "", email: "", role: "client", password: "" };
@@ -33,8 +41,11 @@ export default function AdminSettingsPanelV2({
   const [accountTeamMap, setAccountTeamMap] = useState<Record<string, string[]>>({});
   const [accountClientMap, setAccountClientMap] = useState<Record<string, string[]>>({});
   const [amazonCredsByAccount, setAmazonCredsByAccount] = useState<Record<string, AmazonCredential>>({});
+  const [adsCredsByAccount, setAdsCredsByAccount] = useState<Record<string, AmazonAdsCredential>>({});
   const [amazonMarketplace, setAmazonMarketplace] = useState<string>("uk");
+  const [adsRegion, setAdsRegion] = useState<string>("eu");
   const [disconnectingAmazon, setDisconnectingAmazon] = useState(false);
+  const [disconnectingAds, setDisconnectingAds] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -73,8 +84,8 @@ export default function AdminSettingsPanelV2({
         supabase.from("account_client_members").select("account_id, client_id"),
         supabase
           .from("account_amazon_credentials")
-          .select("account_id, provider, selling_partner_id, connected_at, last_synced_at, last_sync_error")
-          .eq("provider", "sp-api"),
+          .select("account_id, provider, selling_partner_id, connected_at, last_synced_at, last_sync_error, ads_profile_ids")
+          .in("provider", ["sp-api", "ads-api"]),
       ]);
       if (usersError) throw usersError;
       if (accountsError) throw accountsError;
@@ -95,14 +106,31 @@ export default function AdminSettingsPanelV2({
         nextClientMap[row.account_id].push(row.client_id);
       });
       const nextAmazonMap: Record<string, AmazonCredential> = {};
-      ((amazonCredsData || []) as AmazonCredential[]).forEach((row) => {
-        nextAmazonMap[row.account_id] = row;
-      });
+      const nextAdsMap: Record<string, AmazonAdsCredential> = {};
+      // The query returns both providers in one shot; split them out so each
+      // panel can render its own connected state and creds independently.
+      ((amazonCredsData || []) as Array<AmazonCredential & { provider: string; ads_profile_ids?: Record<string, number> }>).forEach(
+        (row) => {
+          if (row.provider === "ads-api") {
+            nextAdsMap[row.account_id] = {
+              account_id: row.account_id,
+              provider: row.provider,
+              connected_at: row.connected_at,
+              last_synced_at: row.last_synced_at,
+              last_sync_error: row.last_sync_error,
+              ads_profile_ids: (row.ads_profile_ids || {}) as Record<string, number>,
+            };
+          } else {
+            nextAmazonMap[row.account_id] = row;
+          }
+        }
+      );
       setUsers((usersData || []) as UserRow[]);
       setAccounts((accountsData || []) as AccountRow[]);
       setAccountTeamMap(nextMap);
       setAccountClientMap(nextClientMap);
       setAmazonCredsByAccount(nextAmazonMap);
+      setAdsCredsByAccount(nextAdsMap);
       setLoading(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load admin settings.");
@@ -436,39 +464,74 @@ export default function AdminSettingsPanelV2({
             </div>
 
             {editAccountId ? (
-              <AmazonConnectionPanel
-                accountId={editAccountId}
-                credential={amazonCredsByAccount[editAccountId] || null}
-                marketplace={amazonMarketplace}
-                onMarketplaceChange={setAmazonMarketplace}
-                disconnecting={disconnectingAmazon}
-                onSavedManual={async (accountName) => {
-                  setMessage(`Amazon SP-API refresh token saved for ${accountName}.`);
-                  setError(null);
-                  await loadData();
-                }}
-                onDisconnect={async () => {
-                  if (!confirm("Disconnect Amazon SP-API for this account? You can reconnect anytime.")) return;
-                  setDisconnectingAmazon(true);
-                  setMessage(null);
-                  setError(null);
-                  try {
-                    const res = await fetch("/api/amazon/oauth/disconnect", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ accountId: editAccountId, provider: "sp-api" }),
-                    });
-                    const json = await res.json();
-                    if (!res.ok || !json.ok) throw new Error(json.error || "Failed to disconnect.");
-                    setMessage("Amazon SP-API disconnected.");
+              <div className="space-y-3">
+                <AmazonConnectionPanel
+                  accountId={editAccountId}
+                  credential={amazonCredsByAccount[editAccountId] || null}
+                  marketplace={amazonMarketplace}
+                  onMarketplaceChange={setAmazonMarketplace}
+                  disconnecting={disconnectingAmazon}
+                  onSavedManual={async (accountName) => {
+                    setMessage(`Amazon SP-API refresh token saved for ${accountName}.`);
+                    setError(null);
                     await loadData();
-                  } catch (err) {
-                    setError(err instanceof Error ? err.message : "Failed to disconnect Amazon.");
-                  } finally {
-                    setDisconnectingAmazon(false);
-                  }
-                }}
-              />
+                  }}
+                  onDisconnect={async () => {
+                    if (!confirm("Disconnect Amazon SP-API for this account? You can reconnect anytime.")) return;
+                    setDisconnectingAmazon(true);
+                    setMessage(null);
+                    setError(null);
+                    try {
+                      const res = await fetch("/api/amazon/oauth/disconnect", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ accountId: editAccountId, provider: "sp-api" }),
+                      });
+                      const json = await res.json();
+                      if (!res.ok || !json.ok) throw new Error(json.error || "Failed to disconnect.");
+                      setMessage("Amazon SP-API disconnected.");
+                      await loadData();
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : "Failed to disconnect Amazon.");
+                    } finally {
+                      setDisconnectingAmazon(false);
+                    }
+                  }}
+                />
+                <AmazonAdsConnectionPanel
+                  accountId={editAccountId}
+                  credential={adsCredsByAccount[editAccountId] || null}
+                  region={adsRegion}
+                  onRegionChange={setAdsRegion}
+                  disconnecting={disconnectingAds}
+                  onSavedManual={async (accountName) => {
+                    setMessage(`Amazon Ads refresh token saved for ${accountName}.`);
+                    setError(null);
+                    await loadData();
+                  }}
+                  onDisconnect={async () => {
+                    if (!confirm("Disconnect Amazon Ads for this account? You can reconnect anytime.")) return;
+                    setDisconnectingAds(true);
+                    setMessage(null);
+                    setError(null);
+                    try {
+                      const res = await fetch("/api/amazon/oauth/disconnect", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ accountId: editAccountId, provider: "ads-api" }),
+                      });
+                      const json = await res.json();
+                      if (!res.ok || !json.ok) throw new Error(json.error || "Failed to disconnect.");
+                      setMessage("Amazon Ads disconnected.");
+                      await loadData();
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : "Failed to disconnect Amazon Ads.");
+                    } finally {
+                      setDisconnectingAds(false);
+                    }
+                  }}
+                />
+              </div>
             ) : (
               <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-xs text-slate-600">
                 Save the account first, then re-open it to connect Amazon SP-API.
@@ -1054,6 +1117,398 @@ function AmazonConnectionPanel({
                   setShowManual(false);
                   setManualToken("");
                   setManualSellerId("");
+                  setManualError(null);
+                }}
+                className="rounded-lg bg-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function AmazonAdsConnectionPanel({
+  accountId,
+  credential,
+  region,
+  onRegionChange,
+  disconnecting,
+  onDisconnect,
+  onSavedManual,
+}: {
+  accountId: string;
+  credential: AmazonAdsCredential | null;
+  region: string;
+  onRegionChange: (value: string) => void;
+  disconnecting: boolean;
+  onDisconnect: () => void;
+  onSavedManual: (accountName: string) => void;
+}) {
+  const connected = Boolean(credential);
+  const [showManual, setShowManual] = useState(false);
+  const [manualToken, setManualToken] = useState("");
+  const [manualSaving, setManualSaving] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
+
+  type AdsTestResult = {
+    ok: boolean;
+    error?: string;
+    region?: string;
+    profileCount?: number;
+    profiles?: Array<{
+      profileId: number;
+      countryCode: string;
+      currencyCode: string;
+      marketplaceId: string;
+      accountType: string;
+      accountName: string;
+    }>;
+    selectedProfileIds?: Record<string, number>;
+  };
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<AdsTestResult | null>(null);
+
+  type AdsSyncReport = {
+    reportId: string;
+    periodStart: string;
+    periodEnd: string;
+    reportCreated: boolean;
+    skuCount: number;
+    totalSpendExvat: number;
+  };
+  type AdsSyncResult =
+    | {
+        ok: true;
+        range: { from: string; to: string };
+        profilesSynced: Array<{ profileId: number; countryCode: string; rowsDownloaded: number }>;
+        reports: AdsSyncReport[];
+        warnings: string[];
+      }
+    | { ok: false; error: string };
+  const today = new Date().toISOString().slice(0, 10);
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const [syncFrom, setSyncFrom] = useState(ninetyDaysAgo);
+  const [syncTo, setSyncTo] = useState(today);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<AdsSyncResult | null>(null);
+
+  const runSync = async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const res = await fetch("/api/amazon/ads/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId, from: syncFrom, to: syncTo }),
+      });
+      const json = (await res.json()) as AdsSyncResult;
+      setSyncResult(json);
+    } catch (err) {
+      setSyncResult({ ok: false, error: err instanceof Error ? err.message : "Network error." });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const runSmokeTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch(`/api/amazon/ads/test?accountId=${encodeURIComponent(accountId)}`);
+      const json = (await res.json()) as AdsTestResult;
+      setTestResult(json);
+    } catch (err) {
+      setTestResult({ ok: false, error: err instanceof Error ? err.message : "Network error." });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const saveManualToken = async () => {
+    setManualSaving(true);
+    setManualError(null);
+    try {
+      const res = await fetch("/api/amazon/ads/oauth/manual-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId, refreshToken: manualToken.trim() }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      setManualToken("");
+      setShowManual(false);
+      onSavedManual(json.accountName);
+    } catch (err) {
+      setManualError(err instanceof Error ? err.message : "Failed to save refresh token.");
+    } finally {
+      setManualSaving(false);
+    }
+  };
+
+  const connectHref = `/api/amazon/ads/oauth/start?accountId=${encodeURIComponent(accountId)}&region=${encodeURIComponent(region)}`;
+  const profileCount = credential ? Object.keys(credential.ads_profile_ids || {}).length : 0;
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div>
+          <h6 className="text-sm font-semibold text-slate-900">Amazon Ads API Connection</h6>
+          <p className="text-xs text-slate-500">
+            Pulls Sponsored Products spend (per-SKU, per-day) so the portal can reconcile ad spend
+            against sales without uploading the Ads CSV each month.
+          </p>
+        </div>
+        <span
+          className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+            connected ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-600"
+          }`}
+        >
+          {connected ? "Connected" : "Not connected"}
+        </span>
+      </div>
+
+      {connected && credential ? (
+        <div className="space-y-1 text-xs text-slate-600">
+          <div>
+            <span className="text-slate-500">Profiles: </span>
+            {profileCount > 0
+              ? Object.entries(credential.ads_profile_ids)
+                  .map(([country, id]) => `${country} (${id})`)
+                  .join(", ")
+              : "—"}
+          </div>
+          <div>
+            <span className="text-slate-500">Connected: </span>
+            {new Date(credential.connected_at).toLocaleString()}
+          </div>
+          <div>
+            <span className="text-slate-500">Last sync: </span>
+            {credential.last_synced_at ? new Date(credential.last_synced_at).toLocaleString() : "—"}
+          </div>
+          {credential.last_sync_error ? (
+            <div className="mt-1 rounded bg-red-50 px-2 py-1 text-red-700">
+              Last sync error: {credential.last_sync_error}
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <p className="text-xs text-slate-600">
+          Click <strong>Connect Amazon Ads</strong>. You&apos;ll be sent to Amazon Ads to sign in and
+          approve the app. After approval, profiles for each marketplace will be auto-discovered.
+        </p>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-slate-700">Region</label>
+          <select
+            value={region}
+            onChange={(e) => onRegionChange(e.target.value)}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+            disabled={connected}
+          >
+            <option value="eu">EU (UK, DE, FR, IT, ES, NL)</option>
+            <option value="na">North America (US, CA, MX)</option>
+            <option value="fe">Far East (JP, AU)</option>
+          </select>
+        </div>
+
+        {connected ? (
+          <button
+            type="button"
+            onClick={onDisconnect}
+            disabled={disconnecting}
+            className="rounded-lg bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 disabled:opacity-60"
+          >
+            {disconnecting ? "Disconnecting..." : "Disconnect Ads"}
+          </button>
+        ) : (
+          <a
+            href={connectHref}
+            className="rounded-lg bg-[#FF9900] px-4 py-2 text-sm font-semibold text-black hover:brightness-95"
+          >
+            Connect Amazon Ads
+          </a>
+        )}
+      </div>
+
+      {connected ? (
+        <div className="mt-3 border-t border-slate-200 pt-3">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-xs font-semibold text-slate-700">Profile discovery / smoke test</p>
+            <button
+              type="button"
+              onClick={() => void runSmokeTest()}
+              disabled={testing}
+              className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-60"
+            >
+              {testing ? "Testing…" : "Test Ads API"}
+            </button>
+          </div>
+          {testResult ? (
+            testResult.ok ? (
+              <div className="space-y-1 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                <div>
+                  <strong>✓ Ads API responded.</strong> Region <code>{testResult.region}</code> ·{" "}
+                  {testResult.profileCount} profile{testResult.profileCount === 1 ? "" : "s"} discovered
+                </div>
+                {testResult.profiles && testResult.profiles.length > 0 ? (
+                  <ul className="ml-4 list-disc space-y-0.5">
+                    {testResult.profiles.map((p) => (
+                      <li key={p.profileId}>
+                        <strong>{p.countryCode}</strong> · {p.accountName} ({p.accountType},{" "}
+                        {p.currencyCode}) · profile <code>{p.profileId}</code>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : (
+              <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-800">
+                <strong>✗ Test failed.</strong>
+                <div className="mt-1 break-all font-mono">{testResult.error}</div>
+              </div>
+            )
+          ) : (
+            <p className="text-xs text-slate-500">
+              Validates the stored refresh token by calling listProfiles and refreshes the
+              per-marketplace profile map.
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      {connected ? (
+        <div className="mt-3 border-t border-slate-200 pt-3">
+          <div className="mb-2">
+            <p className="text-xs font-semibold text-slate-700">Sync ad spend from Amazon</p>
+            <p className="text-xs text-slate-500">
+              Pulls Sponsored Products spend (per-SKU, per-day) for the window and folds it into
+              one report per month. Replaces any existing ads data for the same months.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-700">From</label>
+              <input
+                type="date"
+                value={syncFrom}
+                onChange={(e) => setSyncFrom(e.target.value)}
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-700">To</label>
+              <input
+                type="date"
+                value={syncTo}
+                onChange={(e) => setSyncTo(e.target.value)}
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => void runSync()}
+              disabled={syncing || !syncFrom || !syncTo || syncFrom > syncTo}
+              className="rounded-lg bg-[#FF9900] px-4 py-2 text-sm font-semibold text-black disabled:opacity-60"
+            >
+              {syncing ? "Syncing… (1–3 min)" : "Sync ads from Amazon"}
+            </button>
+          </div>
+          {syncResult ? (
+            syncResult.ok ? (
+              <div className="mt-3 space-y-1 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                <div>
+                  <strong>✓ Sync complete.</strong>{" "}
+                  {syncResult.profilesSynced
+                    .map((p) => `${p.countryCode} (${p.rowsDownloaded} rows)`)
+                    .join(", ") || "no profiles returned data"}
+                  {" "}({syncResult.range.from} → {syncResult.range.to})
+                </div>
+                {syncResult.reports.length > 0 ? (
+                  <ul className="ml-4 list-disc space-y-0.5">
+                    {syncResult.reports.map((r) => (
+                      <li key={r.reportId}>
+                        <strong>{r.periodStart}</strong> → {r.periodEnd}: {r.skuCount.toLocaleString()} SKU
+                        {r.skuCount === 1 ? "" : "s"}, £
+                        {r.totalSpendExvat.toLocaleString(undefined, {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                        {" ex-VAT"}
+                        {r.reportCreated ? " · new report created" : ""}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div>No ad spend found in this date range.</div>
+                )}
+                {syncResult.warnings.length > 0 ? (
+                  <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-amber-800">
+                    {syncResult.warnings.map((w, i) => (
+                      <div key={i}>• {w}</div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-800">
+                <strong>✗ Sync failed.</strong>
+                <div className="mt-1 break-all font-mono">{syncResult.error}</div>
+              </div>
+            )
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="mt-3 border-t border-slate-200 pt-2">
+        <button
+          type="button"
+          onClick={() => setShowManual((v) => !v)}
+          className="text-xs font-semibold text-slate-600 hover:text-slate-900"
+        >
+          {showManual ? "▾" : "▸"} Advanced: paste refresh token manually
+        </button>
+        {showManual ? (
+          <div className="mt-2 space-y-2 rounded-lg bg-slate-50 p-3">
+            <p className="text-xs text-slate-600">
+              For developer self-authorization (when Amazon shows the refresh token directly in the
+              Ads LWA console). Validated against Amazon before being stored. Saving this
+              {connected ? " will REPLACE the existing connection." : " creates a connection without OAuth."}
+            </p>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-700">
+                Refresh token (starts with <code>Atzr|</code>)
+              </label>
+              <textarea
+                value={manualToken}
+                onChange={(e) => setManualToken(e.target.value)}
+                rows={3}
+                placeholder="Atzr|IwEBI..."
+                className="w-full rounded-lg border border-slate-300 px-2 py-1.5 font-mono text-xs"
+              />
+            </div>
+            {manualError ? (
+              <div className="rounded bg-red-50 px-2 py-1 text-xs text-red-700">{manualError}</div>
+            ) : null}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => void saveManualToken()}
+                disabled={manualSaving || !manualToken.trim()}
+                className="rounded-lg bg-[var(--md-primary)] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+              >
+                {manualSaving ? "Validating with Amazon…" : "Validate & save"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowManual(false);
+                  setManualToken("");
                   setManualError(null);
                 }}
                 className="rounded-lg bg-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700"
