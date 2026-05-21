@@ -30,6 +30,7 @@ import type {
   CurrencyAmount,
   FeeComponent,
   FinancialEvents,
+  ProductAdsPaymentEvent,
   PromotionComponent,
   RetrochargeEvent,
   ServiceFeeEvent,
@@ -516,6 +517,38 @@ function mapAdjustmentEvent(ev: AdjustmentEvent): CsvRow[] {
   return out;
 }
 
+/**
+ * ProductAdsPaymentEvent → "Cost of Advertising" Service Fee row.
+ *
+ * Mirrors how the downloadable Amazon CSV represents PPC spend: a Service
+ * Fee row whose description is "Cost of Advertising", with the ex-VAT
+ * portion in `other transaction fees` and the VAT in `other`. The engine
+ * routes these into the advertising bucket. When the user later uploads an
+ * Ads CSV, `applyAdReportOverride` replaces this account-level total with
+ * the per-SKU values from the report — same behaviour as the manual flow.
+ */
+function mapProductAdsPaymentEvent(ev: ProductAdsPaymentEvent): CsvRow | null {
+  const baseValue = amount(ev.BaseValue); // ex-VAT, negative for cost
+  const taxValue = amount(ev.TaxValue);   // VAT, negative for cost
+  if (Math.abs(baseValue) + Math.abs(taxValue) < 0.001) return null;
+
+  const row = blankCsvRow();
+  row[COL.date] = ev.PostedDate || "";
+  row[COL.type] = "Service Fee";
+  row[COL.description] = "Cost of Advertising";
+  row[COL.otherTxFees] = baseValue;
+  row[COL.other] = taxValue;
+  row[COL.total] = rowTotal(row);
+
+  return {
+    ...row,
+    __amazon_event_id: `ProductAds:${ev.PostedDate || ""}:${ev.InvoiceId || ""}:${(baseValue + taxValue).toFixed(4)}`,
+    __posted_date: postedDateOnly(ev.PostedDate),
+    __sku: null,
+    __quantity: null,
+  };
+}
+
 function mapRetrochargeEvent(ev: RetrochargeEvent): CsvRow | null {
   const isRefund = String(ev.RetrochargeEventType || "").toLowerCase().includes("reversal");
   const taxSum =
@@ -555,7 +588,7 @@ export type MapStats = {
   serviceFeeSkipped: number;
   adjustment: number;
   retrocharge: number;
-  productAdsSkipped: number;
+  productAdsIngested: number;
   unknownLists: string[];
 };
 
@@ -573,7 +606,7 @@ export function mapFinancialEvents(events: FinancialEvents | undefined | null): 
     serviceFeeSkipped: 0,
     adjustment: 0,
     retrocharge: 0,
-    productAdsSkipped: 0,
+    productAdsIngested: 0,
     unknownLists: [],
   };
   if (!events) return { rows, stats };
@@ -629,8 +662,12 @@ export function mapFinancialEvents(events: FinancialEvents | undefined | null): 
       rows.push(row);
     }
   }
-  if (events.ProductAdsPaymentEventList && events.ProductAdsPaymentEventList.length > 0) {
-    stats.productAdsSkipped = events.ProductAdsPaymentEventList.length;
+  for (const ev of events.ProductAdsPaymentEventList || []) {
+    const row = mapProductAdsPaymentEvent(ev);
+    if (row) {
+      stats.productAdsIngested += 1;
+      rows.push(row);
+    }
   }
 
   // Surface any event-list keys we don't explicitly handle, so we can extend

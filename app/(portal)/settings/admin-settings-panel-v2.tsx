@@ -52,8 +52,11 @@ export default function AdminSettingsPanelV2({
 
   const notifyAccountsUpdated = () => window.dispatchEvent(new Event("accounts-updated"));
 
+  // `loading` is the first-paint skeleton — only true until the very first
+  // load completes. Subsequent refreshes (after save/delete/disconnect) keep
+  // the existing list visible to avoid the modal flashing + scroll jumping
+  // every time we re-fetch.
   const loadData = async () => {
-    setLoading(true);
     setError(null);
     try {
       const supabase = createClient();
@@ -100,9 +103,9 @@ export default function AdminSettingsPanelV2({
       setAccountTeamMap(nextMap);
       setAccountClientMap(nextClientMap);
       setAmazonCredsByAccount(nextAmazonMap);
+      setLoading(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load admin settings.");
-    } finally {
       setLoading(false);
     }
   };
@@ -281,14 +284,14 @@ export default function AdminSettingsPanelV2({
       {view === "all" || view === "accounts" ? (
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between"><h4 className="text-lg font-semibold">Accounts Management</h4><button onClick={openCreateAccount} className="rounded-lg bg-[var(--md-primary)] px-3 py-1.5 text-sm font-semibold text-white">Create</button></div>
-        {loading ? <p className="text-sm text-slate-500">Loading accounts...</p> : <div className="space-y-2">{accounts.map((a) => <div key={a.id} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm"><span>{a.name}</span><div className="flex gap-2"><button onClick={() => openEditAccount(a)} className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold">Edit</button><button onClick={() => void deleteAccount(a.id)} className="rounded-lg bg-red-50 px-3 py-1 text-xs font-semibold text-red-700">Delete</button></div></div>)}</div>}
+        {loading && accounts.length === 0 ? <p className="text-sm text-slate-500">Loading accounts...</p> : <div className="space-y-2">{accounts.map((a) => <div key={a.id} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm"><span>{a.name}</span><div className="flex gap-2"><button onClick={() => openEditAccount(a)} className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold">Edit</button><button onClick={() => void deleteAccount(a.id)} className="rounded-lg bg-red-50 px-3 py-1 text-xs font-semibold text-red-700">Delete</button></div></div>)}</div>}
       </section>
       ) : null}
 
       {view === "all" || view === "users" ? (
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
         <div className="mb-3 flex items-center justify-between"><h4 className="text-lg font-semibold">Users Management</h4><button onClick={openCreateUser} className="rounded-lg bg-[var(--md-primary)] px-3 py-1.5 text-sm font-semibold text-white">Create</button></div>
-        {loading ? (
+        {loading && users.length === 0 ? (
           <p className="text-sm text-slate-500">Loading users...</p>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-slate-200">
@@ -957,8 +960,7 @@ function AmazonConnectionPanel({
                   <ul className="ml-4 list-disc space-y-0.5">
                     {syncResult.reports.map((r) => (
                       <li key={r.reportId}>
-                        <strong>{r.periodStart}</strong> → {r.periodEnd}: {r.rowsInserted.toLocaleString()} rows, net
-                        profit £{r.netProfit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        <strong>{r.periodStart}</strong> → {r.periodEnd}: {r.rowsInserted.toLocaleString()} rows ingested
                       </li>
                     ))}
                   </ul>

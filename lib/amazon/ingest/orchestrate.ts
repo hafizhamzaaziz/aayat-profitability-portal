@@ -84,7 +84,14 @@ function monthBucket(dateIso: string): { key: string; start: string; end: string
 function chunkDateRange(fromIso: string, toIso: string, days: number): Array<[string, string]> {
   const chunks: Array<[string, string]> = [];
   const start = new Date(`${fromIso}T00:00:00Z`).getTime();
-  const end = new Date(`${toIso}T23:59:59Z`).getTime();
+  // Amazon rejects any postedBefore that is later than ~"now". Cap our window
+  // at 5 minutes ago to give the API clock-skew headroom; otherwise picking
+  // today as the "to" date will fail with "Date is not valid, should be no
+  // later than 2 minutes from now".
+  const requested = new Date(`${toIso}T23:59:59Z`).getTime();
+  const safeMax = Date.now() - 5 * 60 * 1000;
+  const end = Math.min(requested, safeMax);
+  if (end < start) return chunks;
   const stepMs = days * 24 * 60 * 60 * 1000;
   for (let cursor = start; cursor <= end; cursor += stepMs) {
     const chunkStart = new Date(cursor).toISOString();
@@ -117,7 +124,7 @@ async function pullAllEvents(
     serviceFeeSkipped: 0,
     adjustment: 0,
     retrocharge: 0,
-    productAdsSkipped: 0,
+    productAdsIngested: 0,
     unknownLists: [],
   };
   let totalApiCalls = 0;
@@ -147,7 +154,7 @@ async function pullAllEvents(
       aggStats.serviceFeeSkipped += stats.serviceFeeSkipped;
       aggStats.adjustment += stats.adjustment;
       aggStats.retrocharge += stats.retrocharge;
-      aggStats.productAdsSkipped += stats.productAdsSkipped;
+      aggStats.productAdsIngested += stats.productAdsIngested;
       for (const u of stats.unknownLists) {
         if (!aggStats.unknownLists.includes(u)) aggStats.unknownLists.push(u);
       }
@@ -467,20 +474,32 @@ export async function syncAmazonFinanceData(input: {
     };
   }
 
-  // Bucket rows by calendar month based on PostedDate. Rows without a posted
-  // date are dropped with a warning — they can't be safely attributed.
+  // Bucket rows by calendar month based on PostedDate. Some events (e.g.
+  // order-level fee adjustments without a posted date, certain service-fee
+  // events) come back with no PostedDate at all; we attribute those to the
+  // last day of the requested window so they aren't silently dropped — they
+  // still belong to the period the user asked about.
   const buckets = new Map<string, { start: string; end: string; rows: CsvRow[] }>();
+  const fallbackDate = options.to;
   let undated = 0;
   for (const r of rows) {
-    if (!r.__posted_date) {
+    let date = r.__posted_date;
+    if (!date) {
       undated += 1;
-      continue;
+      date = fallbackDate;
+      r.__posted_date = fallbackDate;
+      // Also stamp the date/time column so the engine can attribute it.
+      (r as Record<string, unknown>)["date/time"] = `${fallbackDate}T00:00:00Z`;
     }
-    const b = monthBucket(r.__posted_date);
+    const b = monthBucket(date);
     if (!buckets.has(b.key)) buckets.set(b.key, { start: b.start, end: b.end, rows: [] });
     buckets.get(b.key)!.rows.push(r);
   }
-  if (undated > 0) warnings.push(`Dropped ${undated} events without a posted date.`);
+  if (undated > 0) {
+    warnings.push(
+      `${undated} event(s) had no PostedDate from Amazon — attributed to ${fallbackDate} (end of requested window).`
+    );
+  }
 
   const cogsLookup = await buildBridgedCogsLookup(supabase, accountId);
 
@@ -502,9 +521,9 @@ export async function syncAmazonFinanceData(input: {
   if (mapStats.unknownLists.length > 0) {
     warnings.push(`Unmapped event lists encountered (events skipped): ${mapStats.unknownLists.join(", ")}`);
   }
-  if (mapStats.productAdsSkipped > 0) {
+  if (mapStats.productAdsIngested > 0) {
     warnings.push(
-      `Skipped ${mapStats.productAdsSkipped} ProductAdsPaymentEvent(s) — advertising is sourced from the separate Ads report.`
+      `Ingested ${mapStats.productAdsIngested} ad-payment event(s) as placeholder PPC spend — upload the Ads CSV to replace with per-SKU detail.`
     );
   }
 
