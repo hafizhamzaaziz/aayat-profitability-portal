@@ -16,6 +16,14 @@ type Metric = {
   total_sales: number | null;
 };
 
+type Platform = "amazon" | "temu";
+
+type Section = {
+  platform: Platform;
+  rows: Metric[];
+  previousRows: Metric[];
+};
+
 type Input = {
   accountName: string;
   accountLogoUrl: string | null;
@@ -23,8 +31,7 @@ type Input = {
   weekEnd: string;
   previousWeekStart: string;
   previousWeekEnd: string;
-  rows: Metric[];
-  previousRows: Metric[];
+  sections: Section[];
 };
 
 const styles = StyleSheet.create({
@@ -61,9 +68,25 @@ const styles = StyleSheet.create({
   c10: { width: "6%", textAlign: "right" },
   c11: { width: "10%", textAlign: "right" },
   asinLink: { color: "#1d4ed8", textDecoration: "underline" },
-  deltaGood: { fontSize: 7, color: "#15803d" },
-  deltaBad: { fontSize: 7, color: "#dc2626" },
+  valueGood: { color: "#15803d" },
+  valueBad: { color: "#dc2626" },
+  valueNeutral: { color: "#111827" },
   deltaNeutral: { fontSize: 7, color: "#64748b" },
+  sectionTitle: { marginTop: 8, marginBottom: 4, fontSize: 10, fontWeight: 700 },
+  totalsRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 6, marginBottom: 6 },
+  totalsCard: {
+    width: "19%",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    borderRadius: 6,
+    padding: 6,
+    backgroundColor: "#f8fafc",
+  },
+  totalsLabel: { fontSize: 7, color: "#475569", textTransform: "uppercase" },
+  totalsValue: { fontSize: 12, fontWeight: 700, marginTop: 2, color: "#0f172a" },
+  totalsDelta: { fontSize: 7, marginTop: 2 },
+  deltaGood: { color: "#15803d" },
+  deltaBad: { color: "#dc2626" },
   footer: {
     position: "absolute",
     left: 20,
@@ -88,35 +111,126 @@ function n(num: number | null) {
   return num == null ? "-" : Number(num).toFixed(2);
 }
 
-function deltaText(
-  current: number | null,
-  previous: number | null,
-  mode: "higher_better" | "lower_better" | "neutral",
-  decimals = 2
-) {
-  if (current == null || previous == null) {
-    return { text: "vs last: -", style: "neutral" as const };
-  }
-  const diff = current - previous;
-  const sign = diff > 0 ? "+" : "";
-  const text = `vs last: ${sign}${diff.toFixed(decimals)}`;
-  if (diff === 0 || mode === "neutral") return { text, style: "neutral" as const };
-  if (mode === "higher_better") return { text, style: diff > 0 ? ("good" as const) : ("bad" as const) };
-  return { text, style: diff < 0 ? ("good" as const) : ("bad" as const) };
+const TEMU_PREFIX = "TEMU:";
+
+function decodeIdentifier(raw: string | null) {
+  const value = String(raw || "").trim().toUpperCase();
+  if (value.startsWith(TEMU_PREFIX)) return value.slice(TEMU_PREFIX.length);
+  return value;
 }
 
-function deltaStyleFor(status: "good" | "bad" | "neutral") {
-  if (status === "good") return styles.deltaGood;
-  if (status === "bad") return styles.deltaBad;
-  return styles.deltaNeutral;
+function comparisonMeta(
+  current: number | null,
+  previous: number | null,
+  trend: "higher_better" | "lower_better",
+  formatter?: (value: number) => string
+) {
+  if (current == null || previous == null) {
+    return { vsLastText: "vs last: -", valueStyle: "neutral" as const };
+  }
+  if (current === previous) {
+    return { vsLastText: `vs last: ${formatter ? formatter(previous) : previous}`, valueStyle: "neutral" as const };
+  }
+  const isGood = trend === "higher_better" ? current > previous : current < previous;
+  return {
+    vsLastText: `vs last: ${formatter ? formatter(previous) : previous}`,
+    valueStyle: isGood ? ("good" as const) : ("bad" as const),
+  };
+}
+
+function valueStyleFor(status: "good" | "bad" | "neutral") {
+  if (status === "good") return styles.valueGood;
+  if (status === "bad") return styles.valueBad;
+  return styles.valueNeutral;
+}
+
+function sectionTotals(rows: Metric[]) {
+  let spend = 0;
+  let sales = 0;
+  let total = 0;
+  let spendN = 0;
+  let salesN = 0;
+  let totalN = 0;
+  for (const row of rows) {
+    if (row.ppc_spend != null) {
+      spend += Number(row.ppc_spend);
+      spendN += 1;
+    }
+    if (row.ppc_sales != null) {
+      sales += Number(row.ppc_sales);
+      salesN += 1;
+    }
+    if (row.total_sales != null) {
+      total += Number(row.total_sales);
+      totalN += 1;
+    }
+  }
+  const acos = sales > 0 ? (spend / sales) * 100 : null;
+  const tacos = total > 0 ? (spend / total) * 100 : null;
+  return {
+    spend: spendN ? spend : null,
+    sales: salesN ? sales : null,
+    total: totalN ? total : null,
+    acos,
+    tacos,
+  };
+}
+
+function formatTotalsValue(value: number | null, kind: "money" | "percent") {
+  if (value == null) return "-";
+  return kind === "percent" ? `${value.toFixed(2)}%` : value.toFixed(2);
+}
+
+function totalsDeltaText(cur: number | null, prev: number | null, kind: "money" | "percent") {
+  if (cur == null || prev == null) return "vs last week: -";
+  const diff = cur - prev;
+  const sign = diff > 0 ? "+" : "";
+  return `vs last: ${sign}${formatTotalsValue(diff, kind)}`;
+}
+
+function totalsDeltaStyle(
+  cur: number | null,
+  prev: number | null,
+  trend: "higher_better" | "lower_better"
+) {
+  if (cur == null || prev == null || cur === prev) return styles.totalsDelta;
+  const isUp = cur > prev;
+  const good = trend === "higher_better" ? isUp : !isUp;
+  return good ? { ...styles.totalsDelta, ...styles.deltaGood } : { ...styles.totalsDelta, ...styles.deltaBad };
+}
+
+function SectionTotalsRow({ rows, previousRows }: { rows: Metric[]; previousRows: Metric[] }) {
+  const cur = sectionTotals(rows);
+  const prev = sectionTotals(previousRows);
+  const cards: Array<{
+    label: string;
+    cur: number | null;
+    prev: number | null;
+    kind: "money" | "percent";
+    trend: "higher_better" | "lower_better";
+  }> = [
+    { label: "Total PPC Spend", cur: cur.spend, prev: prev.spend, kind: "money", trend: "lower_better" },
+    { label: "Total PPC Sales", cur: cur.sales, prev: prev.sales, kind: "money", trend: "higher_better" },
+    { label: "Total Sales", cur: cur.total, prev: prev.total, kind: "money", trend: "higher_better" },
+    { label: "Avg ACOS", cur: cur.acos, prev: prev.acos, kind: "percent", trend: "lower_better" },
+    { label: "Avg TACOS", cur: cur.tacos, prev: prev.tacos, kind: "percent", trend: "lower_better" },
+  ];
+  return (
+    <View style={styles.totalsRow}>
+      {cards.map((card) => (
+        <View key={card.label} style={styles.totalsCard}>
+          <Text style={styles.totalsLabel}>{card.label}</Text>
+          <Text style={styles.totalsValue}>{formatTotalsValue(card.cur, card.kind)}</Text>
+          <Text style={totalsDeltaStyle(card.cur, card.prev, card.trend)}>
+            {totalsDeltaText(card.cur, card.prev, card.kind)}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
 }
 
 function WeeklyPerformancePdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl: string | null }) {
-  const prevByKey = new Map<string, Metric>();
-  for (const row of data.previousRows) {
-    prevByKey.set(`${row.product_name.toLowerCase()}|${row.asin || ""}`, row);
-  }
-
   return (
     <Document>
       <Page size="A4" orientation="landscape" style={styles.page}>
@@ -136,96 +250,114 @@ function WeeklyPerformancePdf({ data, footerLogoDataUrl }: { data: Input; footer
           ) : null}
         </View>
 
-        <View style={styles.tableHead}>
-          <Text style={styles.c1}>Product</Text>
-          <Text style={styles.c2}>ASIN</Text>
-          <Text style={styles.c3}>PPC Spend</Text>
-          <Text style={styles.c4}>PPC Sales</Text>
-          <Text style={styles.c5}>Total Sales</Text>
-          <Text style={styles.c6}>ACOS</Text>
-          <Text style={styles.c7}>TACOS</Text>
-          <Text style={styles.c8}>BSR</Text>
-          <Text style={styles.c9}>Reviews</Text>
-          <Text style={styles.c10}>Rating</Text>
-          <Text style={styles.c11}>Week-over-week</Text>
-        </View>
+        {data.sections.map((section) => {
+          const prevByKey = new Map<string, Metric>();
+          for (const row of section.previousRows) {
+            prevByKey.set(`${row.product_name.toLowerCase()}|${decodeIdentifier(row.asin)}`, row);
+          }
+          const idLabel = section.platform === "amazon" ? "ASIN" : "Goods ID";
 
-        {data.rows.length === 0 ? (
-          <View style={styles.tr}>
-            <Text>No rows for selected week.</Text>
-          </View>
-        ) : (
-          data.rows.map((row, idx) => {
-            const acos = row.ppc_spend && row.ppc_sales ? (row.ppc_spend / row.ppc_sales) * 100 : null;
-            const tacos = row.ppc_spend && row.total_sales ? (row.ppc_spend / row.total_sales) * 100 : null;
-            const prev = prevByKey.get(`${row.product_name.toLowerCase()}|${row.asin || ""}`);
-            const prevAcos = prev?.ppc_spend && prev?.ppc_sales ? (prev.ppc_spend / prev.ppc_sales) * 100 : null;
-            const prevTacos = prev?.ppc_spend && prev?.total_sales ? (prev.ppc_spend / prev.total_sales) * 100 : null;
-            const spendDelta = deltaText(row.ppc_spend, prev?.ppc_spend ?? null, "neutral");
-            const ppcSalesDelta = deltaText(row.ppc_sales, prev?.ppc_sales ?? null, "higher_better");
-            const totalSalesDelta = deltaText(row.total_sales, prev?.total_sales ?? null, "higher_better");
-            const acosDelta = deltaText(acos, prevAcos, "lower_better");
-            const tacosDelta = deltaText(tacos, prevTacos, "lower_better");
-            const bsrDelta = deltaText(row.bsr, prev?.bsr ?? null, "lower_better", 0);
-            const reviewsDelta = deltaText(row.review_count, prev?.review_count ?? null, "higher_better", 0);
-            const ratingDelta = deltaText(row.rating, prev?.rating ?? null, "higher_better");
-
-            return (
-              <View key={`${row.product_name}-${idx}`} style={styles.tr}>
-                <Text style={styles.c1}>{row.product_name}</Text>
-                <Text style={styles.c2}>
-                  {row.asin ? (
-                    <Link src={`https://www.amazon.co.uk/dp/${row.asin}`} style={styles.asinLink}>
-                      {row.asin}
-                    </Link>
-                  ) : (
-                    "-"
-                  )}
-                </Text>
-                <View style={styles.c3}>
-                  <Text>{n(row.ppc_spend)}</Text>
-                  <Text style={deltaStyleFor(spendDelta.style)}>{spendDelta.text}</Text>
-                </View>
-                <View style={styles.c4}>
-                  <Text>{n(row.ppc_sales)}</Text>
-                  <Text style={deltaStyleFor(ppcSalesDelta.style)}>{ppcSalesDelta.text}</Text>
-                </View>
-                <View style={styles.c5}>
-                  <Text>{n(row.total_sales)}</Text>
-                  <Text style={deltaStyleFor(totalSalesDelta.style)}>{totalSalesDelta.text}</Text>
-                </View>
-                <View style={styles.c6}>
-                  <Text>{pct(acos)}</Text>
-                  <Text style={deltaStyleFor(acosDelta.style)}>{acosDelta.text}</Text>
-                </View>
-                <View style={styles.c7}>
-                  <Text>{pct(tacos)}</Text>
-                  <Text style={deltaStyleFor(tacosDelta.style)}>{tacosDelta.text}</Text>
-                </View>
-                <View style={styles.c8}>
-                  <Text>{row.bsr ?? "-"}</Text>
-                  <Text style={deltaStyleFor(bsrDelta.style)}>{bsrDelta.text}</Text>
-                </View>
-                <View style={styles.c9}>
-                  <Text>{row.review_count ?? "-"}</Text>
-                  <Text style={deltaStyleFor(reviewsDelta.style)}>{reviewsDelta.text}</Text>
-                </View>
-                <View style={styles.c10}>
-                  <Text>{row.rating ?? "-"}</Text>
-                  <Text style={deltaStyleFor(ratingDelta.style)}>{ratingDelta.text}</Text>
-                </View>
-                <View style={styles.c11}>
-                  <Text style={deltaStyleFor(totalSalesDelta.style)}>
-                    Sales {totalSalesDelta.text.replace("vs last: ", "")}
-                  </Text>
-                  <Text style={deltaStyleFor(acosDelta.style)}>
-                    ACOS {acosDelta.text.replace("vs last: ", "")}
-                  </Text>
-                </View>
+          return (
+            <View key={section.platform}>
+              <Text style={styles.sectionTitle}>{section.platform === "amazon" ? "Amazon Performance" : "Temu Performance"}</Text>
+              <SectionTotalsRow rows={section.rows} previousRows={section.previousRows} />
+              <View style={styles.tableHead}>
+                <Text style={styles.c1}>Product</Text>
+                <Text style={styles.c2}>{idLabel}</Text>
+                <Text style={styles.c3}>PPC Spend</Text>
+                <Text style={styles.c4}>PPC Sales</Text>
+                <Text style={styles.c5}>Total Sales</Text>
+                <Text style={styles.c6}>ACOS</Text>
+                <Text style={styles.c7}>TACOS</Text>
+                {section.platform === "amazon" ? <Text style={styles.c8}>BSR</Text> : null}
+                <Text style={styles.c9}>Reviews</Text>
+                <Text style={styles.c10}>Rating</Text>
+                <Text style={styles.c11}>Comparison</Text>
               </View>
-            );
-          })
-        )}
+              {section.rows.length === 0 ? (
+                <View style={styles.tr}>
+                  <Text>No rows for selected week.</Text>
+                </View>
+              ) : (
+                section.rows.map((row, idx) => {
+                  const identifier = decodeIdentifier(row.asin);
+                  const acos = row.ppc_spend && row.ppc_sales ? (row.ppc_spend / row.ppc_sales) * 100 : null;
+                  const tacos = row.ppc_spend && row.total_sales ? (row.ppc_spend / row.total_sales) * 100 : null;
+                  const prev = prevByKey.get(`${row.product_name.toLowerCase()}|${identifier}`);
+                  const prevAcos = prev?.ppc_spend && prev?.ppc_sales ? (prev.ppc_spend / prev.ppc_sales) * 100 : null;
+                  const prevTacos = prev?.ppc_spend && prev?.total_sales ? (prev.ppc_spend / prev.total_sales) * 100 : null;
+                  const spend = comparisonMeta(row.ppc_spend, prev?.ppc_spend ?? null, "lower_better", (value) => value.toFixed(2));
+                  const ppcSales = comparisonMeta(row.ppc_sales, prev?.ppc_sales ?? null, "higher_better", (value) => value.toFixed(2));
+                  const totalSales = comparisonMeta(row.total_sales, prev?.total_sales ?? null, "higher_better", (value) => value.toFixed(2));
+                  const acosMeta = comparisonMeta(acos, prevAcos, "lower_better", (value) => `${value.toFixed(2)}%`);
+                  const tacosMeta = comparisonMeta(tacos, prevTacos, "lower_better", (value) => `${value.toFixed(2)}%`);
+                  const bsrMeta = comparisonMeta(row.bsr, prev?.bsr ?? null, "lower_better");
+                  const reviewsMeta = comparisonMeta(row.review_count, prev?.review_count ?? null, "higher_better");
+                  const ratingMeta = comparisonMeta(row.rating, prev?.rating ?? null, "higher_better", (value) => value.toFixed(2));
+
+                  return (
+                    <View key={`${section.platform}-${row.product_name}-${idx}`} style={styles.tr}>
+                      <Text style={styles.c1}>{row.product_name}</Text>
+                      <Text style={styles.c2}>
+                        {identifier ? (
+                          <Link
+                            src={
+                              section.platform === "amazon"
+                                ? `https://www.amazon.co.uk/dp/${identifier}`
+                                : `https://www.temu.com/goods.html?_bg_fs=1&goods_id=${identifier}`
+                            }
+                            style={styles.asinLink}
+                          >
+                            {identifier}
+                          </Link>
+                        ) : (
+                          "-"
+                        )}
+                      </Text>
+                      <View style={styles.c3}>
+                        <Text style={valueStyleFor(spend.valueStyle)}>{n(row.ppc_spend)}</Text>
+                        <Text style={styles.deltaNeutral}>{spend.vsLastText}</Text>
+                      </View>
+                      <View style={styles.c4}>
+                        <Text style={valueStyleFor(ppcSales.valueStyle)}>{n(row.ppc_sales)}</Text>
+                        <Text style={styles.deltaNeutral}>{ppcSales.vsLastText}</Text>
+                      </View>
+                      <View style={styles.c5}>
+                        <Text style={valueStyleFor(totalSales.valueStyle)}>{n(row.total_sales)}</Text>
+                        <Text style={styles.deltaNeutral}>{totalSales.vsLastText}</Text>
+                      </View>
+                      <View style={styles.c6}>
+                        <Text style={valueStyleFor(acosMeta.valueStyle)}>{pct(acos)}</Text>
+                        <Text style={styles.deltaNeutral}>{acosMeta.vsLastText}</Text>
+                      </View>
+                      <View style={styles.c7}>
+                        <Text style={valueStyleFor(tacosMeta.valueStyle)}>{pct(tacos)}</Text>
+                        <Text style={styles.deltaNeutral}>{tacosMeta.vsLastText}</Text>
+                      </View>
+                      {section.platform === "amazon" ? (
+                        <View style={styles.c8}>
+                          <Text style={valueStyleFor(bsrMeta.valueStyle)}>{row.bsr ?? "-"}</Text>
+                          <Text style={styles.deltaNeutral}>{bsrMeta.vsLastText}</Text>
+                        </View>
+                      ) : null}
+                      <View style={styles.c9}>
+                        <Text style={valueStyleFor(reviewsMeta.valueStyle)}>{row.review_count ?? "-"}</Text>
+                        <Text style={styles.deltaNeutral}>{reviewsMeta.vsLastText}</Text>
+                      </View>
+                      <View style={styles.c10}>
+                        <Text style={valueStyleFor(ratingMeta.valueStyle)}>{row.rating ?? "-"}</Text>
+                        <Text style={styles.deltaNeutral}>{ratingMeta.vsLastText}</Text>
+                      </View>
+                      <View style={styles.c11}>
+                        <Text style={styles.deltaNeutral}>{totalSales.vsLastText}</Text>
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </View>
+          );
+        })}
 
         <View style={styles.footer} fixed>
           {footerLogoDataUrl ? (

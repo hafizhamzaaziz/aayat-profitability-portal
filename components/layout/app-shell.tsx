@@ -31,6 +31,7 @@ const navItems: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", emoji: "📊" },
   { href: "/reports", label: "Reports", emoji: "🧾" },
   { href: "/cogs", label: "COGS", emoji: "📦" },
+  { href: "/expenses", label: "Expenses", emoji: "💸" },
   { href: "/performance", label: "Performance", emoji: "📈" },
   { href: "/inventory", label: "Inventory", emoji: "🏷️" },
   { href: "/settings", label: "Settings", emoji: "⚙️" },

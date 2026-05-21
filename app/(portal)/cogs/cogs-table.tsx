@@ -6,6 +6,7 @@ import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
 import { pushClientNotification } from "@/lib/notifications/client";
 import FileDropzone from "@/components/ui/file-dropzone";
+import { computeExpenseOccurrencesForPeriod, type ExpenseLedgerRow } from "@/lib/reports/expense-ledger";
 
 type CogsRow = {
   id: string;
@@ -41,6 +42,7 @@ type CogsVersion = {
 type ReportRow = {
   id: string;
   period_start: string;
+  period_end: string;
   platform: "amazon" | "temu";
   output_vat: number;
   input_vat: number;
@@ -170,6 +172,8 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [offset, setOffset] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [mappingByAmazonSku, setMappingByAmazonSku] = useState<Record<string, string>>({});
+  const [search, setSearch] = useState("");
+  const [searchActive, setSearchActive] = useState("");
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -188,26 +192,17 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     return Number.parseFloat(cleaned) || 0;
   };
 
-  const loadRows = async (nextOffset = offset) => {
+  const loadRows = async (nextOffset = offset, activeSearch = searchActive) => {
     setLoading(true);
     setError(null);
     try {
       const supabase = createClient();
-      const [{ data, error: fetchError }, { count }, { data: mappingRows, error: mappingError }] = await Promise.all([
-        supabase
-          .from("cogs")
-          .select("id, sku, sku_mapping_id, unit_cost, includes_vat, effective_from, updated_at")
-          .eq("account_id", accountId)
-          .order("sku", { ascending: true })
-          .range(nextOffset, nextOffset + PAGE_SIZE - 1),
-        supabase.from("cogs").select("id", { count: "exact", head: true }).eq("account_id", accountId),
+      const [{ data: mappingRows, error: mappingError }] = await Promise.all([
         supabase
           .from("sku_mappings")
           .select("id, amazon_sku, sku_catalog:sku_catalog_id(product_name)")
           .eq("account_id", accountId),
       ]);
-
-      if (fetchError) throw fetchError;
       if (mappingError) throw mappingError;
       const mapByMappingId: Record<string, string> = {};
       const mapByAmazonSku: Record<string, string> = {};
@@ -219,6 +214,32 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         if (rec.amazon_sku) mapByAmazonSku[String(rec.amazon_sku).trim().toUpperCase()] = String(rec.id);
       });
       setMappingByAmazonSku(mapByAmazonSku);
+
+      const trimmedSearch = activeSearch.trim();
+      let cogsQuery = supabase
+        .from("cogs")
+        .select("id, sku, sku_mapping_id, unit_cost, includes_vat, effective_from, updated_at", { count: "exact" })
+        .eq("account_id", accountId)
+        .order("sku", { ascending: true });
+
+      if (trimmedSearch) {
+        const needle = `%${trimmedSearch.replace(/[%,]/g, "")}%`;
+        const matchingMappingIds = Object.entries(mapByMappingId)
+          .filter(([, productName]) => productName.toLowerCase().includes(trimmedSearch.toLowerCase()))
+          .map(([id]) => id);
+        const filters = [`sku.ilike.${needle}`];
+        if (matchingMappingIds.length > 0) {
+          filters.push(`sku_mapping_id.in.(${matchingMappingIds.join(",")})`);
+        }
+        cogsQuery = cogsQuery.or(filters.join(","));
+        cogsQuery = cogsQuery.range(0, 499);
+      } else {
+        cogsQuery = cogsQuery.range(nextOffset, nextOffset + PAGE_SIZE - 1);
+      }
+
+      const { data, count, error: fetchError } = await cogsQuery;
+      if (fetchError) throw fetchError;
+
       const normalized = (data || []).map((row) => ({
         id: String(row.id),
         product_name:
@@ -233,7 +254,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         updated_at: String(row.updated_at),
       }));
       setRows(normalized as CogsRow[]);
-      setTotalCount(Number(count || 0));
+      setTotalCount(Number(count || (trimmedSearch ? normalized.length : 0)));
     } catch (err) {
       setError(getErrorMessage(err, "Failed to load COGS rows."));
     } finally {
@@ -243,9 +264,16 @@ export default function CogsTable({ accountId, canEdit }: Props) {
 
   useEffect(() => {
     setOffset(0);
-    void loadRows(0);
+    void loadRows(0, searchActive);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId]);
+  }, [accountId, searchActive]);
+
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setSearchActive(search.trim());
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [search]);
 
   const upsertProductAndMapping = async (supabase: ReturnType<typeof createClient>, sku: string, productName: string) => {
     const normalizedSku = sku.trim().toUpperCase();
@@ -395,11 +423,19 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         .eq("report_id", report.id);
       if (txError) throw txError;
 
-      const { data: expenseRows, error: expenseError } = await supabase
-        .from("expenses")
-        .select("amount, includes_vat")
-        .eq("report_id", report.id);
+      const { data: expenseLedgerRows, error: expenseError } = await supabase
+        .from("expense_ledger")
+        .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
+        .eq("account_id", accountId)
+        .lte("expense_date", String(report.period_end || report.period_start))
+        .or(`recurring_end_date.is.null,recurring_end_date.gte.${String(report.period_start)}`);
       if (expenseError) throw expenseError;
+      const expenseRows = computeExpenseOccurrencesForPeriod({
+        rows: (expenseLedgerRows || []) as ExpenseLedgerRow[],
+        platform: String(report.platform || "amazon"),
+        periodStart: String(report.period_start),
+        periodEnd: String(report.period_end || report.period_start),
+      });
 
       let purchaseCost = 0;
       let purchaseVat = 0;
@@ -940,6 +976,30 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       {message ? <p className="rounded-2xl bg-green-50 px-3 py-2 text-sm text-green-700">{message}</p> : null}
       {error ? <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
 
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          placeholder="Search product name or SKU"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full max-w-sm rounded-lg border border-slate-300 px-3 py-2 text-sm"
+        />
+        {searchActive ? (
+          <button
+            type="button"
+            onClick={() => setSearch("")}
+            className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700"
+          >
+            Clear
+          </button>
+        ) : null}
+        {searchActive ? (
+          <span className="text-xs text-slate-500">
+            Showing {rows.length} match{rows.length === 1 ? "" : "es"} for &ldquo;{searchActive}&rdquo;
+          </span>
+        ) : null}
+      </div>
+
       <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white">
         <table className="min-w-full text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
@@ -1027,6 +1087,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           )}
         </div>
       ) : null}
+      {searchActive ? null : (
       <div className="flex flex-wrap items-center justify-end gap-2">
         <span className="text-xs text-slate-500">
           Page {currentPage} of {totalPages} ({totalCount} items)
@@ -1072,6 +1133,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           Next
         </button>
       </div>
+      )}
     </div>
   );
 }

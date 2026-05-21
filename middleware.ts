@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/middleware";
 import type { UserRole } from "@/lib/types/auth";
 
-const publicRoutes = ["/login", "/forbidden"];
+const publicRoutes = ["/login", "/forbidden", "/amazon-connected"];
 
 const routeRoleMap: Array<{ prefix: string; allowedRoles: UserRole[] }> = [
   { prefix: "/dashboard", allowedRoles: ["admin", "team", "client"] },

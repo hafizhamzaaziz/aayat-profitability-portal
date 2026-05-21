@@ -581,15 +581,24 @@ function Modal({
   size?: "md" | "lg";
 }) {
   const widthClass = size === "lg" ? "max-w-3xl" : "max-w-lg";
+  // Anchor the dialog to a fixed viewport position with `items-start` + a
+  // fixed top offset. Using `items-center` (the previous behaviour) caused
+  // the modal to re-center every time its internal content height changed —
+  // sync start/finish, smoke-test toggling, the credential prop refreshing —
+  // which read as the modal "scrolling up and down by itself".
+  //
+  // We also pin the dialog at a fixed 80vh so its outer box never resizes
+  // as content grows or shrinks; only the inner scroll region moves. This
+  // eliminates the layout reflow that caused the flashing.
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/45 p-4 pt-[5vh] pb-[5vh]"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
     >
       <div
-        className={`flex max-h-[90vh] w-full ${widthClass} flex-col overflow-hidden rounded-2xl bg-white shadow-2xl`}
+        className={`flex h-[90vh] w-full ${widthClass} flex-col overflow-hidden rounded-2xl bg-white shadow-2xl`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-shrink-0 items-center justify-between border-b border-slate-200 px-5 py-3">

@@ -4,6 +4,7 @@ import type { UserRole } from "@/lib/types/auth";
 import { getAccountByIdForRole } from "@/lib/data/accounts";
 import ReportWorkbench from "./report-workbench";
 import SavedReportsPanel from "./saved-reports-panel";
+import ReportsTabs from "./reports-tabs";
 
 export const metadata: Metadata = {
   title: "Reports",
@@ -47,29 +48,35 @@ export default async function ReportsPage({
 
   const canProcess = role === "admin" || role === "team";
 
+  const generate = canProcess ? (
+    <ReportWorkbench
+      account={{
+        id: account.id,
+        name: account.name,
+        currency: account.currency,
+        vat_rate: account.vat_rate,
+        cogs_vat_reclaim_pct: account.cogs_vat_reclaim_pct,
+      }}
+      canProcess={canProcess}
+    />
+  ) : null;
+
+  const saved = (
+    <SavedReportsPanel
+      accountId={account.id}
+      accountName={account.name}
+      canEdit={canProcess}
+      currency={account.currency}
+      vatRate={account.vat_rate}
+    />
+  );
+
   return (
     <div className="space-y-4">
       <p className="text-slate-600">
         Account: <span className="font-semibold">{account.name}</span>
       </p>
-      {canProcess ? (
-        <ReportWorkbench
-          account={{
-            id: account.id,
-            name: account.name,
-            currency: account.currency,
-            vat_rate: account.vat_rate,
-          }}
-          canProcess={canProcess}
-        />
-      ) : null}
-      <SavedReportsPanel
-        accountId={account.id}
-        accountName={account.name}
-        canEdit={canProcess}
-        currency={account.currency}
-        vatRate={account.vat_rate}
-      />
+      <ReportsTabs generate={generate} saved={saved} showGenerate={canProcess} initialTab="generate" />
     </div>
   );
 }

@@ -6,6 +6,7 @@ export type MinimalAccount = {
   name: string;
   currency: string;
   vat_rate: number;
+  cogs_vat_reclaim_pct: number | null;
   assigned_team_id: string | null;
   assigned_client_id: string | null;
   logo_url: string | null;
@@ -19,7 +20,7 @@ export async function getAccountsForRole(
   if (role === "admin") {
     const { data, error } = await supabase
       .from("accounts")
-      .select("id, name, currency, vat_rate, assigned_team_id, assigned_client_id, logo_url")
+      .select("id, name, currency, vat_rate, cogs_vat_reclaim_pct, assigned_team_id, assigned_client_id, logo_url")
       .order("name", { ascending: true });
 
     if (error || !data) return [];
@@ -37,7 +38,7 @@ export async function getAccountsForRole(
 
     const { data: directData, error: directError } = await (supabase
       .from("accounts")
-      .select("id, name, currency, vat_rate, assigned_team_id, assigned_client_id, logo_url")
+      .select("id, name, currency, vat_rate, cogs_vat_reclaim_pct, assigned_team_id, assigned_client_id, logo_url")
       .eq("assigned_team_id", userId)
       .order("name", { ascending: true }) as unknown as Promise<{ data: MinimalAccount[]; error: unknown }>);
 
@@ -46,7 +47,7 @@ export async function getAccountsForRole(
       accountIds.length > 0
         ? ((await supabase
             .from("accounts")
-            .select("id, name, currency, vat_rate, assigned_team_id, assigned_client_id, logo_url")
+            .select("id, name, currency, vat_rate, cogs_vat_reclaim_pct, assigned_team_id, assigned_client_id, logo_url")
             .in("id", accountIds)
             .order("name", { ascending: true })) as { data: MinimalAccount[] | null }).data || []
         : [];
@@ -57,14 +58,42 @@ export async function getAccountsForRole(
     return Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  const { data, error } = await supabase
+  // Client role — merge legacy accounts.assigned_client_id with new account_client_members join.
+  const { data: linkedClientAccounts } = await supabase
+    .from("account_client_members")
+    .select("account_id")
+    .eq("client_id", userId);
+  const linkedAccountIds = Array.from(
+    new Set(
+      (linkedClientAccounts || [])
+        .map((row) => String((row as { account_id?: string }).account_id || ""))
+        .filter(Boolean)
+    )
+  );
+
+  const { data: directClientData, error: directClientError } = await supabase
     .from("accounts")
-    .select("id, name, currency, vat_rate, assigned_team_id, assigned_client_id, logo_url")
+    .select("id, name, currency, vat_rate, cogs_vat_reclaim_pct, assigned_team_id, assigned_client_id, logo_url")
     .eq("assigned_client_id", userId)
     .order("name", { ascending: true });
 
-  if (error || !data) return [];
-  return data as MinimalAccount[];
+  if (directClientError) return [];
+
+  const joinedClientData =
+    linkedAccountIds.length > 0
+      ? (
+          (await supabase
+            .from("accounts")
+            .select("id, name, currency, vat_rate, cogs_vat_reclaim_pct, assigned_team_id, assigned_client_id, logo_url")
+            .in("id", linkedAccountIds)
+            .order("name", { ascending: true })) as { data: MinimalAccount[] | null }
+        ).data || []
+      : [];
+
+  const mergedClient = new Map<string, MinimalAccount>();
+  for (const row of (directClientData || []) as MinimalAccount[]) mergedClient.set(row.id, row);
+  for (const row of joinedClientData) mergedClient.set(row.id, row);
+  return Array.from(mergedClient.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function getAccountByIdForRole(
@@ -76,7 +105,7 @@ export async function getAccountByIdForRole(
   if (role === "admin") {
     const { data, error } = await supabase
       .from("accounts")
-      .select("id, name, currency, vat_rate, assigned_team_id, assigned_client_id, logo_url")
+      .select("id, name, currency, vat_rate, cogs_vat_reclaim_pct, assigned_team_id, assigned_client_id, logo_url")
       .eq("id", accountId)
       .maybeSingle();
 
@@ -87,7 +116,7 @@ export async function getAccountByIdForRole(
   if (role === "team") {
     const { data, error } = await (supabase
       .from("accounts")
-      .select("id, name, currency, vat_rate, assigned_team_id, assigned_client_id, logo_url")
+      .select("id, name, currency, vat_rate, cogs_vat_reclaim_pct, assigned_team_id, assigned_client_id, logo_url")
       .eq("id", accountId)
       .maybeSingle() as unknown as Promise<{ data: MinimalAccount | null; error: unknown }>);
 
@@ -103,13 +132,23 @@ export async function getAccountByIdForRole(
     return null;
   }
 
+  // Client role — allow access via legacy assigned_client_id OR via account_client_members.
   const { data, error } = await supabase
     .from("accounts")
-    .select("id, name, currency, vat_rate, assigned_team_id, assigned_client_id, logo_url")
+    .select("id, name, currency, vat_rate, cogs_vat_reclaim_pct, assigned_team_id, assigned_client_id, logo_url")
     .eq("id", accountId)
-    .eq("assigned_client_id", userId)
     .maybeSingle();
 
   if (error || !data) return null;
-  return data as MinimalAccount;
+  const account = data as MinimalAccount;
+  if (account.assigned_client_id === userId) return account;
+
+  const { data: linkRow } = await supabase
+    .from("account_client_members")
+    .select("id")
+    .eq("client_id", userId)
+    .eq("account_id", accountId)
+    .maybeSingle();
+  if (linkRow) return account;
+  return null;
 }

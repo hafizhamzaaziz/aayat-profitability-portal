@@ -37,7 +37,7 @@ export default function AccountSwitcher() {
       .single();
 
     const role = (userRow?.role || "client") as UserRole;
-    let query = supabase.from("accounts").select("id, name").order("name", { ascending: true });
+    const query = supabase.from("accounts").select("id, name").order("name", { ascending: true });
 
     if (role === "team") {
       const { data: linkedAccounts } = await supabase
@@ -59,7 +59,28 @@ export default function AccountSwitcher() {
       setLoading(false);
       return;
     } else if (role === "client") {
-      query = query.eq("assigned_client_id", user.id);
+      const { data: linkedClientAccounts } = await supabase
+        .from("account_client_members")
+        .select("account_id")
+        .eq("client_id", user.id);
+      const clientAccountIds = Array.from(
+        new Set(
+          (linkedClientAccounts || [])
+            .map((row) => String((row as { account_id?: string }).account_id || ""))
+            .filter(Boolean)
+        )
+      );
+      const { data: directClient } = await query.eq("assigned_client_id", user.id);
+      const { data: byClientMapping } =
+        clientAccountIds.length > 0
+          ? await supabase.from("accounts").select("id, name").in("id", clientAccountIds).order("name", { ascending: true })
+          : { data: [] as AccountOption[] };
+      const mergedClient = new Map<string, AccountOption>();
+      (directClient || []).forEach((row) => mergedClient.set(String(row.id), row as AccountOption));
+      (byClientMapping || []).forEach((row) => mergedClient.set(String(row.id), row as AccountOption));
+      setAccounts(Array.from(mergedClient.values()).sort((a, b) => a.name.localeCompare(b.name)));
+      setLoading(false);
+      return;
     }
 
     const { data } = await query;

@@ -3,7 +3,7 @@ import { requireAuth } from "@/lib/auth/guards";
 import type { UserRole } from "@/lib/types/auth";
 import { getAccountByIdForRole } from "@/lib/data/accounts";
 import PerformanceTracker from "./performance-tracker";
-import { createNotification, sendNotificationEmailIfConfigured } from "@/lib/notifications/server";
+import { createNotification } from "@/lib/notifications/server";
 import { isTodayMondayUtc, todayIsoUtc } from "@/lib/utils/date";
 
 export const metadata: Metadata = {
@@ -54,23 +54,14 @@ export default async function PerformancePage({
         const isoDate = todayIsoUtc();
         const title = "Weekly performance update reminder";
         const body = `Please update this week's performance metrics for ${account.name}.`;
-        const created = await createNotification(supabase, {
+        await createNotification(supabase, {
           userId: user.id,
           title,
           body,
           level: "info",
           eventKey: `weekly-performance-reminder:${user.id}:${account.id}:${isoDate}`,
           link: `/performance?accountId=${account.id}`,
-          email: user.email,
         });
-        if (created.inserted) {
-          await sendNotificationEmailIfConfigured({
-            to: user.email,
-            subject: title,
-            text: `${body}\n\nOpen portal: /performance?accountId=${account.id}`,
-            linkPath: `/performance?accountId=${account.id}`,
-          });
-        }
       } catch {
         // non-blocking reminder path
       }

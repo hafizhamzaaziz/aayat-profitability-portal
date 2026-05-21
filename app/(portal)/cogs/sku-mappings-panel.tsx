@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
@@ -12,6 +12,10 @@ type MappingRow = {
   product_name: string;
   amazon_sku: string | null;
   temu_sku_id: string | null;
+  /** Temu parent listing identifier (Goods ID). Stored on sku_catalog (one
+   *  per product), surfaced here for convenience so the variant row can
+   *  display + edit it without a join. */
+  temu_goods_id: string | null;
   lead_time_days: number | null;
   created_at: string;
 };
@@ -50,6 +54,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [searchActive, setSearchActive] = useState("");
   const [offset, setOffset] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [bulkFileName, setBulkFileName] = useState("");
@@ -59,21 +64,47 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   const [productCol, setProductCol] = useState("");
   const [amazonSkuCol, setAmazonSkuCol] = useState("");
   const [temuSkuCol, setTemuSkuCol] = useState("");
+  const [temuGoodsIdCol, setTemuGoodsIdCol] = useState("");
   const [leadTimeCol, setLeadTimeCol] = useState("");
 
   const loadRows = async () => {
     setLoading(true);
     setError(null);
     const supabase = createClient();
-    const [{ data, error: fetchError }, { count }] = await Promise.all([
-      supabase
+    const trimmedSearch = searchActive.trim();
+
+    let dataQuery = supabase
       .from("sku_mappings")
-      .select("id, sku_catalog_id, amazon_sku, temu_sku_id, lead_time_days, created_at, sku_catalog:sku_catalog_id(product_name)")
+      .select("id, sku_catalog_id, amazon_sku, temu_sku_id, lead_time_days, created_at, sku_catalog:sku_catalog_id(product_name, temu_goods_id)")
       .eq("account_id", accountId)
-      .order("created_at", { ascending: false })
-      .range(offset, offset + PAGE_SIZE - 1),
-      supabase.from("sku_mappings").select("id", { count: "exact", head: true }).eq("account_id", accountId),
-    ]);
+      .order("created_at", { ascending: false });
+    let countQuery = supabase.from("sku_mappings").select("id", { count: "exact", head: true }).eq("account_id", accountId);
+
+    if (trimmedSearch) {
+      // Resolve product-name matches first → list of sku_catalog_id values.
+      const needle = `%${trimmedSearch.replace(/[%,]/g, "")}%`;
+      const { data: catalogMatches } = await supabase
+        .from("sku_catalog")
+        .select("id")
+        .eq("account_id", accountId)
+        .ilike("product_name", needle);
+      const matchingCatalogIds = ((catalogMatches || []) as Array<{ id: string }>).map((row) => row.id);
+
+      const orParts = [
+        `amazon_sku.ilike.${needle}`,
+        `temu_sku_id.ilike.${needle}`,
+      ];
+      if (matchingCatalogIds.length > 0) {
+        orParts.push(`sku_catalog_id.in.(${matchingCatalogIds.join(",")})`);
+      }
+      const orFilter = orParts.join(",");
+      dataQuery = dataQuery.or(orFilter).range(0, 499);
+      countQuery = countQuery.or(orFilter);
+    } else {
+      dataQuery = dataQuery.range(offset, offset + PAGE_SIZE - 1);
+    }
+
+    const [{ data, error: fetchError }, { count }] = await Promise.all([dataQuery, countQuery]);
     if (fetchError) {
       setError(fetchError.message);
       setLoading(false);
@@ -87,7 +118,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         temu_sku_id: string | null;
         lead_time_days: number | null;
         created_at: string;
-        sku_catalog?: { product_name?: string } | null;
+        sku_catalog?: { product_name?: string; temu_goods_id?: string | null } | null;
       };
       return {
         id: rec.id,
@@ -95,35 +126,30 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         product_name: rec.sku_catalog?.product_name || "Unnamed product",
         amazon_sku: rec.amazon_sku,
         temu_sku_id: rec.temu_sku_id,
+        temu_goods_id: rec.sku_catalog?.temu_goods_id ?? null,
         lead_time_days: rec.lead_time_days,
         created_at: rec.created_at,
       } as MappingRow;
     });
     setRows(mapped);
-    setTotalCount(Number(count || 0));
+    setTotalCount(Number(count || (trimmedSearch ? mapped.length : 0)));
     setLoading(false);
   };
 
   useEffect(() => {
     void loadRows();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId, offset]);
+  }, [accountId, offset, searchActive]);
 
-  const filtered = useMemo(() => {
-    if (!search.trim()) return rows;
-    const s = search.trim().toLowerCase();
-    return rows.filter((row) => {
-      return (
-        row.product_name.toLowerCase().includes(s) ||
-        String(row.amazon_sku || "")
-          .toLowerCase()
-          .includes(s) ||
-        String(row.temu_sku_id || "")
-          .toLowerCase()
-          .includes(s)
-      );
-    });
-  }, [rows, search]);
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setSearchActive(search.trim());
+      setOffset(0);
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [search]);
+
+  const filtered = rows;
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -175,9 +201,10 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       setBulkRows(parsedRows);
       setBulkHeaders(headers);
       setBulkFileName(file.name);
-      setProductCol(pickColumn(headers, ["productname", "product", "title", "name"]));
-      setAmazonSkuCol(pickColumn(headers, ["amazonsku", "sku", "sellersku"]));
+      setProductCol(pickColumn(headers, ["productname", "product", "title", "name", "goodsname"]));
+      setAmazonSkuCol(pickColumn(headers, ["amazonsku", "sellersku"]));
       setTemuSkuCol(pickColumn(headers, ["temuskuid", "temusku", "skuid"]));
+      setTemuGoodsIdCol(pickColumn(headers, ["temugoodsid", "goodsid", "temugoods", "parentgoods"]));
       setLeadTimeCol(pickColumn(headers, ["leadtimedays", "leadtime", "lead"]));
       setMessage("File loaded. Confirm column mapping and click Import Mappings.");
     } catch (err) {
@@ -232,6 +259,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         const productName = normalizeProductName(row[productCol] ?? "");
         const amazonSku = amazonSkuCol ? normalizeSkuToken(row[amazonSkuCol] ?? "") : "";
         const temuSkuId = temuSkuCol ? normalizeSkuToken(row[temuSkuCol] ?? "") : "";
+        const temuGoodsId = temuGoodsIdCol ? normalizeSkuToken(row[temuGoodsIdCol] ?? "") : "";
         const leadTimeRaw = leadTimeCol ? String(row[leadTimeCol] ?? "").trim() : "";
         const leadTimeDays = leadTimeRaw ? Number(leadTimeRaw) : null;
         if (!productName || (!amazonSku && !temuSkuId)) {
@@ -242,9 +270,11 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         const existing = (amazonSku && byAmazon.get(amazonSku)) || (temuSkuId && byTemu.get(temuSkuId)) || null;
 
         if (existing) {
+          const catalogPatch: Record<string, unknown> = { product_name: productName };
+          if (temuGoodsId) catalogPatch.temu_goods_id = temuGoodsId;
           const { error: catalogError } = await supabase
             .from("sku_catalog")
-            .update({ product_name: productName })
+            .update(catalogPatch)
             .eq("id", existing.sku_catalog_id);
           if (catalogError) throw catalogError;
 
@@ -268,13 +298,20 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
           if (existingCatalogError) throw existingCatalogError;
           let catalogId = existingCatalog?.id ? String(existingCatalog.id) : "";
           if (!catalogId) {
+            const insertPayload: Record<string, unknown> = {
+              account_id: accountId,
+              product_name: productName,
+            };
+            if (temuGoodsId) insertPayload.temu_goods_id = temuGoodsId;
             const { data: catalog, error: catalogError } = await supabase
               .from("sku_catalog")
-              .insert({ account_id: accountId, product_name: productName })
+              .insert(insertPayload)
               .select("id")
               .single();
             if (catalogError || !catalog?.id) throw catalogError || new Error("Failed to create product.");
             catalogId = String(catalog.id);
+          } else if (temuGoodsId) {
+            await supabase.from("sku_catalog").update({ temu_goods_id: temuGoodsId }).eq("id", catalogId);
           }
 
           const reusable = (byCatalog.get(catalogId) || []).find(
@@ -343,12 +380,19 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       return;
     }
     let targetCatalogId = row.sku_catalog_id;
+    const normalizedTemuGoodsId = normalizeSkuToken(row.temu_goods_id || "");
     if (sameNameCatalog?.id) {
       targetCatalogId = String(sameNameCatalog.id);
+      if (normalizedTemuGoodsId) {
+        await supabase
+          .from("sku_catalog")
+          .update({ temu_goods_id: normalizedTemuGoodsId })
+          .eq("id", targetCatalogId);
+      }
     } else {
       const { error: catalogError } = await supabase
         .from("sku_catalog")
-        .update({ product_name: normalizedName })
+        .update({ product_name: normalizedName, temu_goods_id: normalizedTemuGoodsId || null })
         .eq("id", row.sku_catalog_id);
       if (catalogError) {
         setError(catalogError.message);
@@ -389,18 +433,34 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
     <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-slate-800">SKU Mapping (Amazon SKU ↔ Temu SKU ID)</h3>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search product or SKU"
-          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-72"
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search product or SKU"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-72"
+          />
+          {searchActive ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700"
+              >
+                Clear
+              </button>
+              <span className="text-xs text-slate-500">
+                {rows.length} match{rows.length === 1 ? "" : "es"}
+              </span>
+            </>
+          ) : null}
+        </div>
       </div>
 
       {canEdit ? (
         <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
           <p className="text-xs text-slate-600">
-            Bulk upload CSV/XLSX with columns: <span className="font-semibold">Product Name, Amazon SKU, Temu SKU ID, Lead Time</span>.
+            Bulk upload CSV/XLSX with columns: <span className="font-semibold">Product Name, Amazon SKU, Temu SKU ID, Temu Goods ID, Lead Time</span>.
           </p>
           <div className="grid gap-3 md:grid-cols-[1fr_auto]">
             <FileDropzone
@@ -423,7 +483,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
             </div>
           </div>
           {bulkRows.length > 0 ? (
-            <div className="grid gap-2 md:grid-cols-4">
+            <div className="grid gap-2 md:grid-cols-5">
               <label className="text-xs text-slate-600">
                 <span className="mb-1 block uppercase tracking-wide text-slate-500">Product Name Column</span>
                 <select
@@ -470,6 +530,21 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
                 </select>
               </label>
               <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">Temu Goods ID Column</span>
+                <select
+                  value={temuGoodsIdCol}
+                  onChange={(e) => setTemuGoodsIdCol(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">Select column</option>
+                  {bulkHeaders.map((header) => (
+                    <option key={header} value={header}>
+                      {header}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-slate-600">
                 <span className="mb-1 block uppercase tracking-wide text-slate-500">Lead Time Column</span>
                 <select
                   value={leadTimeCol}
@@ -499,6 +574,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
               <th className="px-3 py-2">Product</th>
               <th className="px-3 py-2">Amazon SKU</th>
               <th className="px-3 py-2">Temu SKU ID</th>
+              <th className="px-3 py-2">Temu Goods ID</th>
               <th className="px-3 py-2">Lead Time (days)</th>
               {canEdit ? <th className="px-3 py-2">Actions</th> : null}
             </tr>
@@ -506,13 +582,13 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-3 py-3 text-slate-500" colSpan={canEdit ? 5 : 4}>
+                <td className="px-3 py-3 text-slate-500" colSpan={canEdit ? 6 : 5}>
                   Loading mappings...
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td className="px-3 py-3 text-slate-500" colSpan={canEdit ? 5 : 4}>
+                <td className="px-3 py-3 text-slate-500" colSpan={canEdit ? 6 : 5}>
                   No mappings found.
                 </td>
               </tr>
@@ -540,6 +616,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
           </tbody>
         </table>
       </div>
+      {searchActive ? null : (
       <div className="flex flex-wrap items-center justify-end gap-2">
         <span className="text-xs text-slate-500">
           Page {currentPage} of {totalPages} ({totalCount} items)
@@ -572,6 +649,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
           Next
         </button>
       </div>
+      )}
     </section>
   );
 }
@@ -625,6 +703,18 @@ function EditableMappingRow({
           />
         ) : (
           row.temu_sku_id || "-"
+        )}
+      </td>
+      <td className="px-3 py-2">
+        {canEdit ? (
+          <input
+            value={row.temu_goods_id || ""}
+            onChange={(e) => onChange({ temu_goods_id: e.target.value.toUpperCase() || null })}
+            className="w-full rounded-lg border border-slate-300 px-2 py-1"
+            placeholder="Goods ID"
+          />
+        ) : (
+          row.temu_goods_id || "-"
         )}
       </td>
       <td className="px-3 py-2">
