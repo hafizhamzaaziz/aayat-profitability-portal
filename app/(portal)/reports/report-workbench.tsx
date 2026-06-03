@@ -1155,6 +1155,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
         period_start: periodStart,
         period_end: periodEnd,
         platform,
+        source: "manual" as const,
         gross_sales: Number(preview.grossSales.toFixed(2)),
         total_cogs: Number(preview.totalCogs.toFixed(2)),
         total_fees: Number(preview.totalFees.toFixed(2)),
@@ -1169,7 +1170,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       const { data: reportRow, error: reportError } = await supabase
         .from("reports")
         .upsert(reportPayload, {
-          onConflict: "account_id,period_start,period_end,platform",
+          onConflict: "account_id,period_start,period_end,platform,source",
         })
         .select("id")
         .single();

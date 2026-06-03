@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import type { UserRole } from "@/lib/types/auth";
 import AuditEventsPanel from "./audit-events-panel";
@@ -644,16 +645,29 @@ function Modal({
   size?: "md" | "lg";
 }) {
   const widthClass = size === "lg" ? "max-w-3xl" : "max-w-lg";
-  // Anchor the dialog to a fixed viewport position with `items-start` + a
-  // fixed top offset. Using `items-center` (the previous behaviour) caused
-  // the modal to re-center every time its internal content height changed —
-  // sync start/finish, smoke-test toggling, the credential prop refreshing —
-  // which read as the modal "scrolling up and down by itself".
+  // Render via a portal to document.body so the dialog lives OUTSIDE the
+  // Accounts Management section entirely. Previously the modal was nested
+  // inside the section's React subtree, so any re-render of that section
+  // (loadData refreshes, credential props arriving, sync results) could
+  // reflow the page underneath and visibly jolt the modal.
   //
-  // We also pin the dialog at a fixed 80vh so its outer box never resizes
-  // as content grows or shrinks; only the inner scroll region moves. This
-  // eliminates the layout reflow that caused the flashing.
-  return (
+  // Combined with: `items-start` + fixed top offset (no re-centering as
+  // content height changes) and a fixed h-[90vh] outer box (only the inner
+  // region scrolls). Together these eliminate the flashing/jumping.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+    // Lock background scroll while the modal is open so the page underneath
+    // can't shift and drag the modal with it.
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
+  if (!mounted) return null;
+
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/45 p-4 pt-[5vh] pb-[5vh]"
       onClick={onClose}
@@ -680,7 +694,8 @@ function Modal({
           <div className="flex-shrink-0 border-t border-slate-200 bg-slate-50 px-5 py-3">{footer}</div>
         ) : null}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

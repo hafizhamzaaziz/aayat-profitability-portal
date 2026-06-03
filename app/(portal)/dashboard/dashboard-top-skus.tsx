@@ -42,7 +42,11 @@ export default function DashboardTopSkus({
               {rows.map((row) => (
                 <tr key={row.sku} className="border-t border-slate-100">
                   <td className="py-2 pr-4 font-mono text-xs">{row.sku}</td>
-                  <td className="py-2 pr-4 text-slate-700">{row.description || "—"}</td>
+                  <td className="py-2 pr-4 text-slate-700" title={row.description || "—"}>
+                    <span className="line-clamp-1 inline-block max-w-[260px] align-middle">
+                      {row.description || "—"}
+                    </span>
+                  </td>
                   <td className="py-2 pr-4 text-right">{row.units.toLocaleString()}</td>
                   <td className="py-2 pr-4 text-right">{formatMoney(row.net_sales, currency)}</td>
                   <td

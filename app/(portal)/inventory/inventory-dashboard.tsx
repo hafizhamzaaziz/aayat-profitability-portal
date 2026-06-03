@@ -13,6 +13,7 @@ import {
   type SkuRef,
 } from "@/lib/inventory/engine";
 import { addDays, formatUkDate, todayIsoUtc } from "@/lib/utils/date";
+import { resolveDescriptiveProductName } from "@/lib/utils/product-name";
 
 type Props = {
   accountId: string;
@@ -25,7 +26,23 @@ type PlanRowOverride = {
   plannedBoxes: number;
 };
 
-type InventoryTab = "overview" | "stock-intake" | "shipment-planning" | "daily-sales";
+type InventoryTab = "overview" | "replenishment" | "ledger" | "stock-intake" | "shipment-planning" | "daily-sales";
+type LedgerEventKey = "intake" | "send_amazon" | "outbound" | "adjustment" | "sale" | "return";
+type LedgerEntry = {
+  id: string;
+  date: string;
+  mappingId: string;
+  product: string;
+  sku: string;
+  event: string;
+  eventKey: LedgerEventKey;
+  source: string;
+  delta: number;
+  isMovement: boolean;
+  notes: string | null;
+};
+type StockStatus = "reorder" | "ok" | "overstock" | "idle";
+type HealthIssue = { mappingId: string; label: string; issue: string; severity: "warn" | "error" };
 type IntakeAction = "supplier_inbound" | "seller_returns" | "b2b_wholesale" | "amazon_transfer";
 type SortColumn =
   | "product"
@@ -104,6 +121,26 @@ type DailyEntryRow = {
   notes: string;
 };
 
+type DailySaleEditDraft = {
+  saleDate: string;
+  mappingId: string;
+  skuSearch: string;
+  platform: "amazon" | "temu" | "tiktok";
+  warehouseId: string;
+  soldUnits: string;
+  returnsUnits: string;
+  collectedUnits: string;
+  notes: string;
+};
+
+/** Keep only digits (optionally one decimal point); blocks negatives and stepper noise. */
+function sanitizeNonNegativeNumber(value: string): string {
+  const cleaned = value.replace(/[^0-9.]/g, "");
+  const firstDot = cleaned.indexOf(".");
+  if (firstDot === -1) return cleaned;
+  return cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, "");
+}
+
 function createDailyEntryRow(): DailyEntryRow {
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -118,6 +155,19 @@ function createDailyEntryRow(): DailyEntryRow {
     notes: "",
   };
 }
+
+type SavedShipmentPlan = {
+  id: string;
+  planDate: string;
+  planType: "amazon_requirement" | "warehouse_requirement" | "manual";
+  title: string;
+  notes: string | null;
+  orientation: "portrait" | "landscape";
+  itemCount: number;
+  totalUnits: number;
+  totalPallets: number;
+  createdAt: string;
+};
 
 function dailyEntryMappingLabel(m?: SkuRef) {
   if (!m) return "";
@@ -374,6 +424,22 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     mappingId: "all",
   });
   const [dailyEntryRows, setDailyEntryRows] = useState<DailyEntryRow[]>([createDailyEntryRow()]);
+  const [editingDailySaleId, setEditingDailySaleId] = useState<string | null>(null);
+  const [dailySaleDraft, setDailySaleDraft] = useState<DailySaleEditDraft | null>(null);
+  const [savedPlans, setSavedPlans] = useState<SavedShipmentPlan[]>([]);
+  const REPLEN_PAGE_SIZE = 25;
+  const LEDGER_PAGE_SIZE = 30;
+  const [replenSearch, setReplenSearch] = useState("");
+  const [replenStatusFilter, setReplenStatusFilter] = useState<"all" | "reorder" | "overstock" | "idle">("all");
+  const [replenOffset, setReplenOffset] = useState(0);
+  const [showDataHealth, setShowDataHealth] = useState(false);
+  const [ledgerOffset, setLedgerOffset] = useState(0);
+  const [ledgerFilters, setLedgerFilters] = useState({
+    mappingId: "all",
+    eventKey: "all" as "all" | LedgerEventKey,
+    from: addDays(todayIsoUtc(), -89),
+    to: todayIsoUtc(),
+  });
 
   const nowIso = todayIsoUtc();
 
@@ -382,7 +448,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     setError(null);
     const supabase = createClient();
 
-    const [mappingRes, defaultsRes, salesFactsRes, skuUniverseRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, dailySalesRes, accountRes] = await Promise.all([
+    const [mappingRes, defaultsRes, salesFactsRes, skuUniverseRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, dailySalesRes, accountRes, skuDescRes] = await Promise.all([
       supabase
         .from("sku_mappings")
         .select("id, amazon_sku, temu_sku_id, lead_time_days, sku_catalog:sku_catalog_id(product_name)")
@@ -431,6 +497,12 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         .order("sale_date", { ascending: false })
         .limit(3000),
       supabase.from("accounts").select("vat_rate").eq("id", accountId).maybeSingle(),
+      supabase
+        .from("report_sku_breakdowns")
+        .select("sku, description")
+        .eq("account_id", accountId)
+        .not("description", "is", null)
+        .range(0, 99999),
     ]);
 
     if (mappingRes.error) {
@@ -489,6 +561,22 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       setLoading(false);
       return;
     }
+    if (skuDescRes.error) {
+      setError(skuDescRes.error.message);
+      setLoading(false);
+      return;
+    }
+
+    const descriptionBySku = new Map<string, string>();
+    ((skuDescRes.data || []) as Array<{ sku?: string | null; description?: string | null }>).forEach((row) => {
+      const sku = String(row.sku || "").trim().toUpperCase();
+      const description = String(row.description || "").trim();
+      if (!sku || !description) return;
+      const current = descriptionBySku.get(sku);
+      if (!current || description.length > current.length) {
+        descriptionBySku.set(sku, description);
+      }
+    });
 
     const nextMappings: SkuRef[] = (mappingRes.data || []).map((row) => {
       const rec = row as unknown as {
@@ -500,7 +588,12 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       };
       return {
         mappingId: rec.id,
-        productName: rec.sku_catalog?.product_name || rec.amazon_sku || rec.temu_sku_id || "Unnamed product",
+        productName: resolveDescriptiveProductName({
+          productName: rec.sku_catalog?.product_name || null,
+          amazonSku: rec.amazon_sku,
+          temuSkuId: rec.temu_sku_id,
+          descriptionBySku,
+        }),
         amazonSku: rec.amazon_sku,
         temuSkuId: rec.temu_sku_id,
         leadTimeDays: rec.lead_time_days,
@@ -699,6 +792,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       })
     );
     setAccountVatRate(Number((accountRes.data as { vat_rate?: number } | null)?.vat_rate ?? 20));
+
+    void loadSavedPlans();
 
     setLoading(false);
 
@@ -1545,6 +1640,55 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     }
     setSavedPlanId(String(plan.id));
     setMessage("Shipment plan saved.");
+    await loadSavedPlans();
+  };
+
+  const loadSavedPlans = async () => {
+    const supabase = createClient();
+    const { data, error: plansError } = await supabase
+      .from("shipment_plans")
+      .select("id, plan_date, plan_type, title, notes, orientation, created_at, shipment_plan_items(planned_units, pallets)")
+      .eq("account_id", accountId)
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (plansError) {
+      // Non-fatal: keep page usable even if plan history fails to load.
+      return;
+    }
+    const next: SavedShipmentPlan[] = ((data || []) as Array<Record<string, unknown>>).map((row) => {
+      const items = (row.shipment_plan_items as Array<{ planned_units?: number; pallets?: number }> | null) || [];
+      return {
+        id: String(row.id),
+        planDate: String(row.plan_date || ""),
+        planType: (row.plan_type as SavedShipmentPlan["planType"]) || "manual",
+        title: String(row.title || "Shipment plan"),
+        notes: (row.notes as string | null) || null,
+        orientation: (row.orientation as SavedShipmentPlan["orientation"]) || "portrait",
+        itemCount: items.length,
+        totalUnits: items.reduce((acc, it) => acc + Number(it.planned_units || 0), 0),
+        totalPallets: items.reduce((acc, it) => acc + Number(it.pallets || 0), 0),
+        createdAt: String(row.created_at || ""),
+      };
+    });
+    setSavedPlans(next);
+  };
+
+  const deleteShipmentPlan = async (planId: string) => {
+    if (!canEdit) return;
+    if (typeof window !== "undefined" && !window.confirm("Delete this shipment plan? This cannot be undone.")) return;
+    const supabase = createClient();
+    const { error: deleteError } = await supabase
+      .from("shipment_plans")
+      .delete()
+      .eq("id", planId)
+      .eq("account_id", accountId);
+    if (deleteError) {
+      setError(deleteError.message);
+      return;
+    }
+    if (savedPlanId === planId) setSavedPlanId(null);
+    setMessage("Shipment plan deleted.");
+    await loadSavedPlans();
   };
 
   const downloadPlanPdf = async (planId: string) => {
@@ -1636,6 +1780,70 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       return;
     }
     setMessage("Daily sales row deleted.");
+    await loadAll();
+  };
+
+  const beginEditDailySaleRow = (row: DailySale) => {
+    if (!canEdit) return;
+    const m = mappingById.get(row.sku_mapping_id);
+    setEditingDailySaleId(row.id);
+    setDailySaleDraft({
+      saleDate: row.sale_date,
+      mappingId: row.sku_mapping_id,
+      skuSearch: m ? `${m.amazonSku || m.temuSkuId || ""}${m.productName ? ` — ${m.productName}` : ""}` : "",
+      platform: (row.platform as DailySaleEditDraft["platform"]) || "amazon",
+      warehouseId: row.warehouse_id || "",
+      soldUnits: String(row.sold_units ?? 0),
+      returnsUnits: String(row.returns_units ?? 0),
+      collectedUnits: String(row.collected_units ?? 0),
+      notes: row.notes || "",
+    });
+  };
+
+  const cancelEditDailySaleRow = () => {
+    setEditingDailySaleId(null);
+    setDailySaleDraft(null);
+  };
+
+  const saveEditDailySaleRow = async (rowId: string) => {
+    if (!canEdit || !dailySaleDraft) return;
+    const soldUnits = Number(dailySaleDraft.soldUnits || 0);
+    const returnsUnits = Number(dailySaleDraft.returnsUnits || 0);
+    const collectedUnits = Number(dailySaleDraft.collectedUnits || 0);
+    if (soldUnits < 0 || returnsUnits < 0 || collectedUnits < 0) {
+      setError("Units sold, returns and collected must be non-negative.");
+      return;
+    }
+    if (!dailySaleDraft.saleDate) {
+      setError("Please select a sale date.");
+      return;
+    }
+    if (!dailySaleDraft.mappingId) {
+      setError("Please select a SKU for this row.");
+      return;
+    }
+    const supabase = createClient();
+    const { error: updateError } = await supabase
+      .from("inventory_daily_sales")
+      .update({
+        sale_date: dailySaleDraft.saleDate,
+        sku_mapping_id: dailySaleDraft.mappingId,
+        platform: dailySaleDraft.platform,
+        warehouse_id: dailySaleDraft.warehouseId || null,
+        sold_units: soldUnits,
+        returns_units: returnsUnits,
+        collected_units: collectedUnits,
+        notes: dailySaleDraft.notes.trim() || null,
+      })
+      .eq("id", rowId)
+      .eq("account_id", accountId);
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
+    setMessage("Daily sales row updated.");
+    setEditingDailySaleId(null);
+    setDailySaleDraft(null);
     await loadAll();
   };
 
@@ -1731,6 +1939,213 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       collected: dailyRowsFiltered.reduce((acc, row) => acc + Number(row.collected_units || 0), 0),
     };
   }, [dailyRowsFiltered, cogsByMapping, accountVatRate]);
+
+  // Phase 3/4 engine: enrich every computed row with reorder points + a health
+  // status so the Overview action strip and Replenishment dashboard stay in sync.
+  type ReplenRow = (typeof computedRows)[number] & {
+    leadTimeDays: number;
+    unitCost: number;
+    reorderPointAmazon: number;
+    reorderPointWarehouse: number;
+    amazonStatus: StockStatus;
+    warehouseStatus: StockStatus;
+    needsReorder: boolean;
+    isOverstock: boolean;
+  };
+  const insights = useMemo(() => {
+    const rows: ReplenRow[] = computedRows.map((row) => {
+      const lead = mappingById.get(row.mappingId)?.leadTimeDays ?? defaults.leadTimeDays;
+      const v = row.dailyVelocity;
+      const reorderPointAmazon = Math.ceil(v * lead);
+      const reorderPointWarehouse = Math.ceil(v * (lead + defaults.warehouseCoverDays));
+      const amazonStatus: StockStatus =
+        v <= 0
+          ? "idle"
+          : row.suggestedAmazonUnits > 0
+          ? "reorder"
+          : row.amazonDaysLeft != null && row.amazonDaysLeft > defaults.amazonCoverDays * 3
+          ? "overstock"
+          : "ok";
+      const warehouseStatus: StockStatus =
+        v <= 0
+          ? "idle"
+          : row.suggestedWarehouseUnits > 0
+          ? "reorder"
+          : row.warehouseDaysLeft != null && row.warehouseDaysLeft > (defaults.warehouseCoverDays + lead) * 1.5
+          ? "overstock"
+          : "ok";
+      return {
+        ...row,
+        leadTimeDays: lead,
+        unitCost: cogsByMapping.get(row.mappingId) || 0,
+        reorderPointAmazon,
+        reorderPointWarehouse,
+        amazonStatus,
+        warehouseStatus,
+        needsReorder: amazonStatus === "reorder" || warehouseStatus === "reorder",
+        isOverstock: amazonStatus === "overstock" || warehouseStatus === "overstock",
+      };
+    });
+
+    const health: HealthIssue[] = [];
+    rows.forEach((row) => {
+      const label = row.amazonSku || row.temuSkuId || row.productName || "Unknown SKU";
+      const onHand = row.amazonUnitsOnHand + row.warehouseUnitsOnHand;
+      if (!row.amazonSku && !row.temuSkuId) {
+        health.push({ mappingId: row.mappingId, label, issue: "No Amazon SKU or Temu Goods ID set", severity: "error" });
+      }
+      if (row.amazonUnitsOnHand < 0 || row.warehouseUnitsOnHand < 0) {
+        health.push({ mappingId: row.mappingId, label, issue: "Negative stock on hand (data error)", severity: "error" });
+      }
+      if (onHand > 0 && row.unitCost <= 0) {
+        health.push({ mappingId: row.mappingId, label, issue: "Stock on hand but no COGS set", severity: "warn" });
+      }
+      if (row.dailyVelocity > 0 && onHand === 0) {
+        health.push({ mappingId: row.mappingId, label, issue: "Selling but no stock recorded", severity: "warn" });
+      }
+    });
+
+    return {
+      rows,
+      reorderCount: rows.filter((r) => r.needsReorder).length,
+      overstockCount: rows.filter((r) => r.isOverstock).length,
+      idleCount: rows.filter((r) => r.amazonStatus === "idle" && r.amazonUnitsOnHand + r.warehouseUnitsOnHand > 0).length,
+      totalStockValue: rows.reduce((acc, r) => acc + r.stockValue, 0),
+      health,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computedRows, mappingById, defaults, cogsByMapping]);
+
+  const replenVisibleRows = useMemo(() => {
+    const q = replenSearch.trim().toLowerCase();
+    return insights.rows
+      .filter((row) => {
+        if (replenStatusFilter === "reorder" && !row.needsReorder) return false;
+        if (replenStatusFilter === "overstock" && !row.isOverstock) return false;
+        if (replenStatusFilter === "idle" && !(row.amazonStatus === "idle" && row.amazonUnitsOnHand + row.warehouseUnitsOnHand > 0))
+          return false;
+        if (!q) return true;
+        return (
+          row.productName.toLowerCase().includes(q) ||
+          String(row.amazonSku || "").toLowerCase().includes(q) ||
+          String(row.temuSkuId || "").toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => Number(b.needsReorder) - Number(a.needsReorder) || a.productName.localeCompare(b.productName));
+  }, [insights, replenSearch, replenStatusFilter]);
+
+  const replenTotalPages = Math.max(1, Math.ceil(replenVisibleRows.length / REPLEN_PAGE_SIZE));
+  const replenCurrentPage = Math.min(replenTotalPages, Math.floor(replenOffset / REPLEN_PAGE_SIZE) + 1);
+  const replenPaged = replenVisibleRows.slice((replenCurrentPage - 1) * REPLEN_PAGE_SIZE, replenCurrentPage * REPLEN_PAGE_SIZE);
+
+  // Phase 2 ledger: a single chronological event stream rebuilt (read-only) from
+  // real stock movements + manual daily sales + uploaded transaction sales.
+  const ledgerEntries = useMemo(() => {
+    const movementEventMap: Record<InventoryMovement["movementType"], { event: string; key: LedgerEventKey }> = {
+      inbound: { event: "Intake", key: "intake" },
+      amazon_transfer: { event: "Send to Amazon", key: "send_amazon" },
+      outbound: { event: "Outbound", key: "outbound" },
+      adjustment: { event: "Adjustment", key: "adjustment" },
+    };
+    const entries: LedgerEntry[] = [];
+    movements.forEach((mv) => {
+      const m = mappingById.get(mv.mappingId);
+      const meta = movementEventMap[mv.movementType] || { event: "Adjustment", key: "adjustment" as LedgerEventKey };
+      entries.push({
+        id: `mv-${mv.id}`,
+        date: mv.movementDate,
+        mappingId: mv.mappingId,
+        product: m?.productName || "—",
+        sku: m?.amazonSku || m?.temuSkuId || "—",
+        event: meta.event,
+        eventKey: meta.key,
+        source: "Stock movement",
+        delta: Number(mv.unitsDelta || 0),
+        isMovement: true,
+        notes: mv.notes,
+      });
+    });
+    dailySales.forEach((ds) => {
+      const m = mappingById.get(ds.sku_mapping_id);
+      const sku = m?.amazonSku || m?.temuSkuId || "—";
+      const product = m?.productName || "—";
+      if (Number(ds.sold_units || 0) > 0) {
+        entries.push({
+          id: `ds-sale-${ds.id}`,
+          date: ds.sale_date,
+          mappingId: ds.sku_mapping_id,
+          product,
+          sku,
+          event: "Sale",
+          eventKey: "sale",
+          source: `Daily sales (${ds.platform})`,
+          delta: -Number(ds.sold_units || 0),
+          isMovement: false,
+          notes: ds.notes,
+        });
+      }
+      if (Number(ds.returns_units || 0) > 0) {
+        entries.push({
+          id: `ds-ret-${ds.id}`,
+          date: ds.sale_date,
+          mappingId: ds.sku_mapping_id,
+          product,
+          sku,
+          event: "Return",
+          eventKey: "return",
+          source: `Daily sales (${ds.platform})`,
+          delta: Number(ds.returns_units || 0),
+          isMovement: false,
+          notes: ds.notes,
+        });
+      }
+    });
+    // Uploaded transaction sales are only folded in when a single SKU is
+    // selected — otherwise the aggregate stream would be enormous and noisy.
+    if (ledgerFilters.mappingId !== "all") {
+      txFacts
+        .filter((tx) => tx.mappingId === ledgerFilters.mappingId)
+        .forEach((tx, idx) => {
+          const m = mappingById.get(tx.mappingId);
+          entries.push({
+            id: `tx-${tx.mappingId}-${tx.date}-${tx.platform}-${idx}`,
+            date: tx.date,
+            mappingId: tx.mappingId,
+            product: m?.productName || "—",
+            sku: m?.amazonSku || m?.temuSkuId || "—",
+            event: "Sale",
+            eventKey: "sale",
+            source: `Reported sales (${tx.platform})`,
+            delta: -Number(tx.quantity || 0),
+            isMovement: false,
+            notes: null,
+          });
+        });
+    }
+    return entries
+      .filter((e) => {
+        if (ledgerFilters.mappingId !== "all" && e.mappingId !== ledgerFilters.mappingId) return false;
+        if (ledgerFilters.eventKey !== "all" && e.eventKey !== ledgerFilters.eventKey) return false;
+        if (ledgerFilters.from && e.date < ledgerFilters.from) return false;
+        if (ledgerFilters.to && e.date > ledgerFilters.to) return false;
+        return true;
+      })
+      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  }, [movements, dailySales, txFacts, mappingById, ledgerFilters]);
+
+  const ledgerNetMovement = useMemo(
+    () => ledgerEntries.filter((e) => e.isMovement).reduce((acc, e) => acc + e.delta, 0),
+    [ledgerEntries]
+  );
+  const ledgerTotalPages = Math.max(1, Math.ceil(ledgerEntries.length / LEDGER_PAGE_SIZE));
+  const ledgerCurrentPage = Math.min(ledgerTotalPages, Math.floor(ledgerOffset / LEDGER_PAGE_SIZE) + 1);
+  const ledgerPaged = ledgerEntries.slice((ledgerCurrentPage - 1) * LEDGER_PAGE_SIZE, ledgerCurrentPage * LEDGER_PAGE_SIZE);
+
+  const addMappingToPlan = (mappingId: string) => {
+    setSelectedMappingIds((prev) => (prev.includes(mappingId) ? prev : [...prev, mappingId]));
+    setActiveTab("shipment-planning");
+    setMessage("SKU added to shipment plan selection.");
+  };
 
   const downloadDailySalesCsv = () => {
     if (dailyRowsFiltered.length === 0) {
@@ -1835,6 +2250,23 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           </button>
           <button
             type="button"
+            onClick={() => setActiveTab("replenishment")}
+            className={`rounded-xl px-3 py-2 text-sm font-semibold ${activeTab === "replenishment" ? "bg-[var(--md-primary)] text-white" : "bg-slate-100 text-slate-700"}`}
+          >
+            Replenishment
+            {insights.reorderCount > 0 ? (
+              <span className="ml-1 rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-bold text-white">{insights.reorderCount}</span>
+            ) : null}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("ledger")}
+            className={`rounded-xl px-3 py-2 text-sm font-semibold ${activeTab === "ledger" ? "bg-[var(--md-primary)] text-white" : "bg-slate-100 text-slate-700"}`}
+          >
+            Stock Ledger
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab("stock-intake")}
             className={`rounded-xl px-3 py-2 text-sm font-semibold ${activeTab === "stock-intake" ? "bg-[var(--md-primary)] text-white" : "bg-slate-100 text-slate-700"}`}
           >
@@ -1891,6 +2323,66 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           <p className="text-xs text-slate-500">
             Selected period metrics and YTD show inline comparison against the immediately previous matching period.
           </p>
+
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <button
+              type="button"
+              onClick={() => {
+                setReplenStatusFilter("reorder");
+                setReplenOffset(0);
+                setActiveTab("replenishment");
+              }}
+              className="rounded-xl border border-red-200 bg-red-50 p-3 text-left transition hover:bg-red-100"
+            >
+              <p className="text-2xl font-bold text-red-700">{insights.reorderCount}</p>
+              <p className="text-xs font-semibold text-red-700">Reorder now</p>
+              <p className="text-[11px] text-red-600/80">Below reorder point</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setReplenStatusFilter("overstock");
+                setReplenOffset(0);
+                setActiveTab("replenishment");
+              }}
+              className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-left transition hover:bg-amber-100"
+            >
+              <p className="text-2xl font-bold text-amber-700">{insights.overstockCount}</p>
+              <p className="text-xs font-semibold text-amber-700">Overstocked</p>
+              <p className="text-[11px] text-amber-600/80">Excess cover days</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("shipment-planning")}
+              className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-left transition hover:bg-sky-100"
+            >
+              <p className="text-2xl font-bold text-sky-700">{savedPlans.length}</p>
+              <p className="text-xs font-semibold text-sky-700">Saved plans</p>
+              <p className="text-[11px] text-sky-600/80">Shipment planning</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("ledger");
+                setShowDataHealth(true);
+              }}
+              className={`rounded-xl border p-3 text-left transition ${
+                insights.health.length > 0
+                  ? "border-orange-200 bg-orange-50 hover:bg-orange-100"
+                  : "border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
+              }`}
+            >
+              <p className={`text-2xl font-bold ${insights.health.length > 0 ? "text-orange-700" : "text-emerald-700"}`}>
+                {insights.health.length}
+              </p>
+              <p className={`text-xs font-semibold ${insights.health.length > 0 ? "text-orange-700" : "text-emerald-700"}`}>
+                Data issues
+              </p>
+              <p className={`text-[11px] ${insights.health.length > 0 ? "text-orange-600/80" : "text-emerald-600/80"}`}>
+                {insights.health.length > 0 ? "Needs attention" : "All healthy"}
+              </p>
+            </button>
+          </div>
           {canEdit ? (
             <div className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <label className="text-xs text-slate-600">
@@ -3035,6 +3527,72 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             </button>
           ) : null}
         </div>
+
+        <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-sm font-semibold text-slate-800">Saved Plans</h4>
+            <span className="text-xs text-slate-500">{savedPlans.length} saved</span>
+          </div>
+          {savedPlans.length === 0 ? (
+            <p className="text-xs text-slate-500">No saved shipment plans yet. Build a plan above and click “Save plan”.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+              <table className="min-w-full text-xs">
+                <thead className="bg-slate-50 text-left uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th className="px-2 py-2">Title</th>
+                    <th className="px-2 py-2">Type</th>
+                    <th className="px-2 py-2">Date</th>
+                    <th className="px-2 py-2">SKUs</th>
+                    <th className="px-2 py-2">Units</th>
+                    <th className="px-2 py-2">Pallets</th>
+                    <th className="px-2 py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {savedPlans.map((plan) => (
+                    <tr key={plan.id} className="border-t border-slate-100">
+                      <td className="px-2 py-2 font-medium text-slate-800" title={plan.notes || undefined}>
+                        {plan.title}
+                      </td>
+                      <td className="px-2 py-2 text-slate-600">
+                        {plan.planType === "amazon_requirement"
+                          ? "Send to Amazon"
+                          : plan.planType === "warehouse_requirement"
+                          ? "Order from Supplier"
+                          : "Manual"}
+                      </td>
+                      <td className="px-2 py-2 text-slate-600">{formatUkDate(plan.planDate)}</td>
+                      <td className="px-2 py-2">{plan.itemCount}</td>
+                      <td className="px-2 py-2">{plan.totalUnits.toLocaleString()}</td>
+                      <td className="px-2 py-2">{plan.totalPallets.toFixed(2)}</td>
+                      <td className="px-2 py-2">
+                        <div className="flex justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => void downloadPlanPdf(plan.id)}
+                            className="rounded bg-slate-900 px-2 py-1 font-semibold text-white"
+                          >
+                            PDF
+                          </button>
+                          {canEdit ? (
+                            <button
+                              type="button"
+                              onClick={() => void deleteShipmentPlan(plan.id)}
+                              className="rounded bg-red-50 px-2 py-1 font-semibold text-red-700"
+                            >
+                              Delete
+                            </button>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </section>
       ) : null}
 
@@ -3173,28 +3731,34 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
 
                   <input
                     type="number"
+                    inputMode="numeric"
+                    min={0}
                     value={entryRow.soldUnits}
-                    onChange={(e) => updateDailyEntryRow(entryRow.id, { soldUnits: e.target.value })}
+                    onChange={(e) => updateDailyEntryRow(entryRow.id, { soldUnits: sanitizeNonNegativeNumber(e.target.value) })}
                     placeholder="Units sold"
-                    className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+                    className="no-spinner rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
                     disabled={!canEdit}
                   />
 
                   <input
                     type="number"
+                    inputMode="numeric"
+                    min={0}
                     value={entryRow.returnsUnits}
-                    onChange={(e) => updateDailyEntryRow(entryRow.id, { returnsUnits: e.target.value })}
+                    onChange={(e) => updateDailyEntryRow(entryRow.id, { returnsUnits: sanitizeNonNegativeNumber(e.target.value) })}
                     placeholder="Returns"
-                    className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+                    className="no-spinner rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
                     disabled={!canEdit}
                   />
 
                   <input
                     type="number"
+                    inputMode="numeric"
+                    min={0}
                     value={entryRow.collectedUnits}
-                    onChange={(e) => updateDailyEntryRow(entryRow.id, { collectedUnits: e.target.value })}
+                    onChange={(e) => updateDailyEntryRow(entryRow.id, { collectedUnits: sanitizeNonNegativeNumber(e.target.value) })}
                     placeholder="Collected"
-                    className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+                    className="no-spinner rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
                     disabled={!canEdit}
                   />
 
@@ -3338,34 +3902,179 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   </tr>
                 ) : (
                   dailyRowsPaged.map((row) => {
-                    const m = mappingById.get(row.sku_mapping_id);
+                    const isEditingRow = canEdit && editingDailySaleId === row.id && Boolean(dailySaleDraft);
+                    const draftMapping = isEditingRow && dailySaleDraft ? mappingById.get(dailySaleDraft.mappingId) : undefined;
+                    const m = draftMapping || mappingById.get(row.sku_mapping_id);
                     const wh = warehouses.find((w) => w.id === row.warehouse_id);
-                    const unitCost = cogsByMapping.get(row.sku_mapping_id) || 0;
-                    const units = Number(row.sold_units || 0);
+                    const costMappingId = isEditingRow && dailySaleDraft ? dailySaleDraft.mappingId : row.sku_mapping_id;
+                    const unitCost = cogsByMapping.get(costMappingId) || 0;
+                    const units = Number(isEditingRow ? dailySaleDraft?.soldUnits || 0 : row.sold_units || 0);
                     const excl = units * unitCost;
                     const incl = excl * (1 + Number(accountVatRate || 0) / 100);
                     return (
                       <tr key={row.id} className="border-t border-slate-100">
-                        <td className="px-2 py-2">{row.sale_date}</td>
-                        <td className="px-2 py-2 font-medium">{m?.amazonSku || m?.temuSkuId || "-"}</td>
-                        <td className="px-2 py-2 text-slate-600">{m?.productName || "-"}</td>
-                        <td className="px-2 py-2 capitalize">{row.platform}</td>
-                        <td className="px-2 py-2">{wh?.name || "-"}</td>
-                        <td className="px-2 py-2">{row.sold_units}</td>
-                        <td className="px-2 py-2">{row.returns_units}</td>
-                        <td className="px-2 py-2">{row.collected_units}</td>
+                        <td className="px-2 py-2">
+                          {isEditingRow ? (
+                            <input
+                              type="date"
+                              value={dailySaleDraft?.saleDate || ""}
+                              onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, saleDate: e.target.value } : prev))}
+                              className="rounded border border-slate-300 px-2 py-1"
+                            />
+                          ) : (
+                            row.sale_date
+                          )}
+                        </td>
+                        <td className="px-2 py-2 font-medium">
+                          {isEditingRow ? (
+                            <select
+                              value={dailySaleDraft?.mappingId || ""}
+                              onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, mappingId: e.target.value } : prev))}
+                              className="max-w-[200px] rounded border border-slate-300 px-2 py-1"
+                            >
+                              <option value="">Select SKU</option>
+                              {mappings.map((mp) => (
+                                <option key={mp.mappingId} value={mp.mappingId}>
+                                  {mp.amazonSku || mp.temuSkuId || "No SKU"}
+                                  {mp.productName ? ` — ${mp.productName}` : ""}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            m?.amazonSku || m?.temuSkuId || "-"
+                          )}
+                        </td>
+                        <td className="px-2 py-2 text-slate-600" title={m?.productName || "-"}>
+                          {m?.productName || "-"}
+                        </td>
+                        <td className="px-2 py-2 capitalize">
+                          {isEditingRow ? (
+                            <select
+                              value={dailySaleDraft?.platform || "amazon"}
+                              onChange={(e) =>
+                                setDailySaleDraft((prev) => (prev ? { ...prev, platform: e.target.value as DailySaleEditDraft["platform"] } : prev))
+                              }
+                              className="rounded border border-slate-300 px-2 py-1"
+                            >
+                              <option value="amazon">Amazon</option>
+                              <option value="temu">Temu</option>
+                              <option value="tiktok">TikTok</option>
+                            </select>
+                          ) : (
+                            row.platform
+                          )}
+                        </td>
+                        <td className="px-2 py-2">
+                          {isEditingRow ? (
+                            <select
+                              value={dailySaleDraft?.warehouseId || ""}
+                              onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, warehouseId: e.target.value } : prev))}
+                              className="rounded border border-slate-300 px-2 py-1"
+                            >
+                              <option value="">No warehouse</option>
+                              {warehouses.map((w) => (
+                                <option key={w.id} value={w.id}>
+                                  {w.name}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            wh?.name || "-"
+                          )}
+                        </td>
+                        <td className="px-2 py-2">
+                          {isEditingRow ? (
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              value={dailySaleDraft?.soldUnits || ""}
+                              onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, soldUnits: sanitizeNonNegativeNumber(e.target.value) } : prev))}
+                              className="no-spinner w-20 rounded border border-slate-300 px-2 py-1"
+                              min={0}
+                            />
+                          ) : (
+                            row.sold_units
+                          )}
+                        </td>
+                        <td className="px-2 py-2">
+                          {isEditingRow ? (
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              value={dailySaleDraft?.returnsUnits || ""}
+                              onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, returnsUnits: sanitizeNonNegativeNumber(e.target.value) } : prev))}
+                              className="no-spinner w-20 rounded border border-slate-300 px-2 py-1"
+                              min={0}
+                            />
+                          ) : (
+                            row.returns_units
+                          )}
+                        </td>
+                        <td className="px-2 py-2">
+                          {isEditingRow ? (
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              value={dailySaleDraft?.collectedUnits || ""}
+                              onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, collectedUnits: sanitizeNonNegativeNumber(e.target.value) } : prev))}
+                              className="no-spinner w-20 rounded border border-slate-300 px-2 py-1"
+                              min={0}
+                            />
+                          ) : (
+                            row.collected_units
+                          )}
+                        </td>
                         <td className="px-2 py-2">{currency}{excl.toFixed(2)}</td>
                         <td className="px-2 py-2">{currency}{incl.toFixed(2)}</td>
-                        <td className="px-2 py-2">{row.notes || "-"}</td>
+                        <td className="px-2 py-2">
+                          {isEditingRow ? (
+                            <input
+                              value={dailySaleDraft?.notes || ""}
+                              onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, notes: e.target.value } : prev))}
+                              className="w-full min-w-[160px] rounded border border-slate-300 px-2 py-1"
+                              placeholder="Notes"
+                            />
+                          ) : (
+                            row.notes || "-"
+                          )}
+                        </td>
                         {canEdit ? (
                           <td className="px-2 py-2 text-right">
-                            <button
-                              type="button"
-                              onClick={() => void deleteDailySaleRow(row.id)}
-                              className="rounded bg-red-50 px-2 py-1 text-red-700"
-                            >
-                              Delete
-                            </button>
+                            {isEditingRow ? (
+                              <div className="flex justify-end gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => void saveEditDailySaleRow(row.id)}
+                                  className="rounded bg-emerald-50 px-2 py-1 text-emerald-700"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelEditDailySaleRow}
+                                  className="rounded bg-slate-100 px-2 py-1 text-slate-700"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex justify-end gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => beginEditDailySaleRow(row)}
+                                  className="rounded bg-blue-50 px-2 py-1 text-blue-700"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void deleteDailySaleRow(row.id)}
+                                  className="rounded bg-red-50 px-2 py-1 text-red-700"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            )}
                           </td>
                         ) : null}
                       </tr>
@@ -3403,6 +4112,360 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                 type="button"
                 onClick={() => setDailyOffset((prev) => prev + DAILY_PAGE_SIZE)}
                 disabled={dailyCurrentPage >= dailyTotalPages}
+                className="rounded-md border border-slate-300 px-2 py-1 disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {activeTab === "replenishment" ? (
+        <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-800">Replenishment</h3>
+              <p className="text-xs text-slate-500">
+                Reorder point = daily velocity × lead time. Suggested order tops you back up to your cover targets.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <input
+                value={replenSearch}
+                onChange={(e) => {
+                  setReplenSearch(e.target.value);
+                  setReplenOffset(0);
+                }}
+                placeholder="Search SKU or product"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm sm:w-64"
+              />
+              <select
+                value={replenStatusFilter}
+                onChange={(e) => {
+                  setReplenStatusFilter(e.target.value as typeof replenStatusFilter);
+                  setReplenOffset(0);
+                }}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              >
+                <option value="all">All statuses</option>
+                <option value="reorder">Reorder now ({insights.reorderCount})</option>
+                <option value="overstock">Overstocked ({insights.overstockCount})</option>
+                <option value="idle">Idle stock ({insights.idleCount})</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
+            <table className="min-w-full text-xs">
+              <thead className="bg-slate-50 text-left uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-2 py-2">SKU</th>
+                  <th className="px-2 py-2">Product</th>
+                  <th className="px-2 py-2">Velocity/day</th>
+                  <th className="px-2 py-2">Lead (days)</th>
+                  <th className="px-2 py-2">On hand (A / W)</th>
+                  <th className="px-2 py-2">Days left (A / W)</th>
+                  <th className="px-2 py-2">Reorder pt (A / W)</th>
+                  <th className="px-2 py-2">Suggested (A / W)</th>
+                  <th className="px-2 py-2">Status</th>
+                  {canEdit ? <th className="px-2 py-2 text-right">Action</th> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {replenPaged.length === 0 ? (
+                  <tr>
+                    <td className="px-2 py-3 text-slate-500" colSpan={canEdit ? 10 : 9}>
+                      No SKUs match this filter.
+                    </td>
+                  </tr>
+                ) : (
+                  replenPaged.map((row) => {
+                    const status = row.needsReorder
+                      ? { label: "Reorder", cls: "bg-red-100 text-red-700" }
+                      : row.isOverstock
+                      ? { label: "Overstock", cls: "bg-amber-100 text-amber-700" }
+                      : row.amazonStatus === "idle" && row.amazonUnitsOnHand + row.warehouseUnitsOnHand > 0
+                      ? { label: "Idle", cls: "bg-slate-100 text-slate-600" }
+                      : { label: "OK", cls: "bg-emerald-100 text-emerald-700" };
+                    return (
+                      <tr key={row.mappingId} className="border-t border-slate-100">
+                        <td className="px-2 py-2 font-medium">{row.amazonSku || row.temuSkuId || "—"}</td>
+                        <td className="px-2 py-2 text-slate-600" title={row.productName}>
+                          {shortenName(row.productName)}
+                        </td>
+                        <td className="px-2 py-2">{row.dailyVelocity.toFixed(2)}</td>
+                        <td className="px-2 py-2">{row.leadTimeDays}</td>
+                        <td className="px-2 py-2">
+                          {row.amazonUnitsOnHand} / {row.warehouseUnitsOnHand}
+                        </td>
+                        <td className="px-2 py-2">
+                          {row.amazonDaysLeft ?? "∞"} / {row.warehouseDaysLeft ?? "∞"}
+                        </td>
+                        <td className="px-2 py-2">
+                          {row.reorderPointAmazon} / {row.reorderPointWarehouse}
+                        </td>
+                        <td className="px-2 py-2 font-semibold">
+                          <span className={row.suggestedAmazonUnits > 0 ? "text-red-700" : "text-slate-500"}>
+                            {row.suggestedAmazonUnits}
+                          </span>{" "}
+                          /{" "}
+                          <span className={row.suggestedWarehouseUnits > 0 ? "text-red-700" : "text-slate-500"}>
+                            {row.suggestedWarehouseUnits}
+                          </span>
+                        </td>
+                        <td className="px-2 py-2">
+                          <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${status.cls}`}>{status.label}</span>
+                        </td>
+                        {canEdit ? (
+                          <td className="px-2 py-2 text-right">
+                            <button
+                              type="button"
+                              onClick={() => addMappingToPlan(row.mappingId)}
+                              className="rounded bg-[var(--md-primary)] px-2 py-1 font-semibold text-white"
+                            >
+                              Add to plan
+                            </button>
+                          </td>
+                        ) : null}
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <span>
+              Page {replenCurrentPage} of {replenTotalPages} ({replenVisibleRows.length} SKUs)
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setReplenOffset((prev) => Math.max(0, prev - REPLEN_PAGE_SIZE))}
+                disabled={replenCurrentPage <= 1}
+                className="rounded-md border border-slate-300 px-2 py-1 disabled:opacity-50"
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                onClick={() => setReplenOffset((prev) => prev + REPLEN_PAGE_SIZE)}
+                disabled={replenCurrentPage >= replenTotalPages}
+                className="rounded-md border border-slate-300 px-2 py-1 disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {activeTab === "ledger" ? (
+        <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800">Stock Ledger</h3>
+            <p className="text-xs text-slate-500">
+              One chronological stream of every stock event. Intakes/transfers/adjustments are real stock movements; sales and
+              returns are shown for context. Select a single SKU to fold in uploaded transaction sales and a net movement total.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50">
+            <button
+              type="button"
+              onClick={() => setShowDataHealth((v) => !v)}
+              className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-semibold text-slate-800"
+            >
+              <span>
+                Data Health Check{" "}
+                <span
+                  className={`ml-1 rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                    insights.health.length > 0 ? "bg-orange-100 text-orange-700" : "bg-emerald-100 text-emerald-700"
+                  }`}
+                >
+                  {insights.health.length > 0 ? `${insights.health.length} issues` : "All healthy"}
+                </span>
+              </span>
+              <span className="text-xs text-slate-500">{showDataHealth ? "Hide" : "Show"}</span>
+            </button>
+            {showDataHealth ? (
+              <div className="border-t border-slate-200 p-3">
+                {insights.health.length === 0 ? (
+                  <p className="text-xs text-emerald-700">No data issues detected. Stock, COGS and SKU mappings look consistent.</p>
+                ) : (
+                  <ul className="space-y-1">
+                    {insights.health.map((issue, idx) => (
+                      <li key={`${issue.mappingId}-${idx}`} className="flex items-center gap-2 text-xs">
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
+                            issue.severity === "error" ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"
+                          }`}
+                        >
+                          {issue.severity}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLedgerFilters((prev) => ({ ...prev, mappingId: issue.mappingId }));
+                            setLedgerOffset(0);
+                          }}
+                          className="font-semibold text-slate-700 underline-offset-2 hover:underline"
+                        >
+                          {issue.label}
+                        </button>
+                        <span className="text-slate-500">— {issue.issue}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <select
+              value={ledgerFilters.mappingId}
+              onChange={(e) => {
+                setLedgerFilters((prev) => ({ ...prev, mappingId: e.target.value }));
+                setLedgerOffset(0);
+              }}
+              className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+            >
+              <option value="all">All SKUs</option>
+              {mappings.map((mp) => (
+                <option key={mp.mappingId} value={mp.mappingId}>
+                  {mp.amazonSku || mp.temuSkuId || "No SKU"}
+                  {mp.productName ? ` — ${shortenName(mp.productName, 24)}` : ""}
+                </option>
+              ))}
+            </select>
+            <select
+              value={ledgerFilters.eventKey}
+              onChange={(e) => {
+                setLedgerFilters((prev) => ({ ...prev, eventKey: e.target.value as "all" | LedgerEventKey }));
+                setLedgerOffset(0);
+              }}
+              className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+            >
+              <option value="all">All events</option>
+              <option value="intake">Intake</option>
+              <option value="send_amazon">Send to Amazon</option>
+              <option value="outbound">Outbound</option>
+              <option value="adjustment">Adjustment</option>
+              <option value="sale">Sale</option>
+              <option value="return">Return</option>
+            </select>
+            <label className="text-xs text-slate-600">
+              <span className="mb-1 block uppercase tracking-wide text-slate-500">From</span>
+              <input
+                type="date"
+                value={ledgerFilters.from}
+                onChange={(e) => {
+                  setLedgerFilters((prev) => ({ ...prev, from: e.target.value }));
+                  setLedgerOffset(0);
+                }}
+                className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+              />
+            </label>
+            <label className="text-xs text-slate-600">
+              <span className="mb-1 block uppercase tracking-wide text-slate-500">To</span>
+              <input
+                type="date"
+                value={ledgerFilters.to}
+                onChange={(e) => {
+                  setLedgerFilters((prev) => ({ ...prev, to: e.target.value }));
+                  setLedgerOffset(0);
+                }}
+                className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+              />
+            </label>
+          </div>
+
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
+            <table className="min-w-full text-xs">
+              <thead className="bg-slate-50 text-left uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-2 py-2">Date</th>
+                  <th className="px-2 py-2">SKU</th>
+                  <th className="px-2 py-2">Product</th>
+                  <th className="px-2 py-2">Event</th>
+                  <th className="px-2 py-2">Source</th>
+                  <th className="px-2 py-2 text-right">Qty</th>
+                  <th className="px-2 py-2">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledgerPaged.length === 0 ? (
+                  <tr>
+                    <td className="px-2 py-3 text-slate-500" colSpan={7}>
+                      No events in selected filters.
+                    </td>
+                  </tr>
+                ) : (
+                  ledgerPaged.map((entry) => (
+                    <tr key={entry.id} className="border-t border-slate-100">
+                      <td className="px-2 py-2 whitespace-nowrap">{formatUkDate(entry.date)}</td>
+                      <td className="px-2 py-2 font-medium">{entry.sku}</td>
+                      <td className="px-2 py-2 text-slate-600" title={entry.product}>
+                        {shortenName(entry.product)}
+                      </td>
+                      <td className="px-2 py-2">
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                            entry.eventKey === "intake"
+                              ? "bg-emerald-100 text-emerald-700"
+                              : entry.eventKey === "send_amazon"
+                              ? "bg-sky-100 text-sky-700"
+                              : entry.eventKey === "adjustment"
+                              ? "bg-slate-100 text-slate-700"
+                              : entry.eventKey === "return"
+                              ? "bg-violet-100 text-violet-700"
+                              : entry.eventKey === "sale"
+                              ? "bg-orange-100 text-orange-700"
+                              : "bg-rose-100 text-rose-700"
+                          }`}
+                        >
+                          {entry.event}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 text-slate-500">{entry.source}</td>
+                      <td className={`px-2 py-2 text-right font-semibold ${entry.delta < 0 ? "text-red-600" : "text-emerald-700"}`}>
+                        {entry.delta > 0 ? "+" : ""}
+                        {entry.delta}
+                      </td>
+                      <td className="px-2 py-2 text-slate-500">{entry.notes || "—"}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <span>
+              Page {ledgerCurrentPage} of {ledgerTotalPages} ({ledgerEntries.length} events)
+              {ledgerFilters.mappingId !== "all" ? (
+                <>
+                  {" "}
+                  · Net stock movement: <span className="font-semibold text-slate-800">{ledgerNetMovement >= 0 ? "+" : ""}{ledgerNetMovement}</span>
+                </>
+              ) : null}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setLedgerOffset((prev) => Math.max(0, prev - LEDGER_PAGE_SIZE))}
+                disabled={ledgerCurrentPage <= 1}
+                className="rounded-md border border-slate-300 px-2 py-1 disabled:opacity-50"
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                onClick={() => setLedgerOffset((prev) => prev + LEDGER_PAGE_SIZE)}
+                disabled={ledgerCurrentPage >= ledgerTotalPages}
                 className="rounded-md border border-slate-300 px-2 py-1 disabled:opacity-50"
               >
                 Next

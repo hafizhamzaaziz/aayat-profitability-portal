@@ -55,3 +55,14 @@ button:enabled:hover {
   transform: translateY(-1px);
   box-shadow: 0 6px 16px rgba(58, 15, 69, 0.12);
 }
+
+/* Hide number input spinner arrows (up/down steppers) */
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}

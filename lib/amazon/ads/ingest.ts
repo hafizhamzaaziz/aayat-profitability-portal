@@ -96,6 +96,32 @@ function monthBucket(dateIso: string): { key: string; start: string; end: string
   return { key: `${y}-${m}`, start, end };
 }
 
+/**
+ * Split [fromIso, toIso] into windows no longer than `maxDays` calendar days.
+ * The Ads Reports v3 API rejects any single report request whose date range
+ * exceeds 31 days, so a 90-day backfill must be requested as 3+ chunks and
+ * the downloaded rows merged. Windows are inclusive on both ends and never
+ * overlap (each chunk starts the day after the previous chunk ends).
+ */
+function chunkDateRange(fromIso: string, toIso: string, maxDays = 31): Array<[string, string]> {
+  const chunks: Array<[string, string]> = [];
+  const dayMs = 24 * 60 * 60 * 1000;
+  let cursor = new Date(`${fromIso}T00:00:00Z`).getTime();
+  const end = new Date(`${toIso}T00:00:00Z`).getTime();
+  if (Number.isNaN(cursor) || Number.isNaN(end) || cursor > end) return chunks;
+  while (cursor <= end) {
+    // -1 because the window is inclusive: a 31-day window spans the start day
+    // plus 30 more days.
+    const chunkEnd = Math.min(cursor + (maxDays - 1) * dayMs, end);
+    chunks.push([
+      new Date(cursor).toISOString().slice(0, 10),
+      new Date(chunkEnd).toISOString().slice(0, 10),
+    ]);
+    cursor = chunkEnd + dayMs;
+  }
+  return chunks;
+}
+
 type MonthlySpend = {
   start: string;
   end: string;
@@ -520,26 +546,67 @@ export async function syncAmazonAdsData(input: {
     ? new Set(options.countryCodes.map((c) => c.toUpperCase()))
     : null;
 
-  // 1. Pull rows from every relevant profile.
+  // 1. Pull rows from every relevant profile. The Ads Reports v3 API caps
+  //    each report request at 31 days, so split the requested window into
+  //    ≤31-day chunks. With up to 9 profiles × 3 chunks = 27 reports, polling
+  //    each one sequentially (30–90s of server-side generation apiece) would
+  //    blow past the 300s function budget. So we use two phases:
+  //      Phase A — fire off every report request (fast POSTs); Amazon
+  //                generates them concurrently on their side.
+  //      Phase B — poll + download them all in parallel.
+  const windows = chunkDateRange(options.from, options.to, 31);
   const allRows: SpAdvertisedProductRow[] = [];
   const profilesSynced: AdsSyncResult["profilesSynced"] = [];
+
+  type PendingReport = {
+    profileId: number;
+    countryCode: string;
+    startDate: string;
+    endDate: string;
+    reportId: string;
+  };
+
+  // Phase A — request all reports.
+  const pending: PendingReport[] = [];
+  const rowsByProfile = new Map<string, number>();
   for (const [countryCode, profileId] of Object.entries(profileIds)) {
     if (wantedCountries && !wantedCountries.has(countryCode.toUpperCase())) continue;
-    try {
-      const { reportId } = await client.requestSpAdvertisedProductReport({
-        profileId,
-        startDate: options.from,
-        endDate: options.to,
-      });
-      const url = await client.waitForReport(profileId, reportId);
-      const rows = await client.downloadReport(url);
-      allRows.push(...rows);
-      profilesSynced.push({ profileId, countryCode, rowsDownloaded: rows.length });
-    } catch (err) {
-      warnings.push(
-        `Profile ${countryCode} (${profileId}) failed: ${err instanceof Error ? err.message : String(err)}`
-      );
+    rowsByProfile.set(countryCode, 0);
+    for (const [startDate, endDate] of windows) {
+      try {
+        const { reportId } = await client.requestSpAdvertisedProductReport({
+          profileId,
+          startDate,
+          endDate,
+        });
+        pending.push({ profileId, countryCode, startDate, endDate, reportId });
+      } catch (err) {
+        warnings.push(
+          `Profile ${countryCode} (${profileId}) ${startDate}..${endDate} request failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
     }
+  }
+
+  // Phase B — poll + download every pending report in parallel.
+  await Promise.all(
+    pending.map(async (p) => {
+      try {
+        const url = await client.waitForReport(p.profileId, p.reportId);
+        const rows = await client.downloadReport(url);
+        allRows.push(...rows);
+        rowsByProfile.set(p.countryCode, (rowsByProfile.get(p.countryCode) || 0) + rows.length);
+      } catch (err) {
+        warnings.push(
+          `Profile ${p.countryCode} (${p.profileId}) ${p.startDate}..${p.endDate} download failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    })
+  );
+
+  for (const [countryCode, count] of rowsByProfile) {
+    const profileId = profileIds[countryCode];
+    profilesSynced.push({ profileId, countryCode, rowsDownloaded: count });
   }
 
   if (profilesSynced.length === 0) {

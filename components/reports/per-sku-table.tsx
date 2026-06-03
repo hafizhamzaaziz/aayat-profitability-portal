@@ -308,7 +308,7 @@ export default function PerSkuTable({ rows, currency, detailed, csvFilename }: P
                   <td className="px-2 py-2">
                     <div className="font-mono text-xs font-semibold text-slate-800">{row.sku}</div>
                     {row.description ? (
-                      <div className="line-clamp-1 max-w-[280px] text-[11px] text-slate-500">
+                      <div className="line-clamp-1 max-w-[280px] text-[11px] text-slate-500" title={row.description}>
                         {row.description}
                       </div>
                     ) : null}
