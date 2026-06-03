@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import type { UserRole } from "@/lib/types/auth";
@@ -1195,37 +1195,136 @@ function AmazonAdsConnectionPanel({
     skuCount: number;
     totalSpendExvat: number;
   };
-  type AdsSyncResult =
-    | {
-        ok: true;
-        range: { from: string; to: string };
-        profilesSynced: Array<{ profileId: number; countryCode: string; rowsDownloaded: number }>;
-        reports: AdsSyncReport[];
-        warnings: string[];
-      }
-    | { ok: false; error: string };
+  type SyncPhase = "idle" | "starting" | "collecting" | "done" | "error";
+  type SyncState = {
+    phase: SyncPhase;
+    range: { from: string; to: string } | null;
+    jobsRequested: number;
+    pending: number;
+    completed: number;
+    failed: number;
+    reports: AdsSyncReport[];
+    warnings: string[];
+    error: string | null;
+  };
+  const emptySyncState: SyncState = {
+    phase: "idle",
+    range: null,
+    jobsRequested: 0,
+    pending: 0,
+    completed: 0,
+    failed: 0,
+    reports: [],
+    warnings: [],
+    error: null,
+  };
   const today = new Date().toISOString().slice(0, 10);
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const [syncFrom, setSyncFrom] = useState(ninetyDaysAgo);
   const [syncTo, setSyncTo] = useState(today);
-  const [syncing, setSyncing] = useState(false);
-  const [syncResult, setSyncResult] = useState<AdsSyncResult | null>(null);
+  const [sync, setSync] = useState<SyncState>(emptySyncState);
+  const syncing = sync.phase === "starting" || sync.phase === "collecting";
+  // Cancellation flag so polling stops if the component unmounts / modal closes.
+  const syncCancelled = useRef(false);
+  useEffect(() => {
+    return () => {
+      syncCancelled.current = true;
+    };
+  }, []);
 
   const runSync = async () => {
-    setSyncing(true);
-    setSyncResult(null);
+    syncCancelled.current = false;
+    setSync({ ...emptySyncState, phase: "starting" });
     try {
+      // Phase 1 — request the reports (returns fast).
       const res = await fetch("/api/amazon/ads/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ accountId, from: syncFrom, to: syncTo }),
       });
-      const json = (await res.json()) as AdsSyncResult;
-      setSyncResult(json);
+      const start = (await res.json()) as
+        | { ok: true; batchId: string; jobsRequested: number; range: { from: string; to: string }; warnings: string[] }
+        | { ok: false; error: string };
+      if (!start.ok) {
+        setSync({ ...emptySyncState, phase: "error", error: start.error });
+        return;
+      }
+      if (start.jobsRequested === 0) {
+        setSync({
+          ...emptySyncState,
+          phase: "done",
+          range: start.range,
+          warnings: start.warnings.length ? start.warnings : ["No reports could be requested for this range."],
+        });
+        return;
+      }
+
+      const reports: AdsSyncReport[] = [];
+      const warnings = [...start.warnings];
+      setSync({
+        ...emptySyncState,
+        phase: "collecting",
+        range: start.range,
+        jobsRequested: start.jobsRequested,
+        pending: start.jobsRequested,
+        warnings,
+      });
+
+      // Phase 2 — poll the collect endpoint until no jobs remain pending.
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      const maxAttempts = 80; // ~13 min at 10s spacing — generous headroom.
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        if (syncCancelled.current) return;
+        await sleep(10000);
+        if (syncCancelled.current) return;
+        const cres = await fetch("/api/amazon/ads/collect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accountId }),
+        });
+        const c = (await cres.json()) as
+          | {
+              ok: true;
+              pending: number;
+              completed: number;
+              failed: number;
+              finalized: boolean;
+              reports: AdsSyncReport[];
+              warnings: string[];
+            }
+          | { ok: false; error: string };
+        if (!c.ok) {
+          // A transient collect error shouldn't abort — keep polling, but
+          // surface it.
+          warnings.push(`Collect attempt failed: ${c.error}`);
+          setSync((s) => ({ ...s, warnings: [...warnings] }));
+          continue;
+        }
+        for (const r of c.reports) {
+          if (!reports.some((x) => x.reportId === r.reportId)) reports.push(r);
+        }
+        for (const w of c.warnings) if (!warnings.includes(w)) warnings.push(w);
+        setSync((s) => ({
+          ...s,
+          phase: c.pending > 0 ? "collecting" : "done",
+          pending: c.pending,
+          completed: s.completed + c.completed,
+          failed: s.failed + c.failed,
+          reports: [...reports],
+          warnings: [...warnings],
+        }));
+        if (c.pending === 0) return;
+      }
+      setSync((s) => ({
+        ...s,
+        phase: "done",
+        warnings: [
+          ...s.warnings,
+          "Still collecting in the background — Amazon hasn't finished generating all reports. They'll be ingested automatically; re-open this panel later to confirm.",
+        ],
+      }));
     } catch (err) {
-      setSyncResult({ ok: false, error: err instanceof Error ? err.message : "Network error." });
-    } finally {
-      setSyncing(false);
+      setSync((s) => ({ ...s, phase: "error", error: err instanceof Error ? err.message : "Network error." }));
     }
   };
 
@@ -1431,51 +1530,83 @@ function AmazonAdsConnectionPanel({
               disabled={syncing || !syncFrom || !syncTo || syncFrom > syncTo}
               className="rounded-lg bg-[#FF9900] px-4 py-2 text-sm font-semibold text-black disabled:opacity-60"
             >
-              {syncing ? "Syncing… (1–3 min)" : "Sync ads from Amazon"}
+              {sync.phase === "starting"
+                ? "Requesting reports…"
+                : sync.phase === "collecting"
+                  ? "Collecting…"
+                  : "Sync ads from Amazon"}
             </button>
           </div>
-          {syncResult ? (
-            syncResult.ok ? (
-              <div className="mt-3 space-y-1 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
-                <div>
-                  <strong>✓ Sync complete.</strong>{" "}
-                  {syncResult.profilesSynced
-                    .map((p) => `${p.countryCode} (${p.rowsDownloaded} rows)`)
-                    .join(", ") || "no profiles returned data"}
-                  {" "}({syncResult.range.from} → {syncResult.range.to})
+          <p className="mt-1 text-[11px] text-slate-400">
+            Amazon generates ad reports asynchronously and may take several minutes. You can leave this
+            panel — collection continues automatically in the background.
+          </p>
+          {sync.phase === "collecting" ? (
+            <div className="mt-3 space-y-1 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              <div className="flex items-center gap-2">
+                <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-amber-400 border-t-transparent" />
+                <strong>Collecting reports from Amazon…</strong>
+              </div>
+              <div>
+                {sync.jobsRequested - sync.pending} of {sync.jobsRequested} reports ready
+                {sync.failed > 0 ? ` · ${sync.failed} failed` : ""}
+                {sync.range ? ` (${sync.range.from} → ${sync.range.to})` : ""}
+              </div>
+              {sync.reports.length > 0 ? (
+                <ul className="ml-4 list-disc space-y-0.5">
+                  {sync.reports.map((r) => (
+                    <li key={r.reportId}>
+                      <strong>{r.periodStart}</strong> → {r.periodEnd}: £
+                      {r.totalSpendExvat.toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}{" "}
+                      ex-VAT ingested
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : sync.phase === "done" ? (
+            <div className="mt-3 space-y-1 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+              <div>
+                <strong>✓ Sync complete.</strong>{" "}
+                {sync.jobsRequested > 0
+                  ? `${sync.jobsRequested - sync.pending} of ${sync.jobsRequested} reports collected`
+                  : ""}
+                {sync.range ? ` (${sync.range.from} → ${sync.range.to})` : ""}
+              </div>
+              {sync.reports.length > 0 ? (
+                <ul className="ml-4 list-disc space-y-0.5">
+                  {sync.reports.map((r) => (
+                    <li key={r.reportId}>
+                      <strong>{r.periodStart}</strong> → {r.periodEnd}: {r.skuCount.toLocaleString()} SKU
+                      {r.skuCount === 1 ? "" : "s"}, £
+                      {r.totalSpendExvat.toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                      {" ex-VAT"}
+                      {r.reportCreated ? " · new report created" : ""}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div>No ad spend found in this date range.</div>
+              )}
+              {sync.warnings.length > 0 ? (
+                <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-amber-800">
+                  {sync.warnings.map((w, i) => (
+                    <div key={i}>• {w}</div>
+                  ))}
                 </div>
-                {syncResult.reports.length > 0 ? (
-                  <ul className="ml-4 list-disc space-y-0.5">
-                    {syncResult.reports.map((r) => (
-                      <li key={r.reportId}>
-                        <strong>{r.periodStart}</strong> → {r.periodEnd}: {r.skuCount.toLocaleString()} SKU
-                        {r.skuCount === 1 ? "" : "s"}, £
-                        {r.totalSpendExvat.toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
-                        {" ex-VAT"}
-                        {r.reportCreated ? " · new report created" : ""}
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div>No ad spend found in this date range.</div>
-                )}
-                {syncResult.warnings.length > 0 ? (
-                  <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-amber-800">
-                    {syncResult.warnings.map((w, i) => (
-                      <div key={i}>• {w}</div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-800">
-                <strong>✗ Sync failed.</strong>
-                <div className="mt-1 break-all font-mono">{syncResult.error}</div>
-              </div>
-            )
+              ) : null}
+            </div>
+          ) : sync.phase === "error" ? (
+            <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-800">
+              <strong>✗ Sync failed.</strong>
+              <div className="mt-1 break-all font-mono">{sync.error}</div>
+            </div>
           ) : null}
         </div>
       ) : null}

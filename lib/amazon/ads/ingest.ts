@@ -61,18 +61,6 @@ export type AdsSyncReportResult = {
   totalSpendExvat: number;
 };
 
-export type AdsSyncResult = {
-  ok: true;
-  range: { from: string; to: string };
-  profilesSynced: Array<{
-    profileId: number;
-    countryCode: string;
-    rowsDownloaded: number;
-  }>;
-  reports: AdsSyncReportResult[];
-  warnings: string[];
-};
-
 const AD_INSERT_CHUNK = 400;
 
 // ---------------------------------------------------------------------------
@@ -129,38 +117,6 @@ type MonthlySpend = {
   blankSkuSpend: number;
   totalSpend: number;
 };
-
-/**
- * Bucket the raw Ads API rows into months, summing spend per (month, SKU).
- * SKUs are lower-cased to align with the per-SKU breakdown table.
- */
-function aggregateRows(rows: SpAdvertisedProductRow[]): Map<string, MonthlySpend> {
-  const out = new Map<string, MonthlySpend>();
-  for (const r of rows) {
-    if (!r.date) continue;
-    const bucket = monthBucket(r.date);
-    if (!out.has(bucket.key)) {
-      out.set(bucket.key, {
-        start: bucket.start,
-        end: bucket.end,
-        spendBySku: {},
-        blankSkuSpend: 0,
-        totalSpend: 0,
-      });
-    }
-    const entry = out.get(bucket.key)!;
-    const cost = Number(r.cost) || 0;
-    if (cost === 0) continue;
-    entry.totalSpend += cost;
-    const skuKey = normalizeSku(r.advertisedSku);
-    if (!skuKey) {
-      entry.blankSkuSpend += cost;
-    } else {
-      entry.spendBySku[skuKey] = (entry.spendBySku[skuKey] || 0) + cost;
-    }
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // Per-bucket ingest
@@ -509,16 +465,47 @@ async function recomputeReportTotals(
 }
 
 // ---------------------------------------------------------------------------
-// Top-level entry point
+// Async job model
+//
+// Ads Reports v3 generation is asynchronous and slow, and Amazon throttles
+// concurrent generation — submitting ~27 reports at once leaves most queued
+// for minutes, so no single function invocation can poll them all to
+// completion. We therefore split the work:
+//
+//   startAdsSync     — request a report per (profile, <=31-day window) and
+//                      persist one ads_report_jobs row per report. Fast.
+//   collectAdsSync   — poll each 'requested' job's report; download + per-job
+//                      aggregate completed ones; mark 'completed'/'failed'.
+//                      Called repeatedly (UI auto-poll + cron). When a batch
+//                      has no 'requested' jobs left, finalize it.
+//   finalizeAdsSync  — merge all completed jobs' aggregates by month and fold
+//                      them into report_ad_meta / report_ad_spend, recompute.
 // ---------------------------------------------------------------------------
 
-export async function syncAmazonAdsData(input: {
+type JobAggregate = Record<
+  string, // month key "YYYY-MM"
+  { start: string; end: string; spendBySku: Record<string, number>; blankSkuSpend: number; totalSpend: number }
+>;
+
+export type StartAdsSyncResult = {
+  ok: true;
+  batchId: string;
+  jobsRequested: number;
+  range: { from: string; to: string };
+  warnings: string[];
+};
+
+/**
+ * Phase 1: request all reports and persist them as jobs. Returns quickly so
+ * the request never risks the function timeout. Collection happens later.
+ */
+export async function startAdsSync(input: {
   supabase: SupabaseClient;
   accountId: string;
   vatRatePct: number;
   cogsVatReclaimPct: number;
   options: AdsSyncOptions;
-}): Promise<AdsSyncResult> {
+}): Promise<StartAdsSyncResult> {
   const { supabase, accountId, vatRatePct, cogsVatReclaimPct, options } = input;
   const warnings: string[] = [];
 
@@ -542,36 +529,20 @@ export async function syncAmazonAdsData(input: {
     );
   }
 
-  const wantedCountries = options.countryCodes && options.countryCodes.length > 0
-    ? new Set(options.countryCodes.map((c) => c.toUpperCase()))
-    : null;
+  const wantedCountries =
+    options.countryCodes && options.countryCodes.length > 0
+      ? new Set(options.countryCodes.map((c) => c.toUpperCase()))
+      : null;
 
-  // 1. Pull rows from every relevant profile. The Ads Reports v3 API caps
-  //    each report request at 31 days, so split the requested window into
-  //    ≤31-day chunks. With up to 9 profiles × 3 chunks = 27 reports, polling
-  //    each one sequentially (30–90s of server-side generation apiece) would
-  //    blow past the 300s function budget. So we use two phases:
-  //      Phase A — fire off every report request (fast POSTs); Amazon
-  //                generates them concurrently on their side.
-  //      Phase B — poll + download them all in parallel.
   const windows = chunkDateRange(options.from, options.to, 31);
-  const allRows: SpAdvertisedProductRow[] = [];
-  const profilesSynced: AdsSyncResult["profilesSynced"] = [];
+  const batchId =
+    typeof globalThis.crypto !== "undefined" && "randomUUID" in globalThis.crypto
+      ? globalThis.crypto.randomUUID()
+      : `${accountId}-${Date.now()}`;
 
-  type PendingReport = {
-    profileId: number;
-    countryCode: string;
-    startDate: string;
-    endDate: string;
-    reportId: string;
-  };
-
-  // Phase A — request all reports.
-  const pending: PendingReport[] = [];
-  const rowsByProfile = new Map<string, number>();
+  const jobRows: Array<Record<string, unknown>> = [];
   for (const [countryCode, profileId] of Object.entries(profileIds)) {
     if (wantedCountries && !wantedCountries.has(countryCode.toUpperCase())) continue;
-    rowsByProfile.set(countryCode, 0);
     for (const [startDate, endDate] of windows) {
       try {
         const { reportId } = await client.requestSpAdvertisedProductReport({
@@ -579,8 +550,34 @@ export async function syncAmazonAdsData(input: {
           startDate,
           endDate,
         });
-        pending.push({ profileId, countryCode, startDate, endDate, reportId });
+        jobRows.push({
+          account_id: accountId,
+          batch_id: batchId,
+          profile_id: String(profileId),
+          country_code: countryCode,
+          start_date: startDate,
+          end_date: endDate,
+          amazon_report_id: reportId,
+          status: "requested",
+          vat_rate_pct: vatRatePct,
+          cogs_vat_reclaim_pct: cogsVatReclaimPct,
+        });
       } catch (err) {
+        // A request can be rejected (e.g. transient 425 duplicate / throttle).
+        // Record it as a failed job so the batch accounting stays correct.
+        jobRows.push({
+          account_id: accountId,
+          batch_id: batchId,
+          profile_id: String(profileId),
+          country_code: countryCode,
+          start_date: startDate,
+          end_date: endDate,
+          amazon_report_id: null,
+          status: "failed",
+          error: err instanceof Error ? err.message : String(err),
+          vat_rate_pct: vatRatePct,
+          cogs_vat_reclaim_pct: cogsVatReclaimPct,
+        });
         warnings.push(
           `Profile ${countryCode} (${profileId}) ${startDate}..${endDate} request failed: ${err instanceof Error ? err.message : String(err)}`
         );
@@ -588,69 +585,245 @@ export async function syncAmazonAdsData(input: {
     }
   }
 
-  // Phase B — poll + download every pending report in parallel.
+  if (jobRows.length > 0) {
+    const { error: insErr } = await supabase.from("ads_report_jobs").insert(jobRows);
+    if (insErr) throw insErr;
+  }
+
+  const requested = jobRows.filter((j) => j.status === "requested").length;
+  return {
+    ok: true,
+    batchId,
+    jobsRequested: requested,
+    range: { from: options.from, to: options.to },
+    warnings,
+  };
+}
+
+export type CollectAdsSyncResult = {
+  ok: true;
+  batchId: string | null;
+  pending: number;
+  completed: number;
+  failed: number;
+  finalized: boolean;
+  reports: AdsSyncReportResult[];
+  warnings: string[];
+};
+
+/**
+ * Aggregate one downloaded report's rows by (month, SKU). Stored on the job
+ * row as jsonb so finalize can merge across jobs without re-downloading.
+ */
+function aggregateRowsToJson(rows: SpAdvertisedProductRow[]): JobAggregate {
+  const out: JobAggregate = {};
+  for (const r of rows) {
+    if (!r.date) continue;
+    const bucket = monthBucket(r.date);
+    if (!out[bucket.key]) {
+      out[bucket.key] = { start: bucket.start, end: bucket.end, spendBySku: {}, blankSkuSpend: 0, totalSpend: 0 };
+    }
+    const entry = out[bucket.key];
+    const cost = Number(r.cost) || 0;
+    if (cost === 0) continue;
+    entry.totalSpend += cost;
+    const skuKey = normalizeSku(r.advertisedSku);
+    if (!skuKey) entry.blankSkuSpend += cost;
+    else entry.spendBySku[skuKey] = (entry.spendBySku[skuKey] || 0) + cost;
+  }
+  return out;
+}
+
+/**
+ * Phase 2: poll outstanding jobs, download completed reports, and once a batch
+ * is fully resolved, finalize it. Designed to be called repeatedly and to stay
+ * well within the function budget by capping how many reports it polls/downloads
+ * per invocation.
+ *
+ * @param accountId  optional — restrict to one account (UI auto-poll). When
+ *                   omitted (cron), processes the oldest pending jobs globally.
+ */
+export async function collectAdsSync(input: {
+  supabase: SupabaseClient;
+  accountId?: string;
+  maxToProcess?: number;
+}): Promise<CollectAdsSyncResult> {
+  const { supabase, accountId } = input;
+  const maxToProcess = input.maxToProcess ?? 30;
+  const warnings: string[] = [];
+
+  // Grab outstanding 'requested' jobs (optionally scoped to one account).
+  let query = supabase
+    .from("ads_report_jobs")
+    .select("*")
+    .eq("status", "requested")
+    .order("requested_at", { ascending: true })
+    .limit(maxToProcess);
+  if (accountId) query = query.eq("account_id", accountId);
+  const { data: jobs, error } = await query;
+  if (error) throw error;
+
+  const batchId = accountId
+    ? (jobs && jobs[0]?.batch_id) || null
+    : (jobs && jobs[0]?.batch_id) || null;
+
+  let completed = 0;
+  let failed = 0;
+
+  // Poll + download each job. We need a client per account; cache by account.
+  const clientCache = new Map<string, Awaited<ReturnType<typeof loadAdsApiClient>>["client"]>();
+  const getClient = async (acct: string) => {
+    if (!clientCache.has(acct)) {
+      const loaded = await loadAdsApiClient(acct);
+      clientCache.set(acct, loaded.client);
+    }
+    return clientCache.get(acct)!;
+  };
+
   await Promise.all(
-    pending.map(async (p) => {
+    (jobs || []).map(async (job) => {
       try {
-        const url = await client.waitForReport(p.profileId, p.reportId);
-        const rows = await client.downloadReport(url);
-        allRows.push(...rows);
-        rowsByProfile.set(p.countryCode, (rowsByProfile.get(p.countryCode) || 0) + rows.length);
+        const client = await getClient(job.account_id as string);
+        const status = await client.getReport(Number(job.profile_id), job.amazon_report_id as string);
+        if (status.status === "COMPLETED" && status.url) {
+          const rows = await client.downloadReport(status.url);
+          const aggregate = aggregateRowsToJson(rows);
+          await supabase
+            .from("ads_report_jobs")
+            .update({
+              status: "completed",
+              rows_downloaded: rows.length,
+              aggregate,
+              error: null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", job.id);
+          completed += 1;
+        } else if (status.status === "FAILURE") {
+          await supabase
+            .from("ads_report_jobs")
+            .update({
+              status: "failed",
+              error: status.failureReason || "Amazon reported FAILURE",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", job.id);
+          failed += 1;
+          warnings.push(`${job.country_code} ${job.start_date}..${job.end_date}: ${status.failureReason || "report failed"}`);
+        }
+        // else PENDING/PROCESSING — leave as 'requested' for the next poll.
       } catch (err) {
         warnings.push(
-          `Profile ${p.countryCode} (${p.profileId}) ${p.startDate}..${p.endDate} download failed: ${err instanceof Error ? err.message : String(err)}`
+          `${job.country_code} ${job.start_date}..${job.end_date}: poll error ${err instanceof Error ? err.message : String(err)}`
         );
       }
     })
   );
 
-  for (const [countryCode, count] of rowsByProfile) {
-    const profileId = profileIds[countryCode];
-    profilesSynced.push({ profileId, countryCode, rowsDownloaded: count });
+  // Finalize every batch that now has no 'requested' jobs left but still has
+  // 'completed' (not-yet-ingested) jobs. We look across all batches touched —
+  // critical for the cron path, which can process jobs from several batches in
+  // one tick.
+  const { data: completedJobs } = await supabase
+    .from("ads_report_jobs")
+    .select("batch_id")
+    .eq("status", "completed");
+  const candidateBatches = Array.from(
+    new Set(((completedJobs || []) as Array<{ batch_id: string }>).map((j) => j.batch_id))
+  );
+
+  let finalized = false;
+  let reports: AdsSyncReportResult[] = [];
+  for (const candidate of candidateBatches) {
+    const { count: pendingInBatch } = await supabase
+      .from("ads_report_jobs")
+      .select("id", { count: "exact", head: true })
+      .eq("batch_id", candidate)
+      .eq("status", "requested");
+    if ((pendingInBatch ?? 0) === 0) {
+      const result = await finalizeAdsSync({ supabase, batchId: candidate });
+      finalized = true;
+      reports = reports.concat(result.reports);
+      warnings.push(...result.warnings);
+    }
   }
 
-  if (profilesSynced.length === 0) {
-    await updateAdsSyncStatus(accountId, {
-      ok: false,
-      error: warnings.join(" | ") || "All profiles failed during sync.",
-    });
-    return {
-      ok: true,
-      range: { from: options.from, to: options.to },
-      profilesSynced: [],
-      reports: [],
-      warnings: warnings.length > 0 ? warnings : ["No profiles returned any rows."],
-    };
+  // Pending count for the polling scope (so the UI knows when to stop).
+  let pendingQuery = supabase
+    .from("ads_report_jobs")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "requested");
+  if (accountId) pendingQuery = pendingQuery.eq("account_id", accountId);
+  else if (batchId) pendingQuery = pendingQuery.eq("batch_id", batchId);
+  const { count: stillPending } = await pendingQuery;
+
+  return {
+    ok: true,
+    batchId,
+    pending: stillPending ?? 0,
+    completed,
+    failed,
+    finalized,
+    reports,
+    warnings,
+  };
+}
+
+/**
+ * Phase 3: merge all 'completed' jobs in a batch by month and fold the spend
+ * into report_ad_meta / report_ad_spend, recomputing each affected report.
+ * Marks the batch's jobs 'ingested' so it isn't reprocessed.
+ */
+export async function finalizeAdsSync(input: {
+  supabase: SupabaseClient;
+  batchId: string;
+}): Promise<{ reports: AdsSyncReportResult[]; warnings: string[] }> {
+  const { supabase, batchId } = input;
+  const warnings: string[] = [];
+
+  const { data: jobs, error } = await supabase
+    .from("ads_report_jobs")
+    .select("*")
+    .eq("batch_id", batchId)
+    .eq("status", "completed");
+  if (error) throw error;
+  if (!jobs || jobs.length === 0) {
+    return { reports: [], warnings: ["No completed jobs to finalize."] };
   }
 
-  // 2. Bucket rows by month + SKU.
-  const monthly = aggregateRows(allRows);
-  if (monthly.size === 0) {
-    await updateAdsSyncStatus(accountId, { ok: true });
-    return {
-      ok: true,
-      range: { from: options.from, to: options.to },
-      profilesSynced,
-      reports: [],
-      warnings: [...warnings, "No ad spend found in the requested date range."],
-    };
+  const accountId = jobs[0].account_id as string;
+  const vatRatePct = Number(jobs[0].vat_rate_pct ?? 20);
+  const cogsVatReclaimPct = Number(jobs[0].cogs_vat_reclaim_pct ?? 100);
+
+  // Merge all jobs' per-month aggregates into one map.
+  const merged = new Map<string, MonthlySpend>();
+  for (const job of jobs) {
+    const agg = (job.aggregate || {}) as JobAggregate;
+    for (const [key, m] of Object.entries(agg)) {
+      if (!merged.has(key)) {
+        merged.set(key, { start: m.start, end: m.end, spendBySku: {}, blankSkuSpend: 0, totalSpend: 0 });
+      }
+      const target = merged.get(key)!;
+      target.totalSpend += m.totalSpend;
+      target.blankSkuSpend += m.blankSkuSpend;
+      for (const [sku, spend] of Object.entries(m.spendBySku)) {
+        target.spendBySku[sku] = (target.spendBySku[sku] || 0) + spend;
+      }
+    }
   }
 
-  // 3. For each month: find/create the report, replace ad data, recompute.
-  const reportResults: AdsSyncReportResult[] = [];
-  for (const [, bucket] of monthly) {
+  const reports: AdsSyncReportResult[] = [];
+  for (const [, bucket] of merged) {
     const report = await findOrCreateReport(supabase, accountId, bucket.start, bucket.end);
 
-    // Build the matched-SKU set from the report's current per-SKU breakdown
-    // so we can flag matched vs unmatched correctly.
     const { data: skuRows } = await supabase
       .from("report_sku_breakdowns")
       .select("sku")
       .eq("report_id", report.id);
     const matchedSkuSet = new Set<string>((skuRows || []).map((r) => normalizeSku(r.sku)));
 
-    const sourceFilename = `amazon-ads-api:${options.from}..${options.to}`;
-    const { matched, unmatched } = await replaceAdData(
+    const sourceFilename = `amazon-ads-api:${bucket.start}..${bucket.end}`;
+    const { unmatched } = await replaceAdData(
       supabase,
       report.id,
       accountId,
@@ -675,7 +848,7 @@ export async function syncAmazonAdsData(input: {
       );
     }
 
-    reportResults.push({
+    reports.push({
       reportId: report.id,
       periodStart: bucket.start,
       periodEnd: bucket.end,
@@ -689,15 +862,15 @@ export async function syncAmazonAdsData(input: {
         `${bucket.start} → ${bucket.end}: ${unmatched} SKU(s) had ad spend but no matching sale — check SKU mapping.`
       );
     }
-    void matched;
   }
 
+  // Mark all this batch's jobs ingested so it isn't reprocessed.
+  await supabase
+    .from("ads_report_jobs")
+    .update({ status: "ingested", updated_at: new Date().toISOString() })
+    .eq("batch_id", batchId)
+    .eq("status", "completed");
+
   await updateAdsSyncStatus(accountId, { ok: true });
-  return {
-    ok: true,
-    range: { from: options.from, to: options.to },
-    profilesSynced,
-    reports: reportResults,
-    warnings,
-  };
+  return { reports, warnings };
 }

@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { syncAmazonAdsData } from "@/lib/amazon/ads/ingest";
+import { startAdsSync } from "@/lib/amazon/ads/ingest";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,7 +78,10 @@ export async function POST(request: NextRequest) {
   const cogsVatReclaimPct = Number(account.cogs_vat_reclaim_pct ?? 100);
 
   try {
-    const result = await syncAmazonAdsData({
+    // Requests the reports and persists them as jobs — returns fast. The
+    // /api/amazon/ads/collect endpoint (auto-polled by the UI + a cron)
+    // downloads and ingests them as Amazon finishes generating each one.
+    const result = await startAdsSync({
       supabase: admin,
       accountId,
       vatRatePct,

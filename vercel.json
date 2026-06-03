@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/amazon/ads/collect",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}

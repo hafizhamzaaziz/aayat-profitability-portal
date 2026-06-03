@@ -1210,6 +1210,50 @@ alter table public.report_ad_spend add column if not exists goods_name text;
 alter table public.report_ad_spend add column if not exists source_kind text;
 -- source_kind values: 'amazon_sku' (default for Amazon) | 'temu_goods' (Temu)
 
+-- ---------------------------------------------------------------------------
+-- 13b) Amazon Ads-API async report jobs.
+--   Ads Reports v3 generation is asynchronous and can take several minutes,
+--   especially when many reports are requested at once (Amazon throttles
+--   concurrent generation). We therefore decouple requesting from collecting:
+--     1. /sync requests a report per (profile, <=31-day window), inserting one
+--        job row per report with status='requested' and the amazon_report_id.
+--     2. /collect (auto-polled from the UI + a Vercel cron) polls each report,
+--        downloads completed ones, pre-aggregates the rows by (month, SKU) into
+--        `aggregate`, and flips status to 'completed'/'failed'.
+--     3. When a batch has no more 'requested'/'completed-not-ingested' jobs,
+--        the aggregates are merged by month and folded into report_ad_meta /
+--        report_ad_spend, then jobs flip to 'ingested'.
+--   `aggregate` jsonb shape: { "2026-04": { spendBySku: {sku: n}, blankSkuSpend: n, totalSpend: n } }
+-- ---------------------------------------------------------------------------
+create table if not exists public.ads_report_jobs (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  batch_id uuid not null,
+  profile_id text not null,
+  country_code text not null,
+  start_date date not null,
+  end_date date not null,
+  amazon_report_id text,
+  status text not null default 'requested', -- requested | completed | failed | ingested
+  rows_downloaded integer not null default 0,
+  aggregate jsonb,
+  error text,
+  vat_rate_pct numeric(6,2) not null default 20,
+  cogs_vat_reclaim_pct numeric(6,2) not null default 100,
+  requested_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists ads_report_jobs_batch_idx on public.ads_report_jobs(batch_id);
+create index if not exists ads_report_jobs_status_idx on public.ads_report_jobs(status);
+create index if not exists ads_report_jobs_account_idx on public.ads_report_jobs(account_id);
+alter table public.ads_report_jobs enable row level security;
+drop policy if exists "ads_report_jobs_select_staff" on public.ads_report_jobs;
+create policy "ads_report_jobs_select_staff" on public.ads_report_jobs for select using (
+  exists (select 1 from public.users u where u.id = auth.uid() and u.role in ('admin','team'))
+);
+-- Writes happen exclusively via the service-role admin client (sync/collect
+-- orchestrators), which bypasses RLS, so no insert/update policy is needed.
+
 -- Indexes for the new tables
 create index if not exists report_sku_breakdowns_report_idx on public.report_sku_breakdowns(report_id);
 create index if not exists report_sku_breakdowns_account_sku_idx on public.report_sku_breakdowns(account_id, sku);
