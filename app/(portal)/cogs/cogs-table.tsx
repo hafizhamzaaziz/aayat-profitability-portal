@@ -28,6 +28,27 @@ type CogsHistoryRow = {
   created_at: string;
 };
 
+// Per-row editable draft, lifted into the parent so that bulk "Save selected"
+// can persist the in-progress edits for every selected row (not just the row
+// the user last touched).
+type CogsDraft = {
+  productName: string;
+  sku: string;
+  unitCost: string;
+  includesVat: boolean;
+  effectiveFrom: string;
+};
+
+function draftFromRow(row: CogsRow): CogsDraft {
+  return {
+    productName: row.product_name || row.sku,
+    sku: row.sku,
+    unitCost: String(row.unit_cost),
+    includesVat: Boolean(row.includes_vat),
+    effectiveFrom: row.effective_from,
+  };
+}
+
 type Props = {
   accountId: string;
   canEdit: boolean;
@@ -174,6 +195,11 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [mappingByAmazonSku, setMappingByAmazonSku] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
   const [searchActive, setSearchActive] = useState("");
+  // Lifted editable drafts keyed by row id + the set of selected row ids for
+  // bulk actions. Both are kept in sync with the currently loaded `rows`.
+  const [drafts, setDrafts] = useState<Record<string, CogsDraft>>({});
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -253,7 +279,25 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         effective_from: String(row.effective_from || todayIso),
         updated_at: String(row.updated_at),
       }));
-      setRows(normalized as CogsRow[]);
+      const normalizedRows = normalized as CogsRow[];
+      setRows(normalizedRows);
+      // Reset drafts to the freshly loaded values and drop any selected ids that
+      // are no longer present in the visible result set (e.g. after a search,
+      // page change, or delete).
+      const nextDrafts: Record<string, CogsDraft> = {};
+      const visibleIds = new Set<string>();
+      normalizedRows.forEach((row) => {
+        nextDrafts[row.id] = draftFromRow(row);
+        visibleIds.add(row.id);
+      });
+      setDrafts(nextDrafts);
+      setSelectedIds((prev) => {
+        const next = new Set<string>();
+        prev.forEach((id) => {
+          if (visibleIds.has(id)) next.add(id);
+        });
+        return next;
+      });
       setTotalCount(Number(count || (trimmedSearch ? normalized.length : 0)));
     } catch (err) {
       setError(getErrorMessage(err, "Failed to load COGS rows."));
@@ -670,6 +714,119 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     }
   };
 
+  const setDraft = (id: string, patch: Partial<CogsDraft>) => {
+    setDrafts((prev) => ({
+      ...prev,
+      [id]: { ...(prev[id] || draftFromRow(rows.find((r) => r.id === id) as CogsRow)), ...patch },
+    }));
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const allVisibleSelected = rows.length > 0 && rows.every((row) => selectedIds.has(row.id));
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => {
+      if (rows.length > 0 && rows.every((row) => prev.has(row.id))) {
+        // All currently visible rows are selected -> clear only those.
+        const next = new Set(prev);
+        rows.forEach((row) => next.delete(row.id));
+        return next;
+      }
+      const next = new Set(prev);
+      rows.forEach((row) => next.add(row.id));
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const bulkSaveSelected = async () => {
+    const ids = rows.filter((row) => selectedIds.has(row.id)).map((row) => row.id);
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const effectiveDates: string[] = [];
+      // Persist each selected row's edited draft using the same persistence path
+      // as the single-row save, but defer the (expensive) report recalculation
+      // until all rows are written, then recalc once from the earliest date.
+      for (const id of ids) {
+        const row = rows.find((r) => r.id === id);
+        const draft = drafts[id];
+        if (!row || !draft) continue;
+        await applyCogsVersion(
+          {
+            productName: draft.productName,
+            sku: draft.sku,
+            unitCost: Number(draft.unitCost),
+            includesVat: draft.includesVat,
+            effectiveFrom: draft.effectiveFrom,
+          },
+          { skipRecalc: true }
+        );
+        effectiveDates.push(String(draft.effectiveFrom || todayIso));
+      }
+      const earliestEffective = effectiveDates.sort()[0] || todayIso;
+      const touchedReports = await recalculateReportsFromEffectiveDate(createClient(), earliestEffective);
+      setMessage(
+        `Saved ${ids.length} selected SKU${ids.length === 1 ? "" : "s"}.${
+          touchedReports > 0 ? ` Recalculated ${touchedReports} report(s).` : ""
+        }`
+      );
+      await loadRows();
+    } catch (err) {
+      const text = getErrorMessage(err, "Failed to save selected SKU costs.");
+      setError(text);
+      await pushClientNotification({
+        title: "COGS bulk save failed",
+        body: text,
+        level: "error",
+        eventKey: `cogs-bulk-save-fail:${accountId}:${Date.now()}`,
+      });
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const bulkDeleteSelected = async () => {
+    const ids = rows.filter((row) => selectedIds.has(row.id)).map((row) => row.id);
+    if (ids.length === 0) return;
+    if (!window.confirm(`Delete ${ids.length} selected SKU${ids.length === 1 ? "" : "s"}? This cannot be undone.`)) {
+      return;
+    }
+    setBulkBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const supabase = createClient();
+      const { error: deleteError } = await supabase.from("cogs").delete().in("id", ids);
+      if (deleteError) throw deleteError;
+      setMessage(`Deleted ${ids.length} selected SKU${ids.length === 1 ? "" : "s"}.`);
+      clearSelection();
+      await loadRows();
+    } catch (err) {
+      const text = getErrorMessage(err, "Failed to delete selected SKU costs.");
+      setError(text);
+      await pushClientNotification({
+        title: "COGS bulk delete failed",
+        body: text,
+        level: "error",
+        eventKey: `cogs-bulk-delete-fail:${accountId}:${Date.now()}`,
+      });
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const parseUploadFile = async (file: File): Promise<Record<string, unknown>[]> => {
     const lowered = file.name.toLowerCase();
     if (lowered.endsWith(".csv")) {
@@ -1000,10 +1157,55 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         ) : null}
       </div>
 
+      {canEdit && selectedIds.size > 0 ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--md-outline)] bg-[var(--md-primary-container)] px-4 py-3">
+          <span className="text-sm font-semibold text-slate-800">
+            {selectedIds.size} selected
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void bulkSaveSelected()}
+              disabled={bulkBusy}
+              className="rounded-xl bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-[var(--md-on-primary)] disabled:opacity-60"
+            >
+              {bulkBusy ? "Working..." : "Save selected"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void bulkDeleteSelected()}
+              disabled={bulkBusy}
+              className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            >
+              Delete selected
+            </button>
+            <button
+              type="button"
+              onClick={clearSelection}
+              disabled={bulkBusy}
+              className="rounded-xl border border-[var(--md-outline)] bg-white px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60"
+            >
+              Clear selection
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white">
         <table className="min-w-full text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
+              {canEdit ? (
+                <th className="px-4 py-3">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all visible rows"
+                    checked={allVisibleSelected}
+                    onChange={toggleSelectAll}
+                    className="h-4 w-4 cursor-pointer accent-[var(--md-primary)]"
+                  />
+                </th>
+              ) : null}
               <th className="px-4 py-3">Product Name</th>
               <th className="px-4 py-3">SKU</th>
               <th className="px-4 py-3">Mapped</th>
@@ -1017,13 +1219,13 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 8 : 7}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 9 : 7}>
                   Loading COGS...
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 8 : 7}>
+                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? 9 : 7}>
                   No COGS rows found for this account.
                 </td>
               </tr>
@@ -1033,6 +1235,10 @@ export default function CogsTable({ accountId, canEdit }: Props) {
                   key={row.id}
                   row={row}
                   canEdit={canEdit}
+                  selected={selectedIds.has(row.id)}
+                  onToggleSelect={toggleSelect}
+                  draft={drafts[row.id] || draftFromRow(row)}
+                  onDraftChange={setDraft}
                   onSave={updateRow}
                   onDelete={deleteRow}
                   onHistory={loadHistory}
@@ -1141,25 +1347,49 @@ export default function CogsTable({ accountId, canEdit }: Props) {
 function EditableCogsRow({
   row,
   canEdit,
+  selected,
+  onToggleSelect,
+  draft,
+  onDraftChange,
   onSave,
   onDelete,
   onHistory,
 }: {
   row: CogsRow;
   canEdit: boolean;
+  selected: boolean;
+  onToggleSelect: (id: string) => void;
+  draft: CogsDraft;
+  onDraftChange: (id: string, patch: Partial<CogsDraft>) => void;
   onSave: (id: string, productName: string, sku: string, unitCost: number, includesVat: boolean, effectiveFrom: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onHistory: (sku: string) => Promise<void>;
 }) {
-  const [productName, setProductName] = useState(row.product_name || row.sku);
-  const [sku, setSku] = useState(row.sku);
-  const [unitCost, setUnitCost] = useState(String(row.unit_cost));
-  const [includesVat, setIncludesVat] = useState(Boolean(row.includes_vat));
-  const [effectiveFrom, setEffectiveFrom] = useState(row.effective_from);
+  const productName = draft.productName;
+  const sku = draft.sku;
+  const unitCost = draft.unitCost;
+  const includesVat = draft.includesVat;
+  const effectiveFrom = draft.effectiveFrom;
+  const setProductName = (value: string) => onDraftChange(row.id, { productName: value });
+  const setSku = (value: string) => onDraftChange(row.id, { sku: value });
+  const setUnitCost = (value: string) => onDraftChange(row.id, { unitCost: value });
+  const setIncludesVat = (value: boolean) => onDraftChange(row.id, { includesVat: value });
+  const setEffectiveFrom = (value: string) => onDraftChange(row.id, { effectiveFrom: value });
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <tr className="border-t border-slate-100">
+    <tr className={`border-t border-slate-100 ${selected ? "bg-[var(--md-primary-container)]" : ""}`}>
+      {canEdit ? (
+        <td className="px-4 py-3">
+          <input
+            type="checkbox"
+            aria-label={`Select ${row.sku}`}
+            checked={selected}
+            onChange={() => onToggleSelect(row.id)}
+            className="h-4 w-4 cursor-pointer accent-[var(--md-primary)]"
+          />
+        </td>
+      ) : null}
       <td className="px-4 py-3">
         {canEdit ? (
           <input

@@ -1,8 +1,9 @@
 import React from "react";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { Document, Image, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
+import { Document, Image, Link, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
 import { computeExpenseTotals } from "@/lib/reports/expense-totals";
+import { PdfWatermark, AAYAT_WEBSITE, AAYAT_PLUM_500 } from "./brand";
 
 type ExpenseLine = {
   description: string;
@@ -171,7 +172,8 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   footerText: { fontSize: 9, color: "#6b7280" },
-  footerLogo: { width: 56, height: 56, objectFit: "contain" as const },
+  footerLink: { fontSize: 9, color: AAYAT_PLUM_500, textDecoration: "none", fontWeight: 700 },
+  footerLogo: { width: 92, height: 18, objectFit: "contain" as const },
 });
 
 function m(currency: string, value: number) {
@@ -356,6 +358,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
   return (
     <Document>
       <Page size="A4" style={styles.page}>
+        <PdfWatermark />
         <View style={styles.topRow}>
           <View>
             <Text style={styles.heading}>
@@ -469,7 +472,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
           </View>
         )}
 
-        <View style={styles.section}>
+        <View style={styles.section} wrap={false}>
           <Text style={styles.sectionTitle}>External Expenses Snapshot</Text>
           {data.expenses.length === 0 ? (
             <Text style={styles.sub}>No manual expenses recorded.</Text>
@@ -486,7 +489,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
           )}
         </View>
 
-        <View style={styles.section}>
+        <View style={styles.section} wrap={false}>
           <Text style={styles.sectionTitle}>Manual Notes</Text>
           <Text style={styles.notes}>{data.notes?.trim() ? data.notes.trim() : "No manual notes provided."}</Text>
         </View>
@@ -505,7 +508,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
 
         {data.platform === "amazon" ? (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Performance Metrics Snapshot</Text>
+            <Text style={styles.sectionTitle} minPresenceAhead={90}>Performance Metrics Snapshot</Text>
             {perfSnapshot.length === 0 ? (
               <Text style={styles.sub}>No performance metrics available for this period.</Text>
             ) : (
@@ -534,7 +537,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
                     </View>
                   );
                   return (
-                    <View key={`${p.product_name}-${idx}`} style={styles.tr}>
+                    <View key={`${p.product_name}-${idx}`} style={styles.tr} wrap={false}>
                       <Text style={styles.perfC1}>{p.product_name}</Text>
                       {cell("bsr", p.bsr, p.bsrPrev)}
                       {cell("reviews", p.reviews, p.reviewsPrev)}
@@ -557,7 +560,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
 
         {data.skuLines && data.skuLines.length > 0 ? (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Per-SKU Profitability ({data.skuLines.length} SKUs)</Text>
+            <Text style={styles.sectionTitle} minPresenceAhead={90}>Per-SKU Profitability ({data.skuLines.length} SKUs)</Text>
             <Text style={styles.sub}>
               Sorted by net profit. Figures ex-VAT. Per-SKU net profit is marketplace activity only; manual external
               expenses are not pushed into individual SKUs and are reconciled in the roll-up below.
@@ -695,7 +698,12 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
           ) : (
             <Text />
           )}
-          <Text style={styles.footerText}>© aayat.co | hello@aayat.co | +44 7727 666043</Text>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <Link src={AAYAT_WEBSITE} style={styles.footerLink}>
+              aayat.co
+            </Link>
+            <Text style={styles.footerText}>{"  |  hello@aayat.co  |  +44 7727 666043"}</Text>
+          </View>
         </View>
       </Page>
     </Document>
@@ -704,7 +712,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
 
 async function getFooterLogoDataUrl() {
   try {
-    const logoPath = path.join(process.cwd(), "public", "aayat-mark.png");
+    const logoPath = path.join(process.cwd(), "public", "aayat-logo.png");
     const bytes = await readFile(logoPath);
     return `data:image/png;base64,${bytes.toString("base64")}`;
   } catch {

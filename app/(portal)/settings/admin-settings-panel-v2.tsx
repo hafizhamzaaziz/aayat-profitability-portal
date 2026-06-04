@@ -1224,6 +1224,23 @@ function AmazonAdsConnectionPanel({
   const [syncTo, setSyncTo] = useState(today);
   const [sync, setSync] = useState<SyncState>(emptySyncState);
   const syncing = sync.phase === "starting" || sync.phase === "collecting";
+
+  // Marketplaces available from the discovered profiles. Defaulting the sync to
+  // only the marketplaces that actually carry ad spend (typically UK) keeps the
+  // number of async reports Amazon has to generate small — and the sync fast.
+  const adsCountries = credential ? Object.keys(credential.ads_profile_ids || {}).sort() : [];
+  const adsCountryKey = adsCountries.join(",");
+  const [selectedCountries, setSelectedCountries] = useState<string[]>([]);
+  const countriesInit = useRef(false);
+  useEffect(() => {
+    if (!countriesInit.current && adsCountries.length > 0) {
+      countriesInit.current = true;
+      setSelectedCountries(adsCountries.includes("UK") ? ["UK"] : adsCountries);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adsCountryKey]);
+  const toggleCountry = (c: string) =>
+    setSelectedCountries((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
   // Cancellation flag so polling stops if the component unmounts / modal closes.
   const syncCancelled = useRef(false);
   useEffect(() => {
@@ -1240,7 +1257,12 @@ function AmazonAdsConnectionPanel({
       const res = await fetch("/api/amazon/ads/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountId, from: syncFrom, to: syncTo }),
+        body: JSON.stringify({
+          accountId,
+          from: syncFrom,
+          to: syncTo,
+          countryCodes: selectedCountries.length ? selectedCountries : undefined,
+        }),
       });
       const start = (await res.json()) as
         | { ok: true; batchId: string; jobsRequested: number; range: { from: string; to: string }; warnings: string[] }
@@ -1505,6 +1527,53 @@ function AmazonAdsConnectionPanel({
               one report per month. Replaces any existing ads data for the same months.
             </p>
           </div>
+          {adsCountries.length > 0 ? (
+            <div className="mb-3">
+              <div className="mb-1 flex items-center justify-between">
+                <label className="block text-xs font-medium text-slate-700">Marketplaces</label>
+                <div className="flex gap-2 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedCountries(adsCountries)}
+                    className="font-semibold text-[var(--md-primary)] hover:underline"
+                  >
+                    Select all
+                  </button>
+                  <span className="text-slate-300">|</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedCountries(adsCountries.includes("UK") ? ["UK"] : adsCountries.slice(0, 1))}
+                    className="font-semibold text-slate-500 hover:underline"
+                  >
+                    UK only
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {adsCountries.map((c) => {
+                  const active = selectedCountries.includes(c);
+                  return (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => toggleCountry(c)}
+                      className={`rounded-full px-2.5 py-1 text-xs font-semibold transition-colors ${
+                        active
+                          ? "bg-[var(--md-primary)] text-white"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                      }`}
+                    >
+                      {c}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400">
+                Fewer marketplaces = far fewer reports for Amazon to generate, so the sync finishes
+                much faster. Only include marketplaces where you actually run Sponsored Products.
+              </p>
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-end gap-2">
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">From</label>
@@ -1527,7 +1596,7 @@ function AmazonAdsConnectionPanel({
             <button
               type="button"
               onClick={() => void runSync()}
-              disabled={syncing || !syncFrom || !syncTo || syncFrom > syncTo}
+              disabled={syncing || !syncFrom || !syncTo || syncFrom > syncTo || selectedCountries.length === 0}
               className="rounded-lg bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
             >
               {sync.phase === "starting"

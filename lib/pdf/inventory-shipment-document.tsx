@@ -1,8 +1,9 @@
 import React from "react";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { Document, Image, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
+import { Document, Image, Link, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
 import { formatUkDate } from "@/lib/utils/date";
+import { PdfWatermark, AAYAT_WEBSITE, AAYAT_PLUM_500 } from "./brand";
 
 type ShipmentPdfItem = {
   product_name: string;
@@ -54,7 +55,8 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   footerText: { fontSize: 9, color: "#6b7280" },
-  footerLogo: { width: 56, height: 56, objectFit: "contain" as const },
+  footerLink: { fontSize: 9, color: AAYAT_PLUM_500, textDecoration: "none", fontWeight: 700 },
+  footerLogo: { width: 92, height: 18, objectFit: "contain" as const },
 });
 
 function InventoryShipmentPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl: string | null }) {
@@ -63,6 +65,7 @@ function InventoryShipmentPdf({ data, footerLogoDataUrl }: { data: Input; footer
   return (
     <Document>
       <Page size="A4" orientation={data.orientation} style={styles.page}>
+        <PdfWatermark />
         <View style={styles.topRow}>
           <View>
             <Text style={styles.heading}>{data.accountName} Shipment Plan</Text>
@@ -93,7 +96,7 @@ function InventoryShipmentPdf({ data, footerLogoDataUrl }: { data: Input; footer
             </View>
           ) : (
             data.items.map((item, idx) => (
-              <View key={`${item.product_name}-${idx}`} style={styles.tr}>
+              <View key={`${item.product_name}-${idx}`} style={styles.tr} wrap={false}>
                 <Text style={styles.c1}>{item.product_name}</Text>
                 <Text style={styles.c2}>{item.amazon_sku || "-"}</Text>
                 <Text style={styles.c3}>{item.temu_sku_id || "-"}</Text>
@@ -106,7 +109,7 @@ function InventoryShipmentPdf({ data, footerLogoDataUrl }: { data: Input; footer
           )}
         </View>
 
-        <View style={styles.section}>
+        <View style={styles.section} wrap={false}>
           <Text style={{ marginBottom: 4, fontWeight: 700 }}>Summary</Text>
           <Text>Total SKUs: {data.items.length}</Text>
           <Text>Total Pallets: {totalPallets.toFixed(2)}</Text>
@@ -120,7 +123,12 @@ function InventoryShipmentPdf({ data, footerLogoDataUrl }: { data: Input; footer
           ) : (
             <Text />
           )}
-          <Text style={styles.footerText}>© aayat.co | hello@aayat.co | +44 7727 666043</Text>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <Link src={AAYAT_WEBSITE} style={styles.footerLink}>
+              aayat.co
+            </Link>
+            <Text style={styles.footerText}>{"  |  hello@aayat.co  |  +44 7727 666043"}</Text>
+          </View>
         </View>
       </Page>
     </Document>
@@ -129,7 +137,7 @@ function InventoryShipmentPdf({ data, footerLogoDataUrl }: { data: Input; footer
 
 async function getFooterLogoDataUrl() {
   try {
-    const logoPath = path.join(process.cwd(), "public", "aayat-mark.png");
+    const logoPath = path.join(process.cwd(), "public", "aayat-logo.png");
     const bytes = await readFile(logoPath);
     return `data:image/png;base64,${bytes.toString("base64")}`;
   } catch {

@@ -76,7 +76,7 @@ export default async function ReportsPage({
       <p className="text-slate-600">
         Account: <span className="font-semibold">{account.name}</span>
       </p>
-      <ReportsTabs generate={generate} saved={saved} showGenerate={canProcess} initialTab="generate" />
+      <ReportsTabs generate={generate} saved={saved} showGenerate={canProcess} initialTab="saved" />
     </div>
   );
 }

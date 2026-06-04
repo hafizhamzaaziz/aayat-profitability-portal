@@ -12,7 +12,7 @@ type Props = {
   showGenerate?: boolean;
 };
 
-export default function ReportsTabs({ generate, saved, initialTab = "generate", showGenerate = true }: Props) {
+export default function ReportsTabs({ generate, saved, initialTab = "saved", showGenerate = true }: Props) {
   const [tab, setTab] = useState<TabId>(showGenerate ? initialTab : "saved");
 
   const tabClass = (active: boolean) =>
@@ -25,14 +25,14 @@ export default function ReportsTabs({ generate, saved, initialTab = "generate", 
   return (
     <div className="space-y-4">
       <div className="flex gap-2 rounded-2xl border border-slate-200 bg-white p-1.5">
+        <button type="button" onClick={() => setTab("saved")} className={tabClass(tab === "saved")}>
+          Saved Reports
+        </button>
         {showGenerate ? (
           <button type="button" onClick={() => setTab("generate")} className={tabClass(tab === "generate")}>
             New Report
           </button>
         ) : null}
-        <button type="button" onClick={() => setTab("saved")} className={tabClass(tab === "saved")}>
-          Saved Reports
-        </button>
       </div>
       <div className={tab === "generate" && showGenerate ? "block" : "hidden"}>{generate}</div>
       <div className={tab === "saved" || !showGenerate ? "block" : "hidden"}>{saved}</div>

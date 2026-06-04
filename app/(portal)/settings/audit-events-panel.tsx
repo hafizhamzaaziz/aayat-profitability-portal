@@ -98,6 +98,7 @@ export default function AuditEventsPanel() {
   const [dateFilter, setDateFilter] = useState("");
   const [totalCount, setTotalCount] = useState(0);
   const [actorMap, setActorMap] = useState<Record<string, string>>({});
+  const [accountMap, setAccountMap] = useState<Record<string, string>>({});
   const [userOptions, setUserOptions] = useState<Array<{ id: string; label: string }>>([]);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
@@ -131,6 +132,36 @@ export default function AuditEventsPanel() {
       if (product || date) return `${product}${date ? ` (${date})` : ""}`;
     }
     return row.entity_id || "-";
+  };
+
+  // Resolve which account a given audit row applies to. The audit_events table has no
+  // account_id column of its own, so the context is read from the jsonb snapshots:
+  // for the accounts table the row IS the account (its id), otherwise rows carry account_id.
+  const resolveAccountId = (row: AuditRow): string | null => {
+    const after = (row.after_data || {}) as Record<string, unknown>;
+    const before = (row.before_data || {}) as Record<string, unknown>;
+    if (row.table_name === "accounts") {
+      const id = after.id ?? before.id ?? row.entity_id;
+      return id != null ? String(id) : null;
+    }
+    const id = after.account_id ?? before.account_id;
+    return id != null ? String(id) : null;
+  };
+
+  const describeAccount = (row: AuditRow): string => {
+    const id = resolveAccountId(row);
+    if (!id) return "—";
+    return accountMap[id] || id;
+  };
+
+  const loadAccounts = async () => {
+    const supabase = createClient();
+    const { data } = await supabase.from("accounts").select("id, name").order("name", { ascending: true });
+    const map: Record<string, string> = {};
+    ((data || []) as Array<{ id: string; name: string }>).forEach((a) => {
+      map[String(a.id)] = a.name;
+    });
+    setAccountMap(map);
   };
 
   const loadUsers = async () => {
@@ -190,6 +221,7 @@ export default function AuditEventsPanel() {
 
   useEffect(() => {
     void loadUsers();
+    void loadAccounts();
   }, []);
 
   useEffect(() => {
@@ -286,6 +318,7 @@ export default function AuditEventsPanel() {
             <tr>
               <th className="px-3 py-2">When</th>
               <th className="px-3 py-2">User</th>
+              <th className="px-3 py-2">Account</th>
               <th className="px-3 py-2">Event</th>
               <th className="px-3 py-2">Entity</th>
               <th className="px-3 py-2">Summary of changes</th>
@@ -294,13 +327,13 @@ export default function AuditEventsPanel() {
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-3 py-3 text-slate-500" colSpan={5}>
+                <td className="px-3 py-3 text-slate-500" colSpan={6}>
                   Loading audit events...
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td className="px-3 py-3 text-slate-500" colSpan={5}>
+                <td className="px-3 py-3 text-slate-500" colSpan={6}>
                   No audit events found.
                 </td>
               </tr>
@@ -309,6 +342,11 @@ export default function AuditEventsPanel() {
                 <tr key={row.id} className="border-t border-slate-100 align-top">
                   <td className="px-3 py-2 whitespace-nowrap">{new Date(row.created_at).toLocaleString("en-GB")}</td>
                   <td className="px-3 py-2">{row.actor_id ? actorMap[row.actor_id] || row.actor_id : "System"}</td>
+                  <td className="px-3 py-2">
+                    <span className="inline-flex items-center rounded-full border border-[var(--md-outline)] bg-[var(--md-primary)]/10 px-2 py-0.5 text-xs font-medium text-slate-700">
+                      {describeAccount(row)}
+                    </span>
+                  </td>
                   <td className="px-3 py-2 capitalize">
                     <span
                       className={`rounded-full px-2 py-0.5 text-xs font-semibold ${

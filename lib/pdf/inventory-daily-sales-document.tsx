@@ -1,8 +1,9 @@
 import React from "react";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { Document, Image, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
+import { Document, Image, Link, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
 import { formatUkDate } from "@/lib/utils/date";
+import { PdfWatermark, AAYAT_WEBSITE, AAYAT_PLUM_500 } from "./brand";
 
 type DailySalesPdfRow = {
   sale_date: string;
@@ -56,7 +57,8 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   footerText: { fontSize: 9, color: "#6b7280" },
-  footerLogo: { width: 56, height: 56, objectFit: "contain" as const },
+  footerLink: { fontSize: 9, color: AAYAT_PLUM_500, textDecoration: "none", fontWeight: 700 },
+  footerLogo: { width: 92, height: 18, objectFit: "contain" as const },
 });
 
 function m(currency: string, value: number) {
@@ -78,6 +80,7 @@ function DailySalesPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDat
   return (
     <Document>
       <Page size="A4" orientation="landscape" style={styles.page}>
+        <PdfWatermark />
         <View style={styles.topRow}>
           <View>
             <Text style={styles.heading}>{data.accountName} Daily Sales</Text>
@@ -105,7 +108,7 @@ function DailySalesPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDat
           <Text style={styles.cNotes}>Notes</Text>
         </View>
         {data.rows.map((row, idx) => (
-          <View key={`${row.sale_date}-${row.sku}-${idx}`} style={styles.tr}>
+          <View key={`${row.sale_date}-${row.sku}-${idx}`} style={styles.tr} wrap={false}>
             <Text style={styles.cDate}>{row.sale_date}</Text>
             <Text style={styles.cProduct}>{row.product_name}</Text>
             <Text style={styles.cSku}>{row.sku}</Text>
@@ -140,7 +143,12 @@ function DailySalesPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDat
           ) : (
             <Text />
           )}
-          <Text style={styles.footerText}>© aayat.co | hello@aayat.co | +44 7727 666043</Text>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <Link src={AAYAT_WEBSITE} style={styles.footerLink}>
+              aayat.co
+            </Link>
+            <Text style={styles.footerText}>{"  |  hello@aayat.co  |  +44 7727 666043"}</Text>
+          </View>
         </View>
       </Page>
     </Document>
@@ -149,7 +157,7 @@ function DailySalesPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDat
 
 async function getFooterLogoDataUrl() {
   try {
-    const logoPath = path.join(process.cwd(), "public", "aayat-mark.png");
+    const logoPath = path.join(process.cwd(), "public", "aayat-logo.png");
     const bytes = await readFile(logoPath);
     return `data:image/png;base64,${bytes.toString("base64")}`;
   } catch {
