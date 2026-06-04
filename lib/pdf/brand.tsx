@@ -35,12 +35,10 @@ export function PdfWatermark({ size = 320, opacity = 0.05 }: { size?: number; op
         justifyContent: "center",
       }}
     >
-      <View style={{ opacity }}>
-        <Svg viewBox={MARK_VIEWBOX} style={{ width: size, height: size }}>
-          <Polyline points={MARK_OUTER} fill={AAYAT_PLUM_500} />
-          <Polygon points={MARK_INNER} fill={AAYAT_MAGENTA} />
-        </Svg>
-      </View>
+      <Svg viewBox={MARK_VIEWBOX} style={{ width: size, height: size }}>
+        <Polyline points={MARK_OUTER} fill={AAYAT_PLUM_500} fillOpacity={opacity} />
+        <Polygon points={MARK_INNER} fill={AAYAT_MAGENTA} fillOpacity={opacity} />
+      </Svg>
     </View>
   );
 }

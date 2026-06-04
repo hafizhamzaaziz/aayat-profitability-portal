@@ -134,7 +134,13 @@ export async function POST(request: NextRequest) {
     const previousEnd = new Date(combinedStartMs - 86400000).toISOString().slice(0, 10);
 
     const performanceFields =
-      "recorded_date, product_name, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales";
+      "recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales";
+    // Temu rows share this table and are distinguished by a "TEMU:" asin prefix.
+    // Keep only this platform's rows so the combined report never mixes platforms.
+    const matchesPlatform = (asin: unknown) => {
+      const isTemu = String(asin || "").toUpperCase().startsWith("TEMU:");
+      return first.platform === "temu" ? isTemu : !isTemu;
+    };
     const [{ data: performance }, { data: performancePrevious }] =
       first.platform === "amazon"
         ? await Promise.all([
@@ -222,7 +228,7 @@ export async function POST(request: NextRequest) {
         amount: Number(e.amount || 0),
         includes_vat: Boolean(e.includes_vat),
       })),
-      performance: (performance || []).map((p) => ({
+      performance: (performance || []).filter((p) => matchesPlatform(p.asin)).map((p) => ({
         recorded_date: p.recorded_date,
         product_name: p.product_name,
         bsr: p.bsr,
@@ -232,7 +238,7 @@ export async function POST(request: NextRequest) {
         ppc_sales: p.ppc_sales ?? null,
         total_sales: p.total_sales ?? null,
       })),
-      performancePrevious: (performancePrevious || []).map((p) => ({
+      performancePrevious: (performancePrevious || []).filter((p) => matchesPlatform(p.asin)).map((p) => ({
         recorded_date: p.recorded_date,
         product_name: p.product_name,
         bsr: p.bsr,

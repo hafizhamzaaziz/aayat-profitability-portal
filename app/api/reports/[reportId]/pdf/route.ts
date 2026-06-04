@@ -80,7 +80,14 @@ export async function GET(
   const previousEnd = new Date(periodStartMs - 86400000).toISOString().slice(0, 10);
 
   const performanceFields =
-    "recorded_date, product_name, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales";
+    "recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales";
+  // Temu rows are stored in the same table and distinguished by a "TEMU:" asin
+  // prefix. Keep only this platform's rows so an Amazon report never shows Temu
+  // performance metrics (and vice versa).
+  const matchesPlatform = (asin: unknown) => {
+    const isTemu = String(asin || "").toUpperCase().startsWith("TEMU:");
+    return report.platform === "temu" ? isTemu : !isTemu;
+  };
   const [{ data: performance }, { data: performancePrevious }] =
     report.platform === "amazon"
       ? await Promise.all([
@@ -145,7 +152,7 @@ export async function GET(
       amount: Number(e.amount || 0),
       includes_vat: Boolean(e.includes_vat),
     })),
-    performance: (performance || []).map((p) => ({
+    performance: (performance || []).filter((p) => matchesPlatform(p.asin)).map((p) => ({
       recorded_date: p.recorded_date,
       product_name: p.product_name,
       bsr: p.bsr,
@@ -155,7 +162,7 @@ export async function GET(
       ppc_sales: p.ppc_sales ?? null,
       total_sales: p.total_sales ?? null,
     })),
-    performancePrevious: (performancePrevious || []).map((p) => ({
+    performancePrevious: (performancePrevious || []).filter((p) => matchesPlatform(p.asin)).map((p) => ({
       recorded_date: p.recorded_date,
       product_name: p.product_name,
       bsr: p.bsr,
