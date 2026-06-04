@@ -91,6 +91,10 @@ create index if not exists idx_account_amazon_credentials_account on public.acco
 -- sellers can have GB / DE / FR profiles all under one credential row.
 -- Example: {"GB": 1234567890, "DE": 9876543210}
 alter table public.account_amazon_credentials add column if not exists ads_profile_ids jsonb not null default '{}'::jsonb;
+-- Ads-API agency support: an agency credential can return many advertisers
+-- (sellers) across every marketplace. We pin a single advertiser by name so
+-- the per-country profile map only contains that advertiser's profiles.
+alter table public.account_amazon_credentials add column if not exists ads_advertiser_name text;
 -- 3) cogs
 create table if not exists public.cogs (
   id uuid primary key default gen_random_uuid(),

@@ -25,6 +25,7 @@ type AmazonAdsCredential = {
   last_synced_at: string | null;
   last_sync_error: string | null;
   ads_profile_ids: Record<string, number>;
+  ads_advertiser_name: string | null;
 };
 
 const emptyAccount: AccountForm = { name: "", currency: "£", vatRate: "20", assignedClientIds: [], assignedTeamIds: [] };
@@ -85,7 +86,7 @@ export default function AdminSettingsPanelV2({
         supabase.from("account_client_members").select("account_id, client_id"),
         supabase
           .from("account_amazon_credentials")
-          .select("account_id, provider, selling_partner_id, connected_at, last_synced_at, last_sync_error, ads_profile_ids")
+          .select("account_id, provider, selling_partner_id, connected_at, last_synced_at, last_sync_error, ads_profile_ids, ads_advertiser_name")
           .in("provider", ["sp-api", "ads-api"]),
       ]);
       if (usersError) throw usersError;
@@ -110,7 +111,7 @@ export default function AdminSettingsPanelV2({
       const nextAdsMap: Record<string, AmazonAdsCredential> = {};
       // The query returns both providers in one shot; split them out so each
       // panel can render its own connected state and creds independently.
-      ((amazonCredsData || []) as Array<AmazonCredential & { provider: string; ads_profile_ids?: Record<string, number> }>).forEach(
+      ((amazonCredsData || []) as Array<AmazonCredential & { provider: string; ads_profile_ids?: Record<string, number>; ads_advertiser_name?: string | null }>).forEach(
         (row) => {
           if (row.provider === "ads-api") {
             nextAdsMap[row.account_id] = {
@@ -120,6 +121,7 @@ export default function AdminSettingsPanelV2({
               last_synced_at: row.last_synced_at,
               last_sync_error: row.last_sync_error,
               ads_profile_ids: (row.ads_profile_ids || {}) as Record<string, number>,
+              ads_advertiser_name: (row.ads_advertiser_name ?? null) as string | null,
             };
           } else {
             nextAmazonMap[row.account_id] = row;
@@ -508,6 +510,9 @@ export default function AdminSettingsPanelV2({
                   onSavedManual={async (accountName) => {
                     setMessage(`Amazon Ads refresh token saved for ${accountName}.`);
                     setError(null);
+                    await loadData();
+                  }}
+                  onRefresh={async () => {
                     await loadData();
                   }}
                   onDisconnect={async () => {
@@ -1154,6 +1159,7 @@ function AmazonAdsConnectionPanel({
   disconnecting,
   onDisconnect,
   onSavedManual,
+  onRefresh,
 }: {
   accountId: string;
   credential: AmazonAdsCredential | null;
@@ -1162,6 +1168,7 @@ function AmazonAdsConnectionPanel({
   disconnecting: boolean;
   onDisconnect: () => void;
   onSavedManual: (accountName: string) => void;
+  onRefresh: () => Promise<void>;
 }) {
   const connected = Boolean(credential);
   const [showManual, setShowManual] = useState(false);
@@ -1183,9 +1190,12 @@ function AmazonAdsConnectionPanel({
       accountName: string;
     }>;
     selectedProfileIds?: Record<string, number>;
+    advertiserOptions?: string[];
+    selectedAdvertiser?: string | null;
   };
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<AdsTestResult | null>(null);
+  const [pinningAdvertiser, setPinningAdvertiser] = useState(false);
 
   type AdsSyncReport = {
     reportId: string;
@@ -1364,6 +1374,25 @@ function AmazonAdsConnectionPanel({
     }
   };
 
+  // Pin the credential to one advertiser (seller). For agency connections this
+  // is what stops the sync pulling every seller in the agency — only the chosen
+  // advertiser's per-marketplace profiles are stored.
+  const pinAdvertiser = async (advertiser: string) => {
+    setPinningAdvertiser(true);
+    try {
+      const res = await fetch(
+        `/api/amazon/ads/test?accountId=${encodeURIComponent(accountId)}&advertiser=${encodeURIComponent(advertiser)}`
+      );
+      const json = (await res.json()) as AdsTestResult;
+      setTestResult(json);
+      await onRefresh();
+    } catch (err) {
+      setTestResult({ ok: false, error: err instanceof Error ? err.message : "Network error." });
+    } finally {
+      setPinningAdvertiser(false);
+    }
+  };
+
   const saveManualToken = async () => {
     setManualSaving(true);
     setManualError(null);
@@ -1409,6 +1438,12 @@ function AmazonAdsConnectionPanel({
 
       {connected && credential ? (
         <div className="space-y-1 text-xs text-slate-600">
+          {credential.ads_advertiser_name ? (
+            <div>
+              <span className="text-slate-500">Advertiser: </span>
+              <span className="font-semibold text-slate-800">{credential.ads_advertiser_name}</span>
+            </div>
+          ) : null}
           <div>
             <span className="text-slate-500">Profiles: </span>
             {profileCount > 0
@@ -1492,15 +1527,53 @@ function AmazonAdsConnectionPanel({
                   <strong>✓ Ads API responded.</strong> Region <code>{testResult.region}</code> ·{" "}
                   {testResult.profileCount} profile{testResult.profileCount === 1 ? "" : "s"} discovered
                 </div>
+                {testResult.advertiserOptions && testResult.advertiserOptions.length > 1 ? (
+                  <div className="mt-2 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-slate-700">
+                    <p className="mb-1 font-semibold text-slate-800">
+                      This connection sees {testResult.advertiserOptions.length} advertisers (agency account)
+                    </p>
+                    <p className="mb-2 text-[11px] text-slate-500">
+                      Pick the one advertiser this portal account belongs to. Only its per-marketplace
+                      profiles will be stored and synced.
+                    </p>
+                    <select
+                      value={testResult.selectedAdvertiser || credential?.ads_advertiser_name || ""}
+                      onChange={(e) => {
+                        if (e.target.value) void pinAdvertiser(e.target.value);
+                      }}
+                      disabled={pinningAdvertiser}
+                      className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-60"
+                    >
+                      <option value="">{pinningAdvertiser ? "Saving…" : "Select advertiser…"}</option>
+                      {testResult.advertiserOptions.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                    {(testResult.selectedAdvertiser || credential?.ads_advertiser_name) ? (
+                      <p className="mt-1 text-[11px] text-emerald-700">
+                        Pinned to <strong>{testResult.selectedAdvertiser || credential?.ads_advertiser_name}</strong> ·{" "}
+                        {Object.keys(testResult.selectedProfileIds || {}).length} marketplace
+                        {Object.keys(testResult.selectedProfileIds || {}).length === 1 ? "" : "s"}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
                 {testResult.profiles && testResult.profiles.length > 0 ? (
-                  <ul className="ml-4 list-disc space-y-0.5">
-                    {testResult.profiles.map((p) => (
-                      <li key={p.profileId}>
-                        <strong>{p.countryCode}</strong> · {p.accountName} ({p.accountType},{" "}
-                        {p.currencyCode}) · profile <code>{p.profileId}</code>
-                      </li>
-                    ))}
-                  </ul>
+                  <details className="mt-1">
+                    <summary className="cursor-pointer text-[11px] text-emerald-800">
+                      Show all {testResult.profiles.length} discovered profiles
+                    </summary>
+                    <ul className="ml-4 mt-1 list-disc space-y-0.5">
+                      {testResult.profiles.map((p) => (
+                        <li key={p.profileId}>
+                          <strong>{p.countryCode}</strong> · {p.accountName} ({p.accountType},{" "}
+                          {p.currencyCode}) · profile <code>{p.profileId}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
                 ) : null}
               </div>
             ) : (

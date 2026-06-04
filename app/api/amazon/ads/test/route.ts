@@ -1,6 +1,11 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { loadAdsApiClient, setAdsProfileIds } from "@/lib/amazon/ads/credentials";
+import {
+  loadAdsApiClient,
+  setAdsProfileIds,
+  setAdsAdvertiser,
+  getAdsAdvertiser,
+} from "@/lib/amazon/ads/credentials";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,25 +34,53 @@ export async function GET(request: NextRequest) {
     return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
   }
 
+  // Optional advertiser pin. When the connected credential is an agency that
+  // sees many sellers, the caller passes ?advertiser=<exact name> to lock the
+  // sync to that one advertiser's profiles.
+  const advertiserParam = request.nextUrl.searchParams.get("advertiser");
+
   try {
     const { client, region } = await loadAdsApiClient(accountId);
     const profiles = await client.listProfiles();
 
-    // Refresh stored profile map so the next sync picks up any new
-    // marketplaces the seller has added.
+    // Distinct advertiser (seller) names available under this credential.
+    const advertiserOptions = Array.from(
+      new Set(profiles.map((p) => String(p.accountInfo.name || "").trim()).filter(Boolean))
+    ).sort((a, b) => a.localeCompare(b));
+
+    // Effective advertiser: explicit param wins, else the previously-pinned one.
+    const storedAdvertiser = await getAdsAdvertiser(accountId);
+    const selectedAdvertiser = (advertiserParam ?? storedAdvertiser) || null;
+
+    // Build the per-country profile map. When an advertiser is pinned we only
+    // keep that advertiser's profiles, so a country never resolves to the wrong
+    // seller. Without a pin (single-seller credential) keep the prior behaviour.
+    const relevant = selectedAdvertiser
+      ? profiles.filter((p) => String(p.accountInfo.name || "").trim() === selectedAdvertiser)
+      : profiles;
     const profileIds: Record<string, number> = {};
-    for (const p of profiles) {
+    for (const p of relevant) {
       const existing = profileIds[p.countryCode];
       if (!existing || p.accountInfo.type === "seller") {
         profileIds[p.countryCode] = p.profileId;
       }
     }
-    await setAdsProfileIds(accountId, profileIds);
+
+    // Persist. If an advertiser was explicitly chosen (or already pinned),
+    // store the pin + filtered map; otherwise only refresh the map.
+    if (selectedAdvertiser) {
+      await setAdsAdvertiser(accountId, selectedAdvertiser, profileIds);
+    } else if (advertiserOptions.length <= 1) {
+      // A single-advertiser credential is unambiguous — safe to auto-store.
+      await setAdsProfileIds(accountId, profileIds);
+    }
 
     return Response.json({
       ok: true,
       region,
       profileCount: profiles.length,
+      advertiserOptions,
+      selectedAdvertiser,
       profiles: profiles.map((p) => ({
         profileId: p.profileId,
         countryCode: p.countryCode,

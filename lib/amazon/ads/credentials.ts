@@ -79,3 +79,34 @@ export async function setAdsProfileIds(
     .eq("account_id", accountId)
     .eq("provider", "ads-api");
 }
+
+/**
+ * Pins the credential to a single advertiser (seller). Agency credentials can
+ * see many advertisers across every marketplace, so we persist the chosen
+ * advertiser name AND the per-country profile map filtered to it. Pass null to
+ * clear the pin.
+ */
+export async function setAdsAdvertiser(
+  accountId: string,
+  advertiserName: string | null,
+  profileIds: Record<string, number>
+): Promise<void> {
+  const admin = createAdminClient();
+  await admin
+    .from("account_amazon_credentials")
+    .update({ ads_advertiser_name: advertiserName, ads_profile_ids: profileIds })
+    .eq("account_id", accountId)
+    .eq("provider", "ads-api");
+}
+
+/** Reads the currently-pinned advertiser name (or null). */
+export async function getAdsAdvertiser(accountId: string): Promise<string | null> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("account_amazon_credentials")
+    .select("ads_advertiser_name")
+    .eq("account_id", accountId)
+    .eq("provider", "ads-api")
+    .maybeSingle();
+  return (data?.ads_advertiser_name as string | null) ?? null;
+}
