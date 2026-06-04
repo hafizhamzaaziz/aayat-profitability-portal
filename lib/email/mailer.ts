@@ -150,12 +150,12 @@ function renderEmailHtml(args: {
   const highlightsHtml = args.highlights.length
     ? `
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0 4px 0;width:100%;">
-      <tr><td style="padding:0 0 6px 0;font-size:13px;font-weight:600;color:#3a0f45;">Highlights</td></tr>
+      <tr><td style="padding:0 0 6px 0;font-size:13px;font-weight:600;color:#401634;">Highlights</td></tr>
       ${args.highlights
         .map(
           (h) => `
         <tr><td style="padding:4px 0;font-size:14px;color:#1f2937;line-height:1.45;">
-          <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#e11672;margin-right:8px;vertical-align:middle;"></span>
+          <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#e6126e;margin-right:8px;vertical-align:middle;"></span>
           ${escapeHtml(h)}
         </td></tr>`
         )
@@ -165,13 +165,13 @@ function renderEmailHtml(args: {
 
   return `<!doctype html>
 <html lang="en">
-  <body style="margin:0;padding:0;background:#f4f1f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f4f1f5;padding:24px 12px;">
+  <body style="margin:0;padding:0;background:#f7eef4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f7eef4;padding:24px 12px;">
       <tr>
         <td align="center">
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:620px;background:#ffffff;border:1px solid #ead1de;border-radius:14px;overflow:hidden;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:620px;background:#ffffff;border:1px solid #ecd6e4;border-radius:14px;overflow:hidden;">
             <tr>
-              <td style="background:linear-gradient(135deg,#3a0f45,#7a1d6a);padding:22px 24px;color:#ffffff;">
+              <td style="background:linear-gradient(135deg,#401634,#6f2a57);padding:22px 24px;color:#ffffff;">
                 <p style="margin:0;font-size:12px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.85;">Aayat Profitability Portal</p>
                 <h1 style="margin:6px 0 0 0;font-size:20px;font-weight:600;line-height:1.3;">${escapeHtml(args.title)}</h1>
                 <p style="margin:6px 0 0 0;font-size:14px;opacity:0.9;">
@@ -194,8 +194,8 @@ function renderEmailHtml(args: {
               </td>
             </tr>
             <tr>
-              <td style="background:#fbf5f9;padding:14px 24px;border-top:1px solid #ead1de;color:#6b7280;font-size:12px;line-height:1.5;">
-                Aayat &nbsp;•&nbsp; <a href="mailto:hello@aayat.co" style="color:#7a1d6a;text-decoration:none;">hello@aayat.co</a> &nbsp;•&nbsp; +44 7727 666043
+              <td style="background:#f7eef4;padding:14px 24px;border-top:1px solid #ecd6e4;color:#6b7280;font-size:12px;line-height:1.5;">
+                Aayat &nbsp;•&nbsp; <a href="mailto:hello@aayat.co" style="color:#6f2a57;text-decoration:none;">hello@aayat.co</a> &nbsp;•&nbsp; +44 7727 666043
                 <br/><span style="color:#9ca3af;">This message and the attached report are intended for the registered account contact.</span>
               </td>
             </tr>

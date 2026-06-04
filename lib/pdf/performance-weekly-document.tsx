@@ -37,7 +37,7 @@ type Input = {
 const styles = StyleSheet.create({
   page: { fontSize: 9, paddingTop: 20, paddingLeft: 20, paddingRight: 20, paddingBottom: 58, color: "#1f2937", fontFamily: "Helvetica" },
   topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
-  title: { fontSize: 15, fontWeight: 700, maxWidth: "80%" },
+  title: { fontSize: 15, fontWeight: 700, maxWidth: "80%", color: "#401634" },
   sub: { fontSize: 9, color: "#6b7280", marginTop: 2 },
   logo: { width: 56, height: 56, objectFit: "contain" as const },
   tableHead: {
@@ -375,7 +375,7 @@ function WeeklyPerformancePdf({ data, footerLogoDataUrl }: { data: Input; footer
 
 async function getFooterLogoDataUrl() {
   try {
-    const logoPath = path.join(process.cwd(), "public", "aayat-logo.png");
+    const logoPath = path.join(process.cwd(), "public", "aayat-mark.png");
     const bytes = await readFile(logoPath);
     return `data:image/png;base64,${bytes.toString("base64")}`;
   } catch {

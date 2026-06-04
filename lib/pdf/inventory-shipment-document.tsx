@@ -29,7 +29,7 @@ const styles = StyleSheet.create({
   page: { fontSize: 10, paddingTop: 24, paddingLeft: 24, paddingRight: 24, paddingBottom: 64, color: "#1f2937", fontFamily: "Helvetica" },
   topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
   logo: { width: 56, height: 56, objectFit: "contain" as const },
-  heading: { fontSize: 16, fontWeight: 700, maxWidth: "80%" },
+  heading: { fontSize: 16, fontWeight: 700, maxWidth: "80%", color: "#401634" },
   sub: { color: "#6b7280", fontSize: 9, marginTop: 2 },
   section: { marginTop: 10, borderWidth: 1, borderColor: "#e5e7eb", borderRadius: 8, padding: 8 },
   tableHead: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: "#e5e7eb", backgroundColor: "#f8fafc", paddingVertical: 5, paddingHorizontal: 4, fontWeight: 700 },
@@ -129,7 +129,7 @@ function InventoryShipmentPdf({ data, footerLogoDataUrl }: { data: Input; footer
 
 async function getFooterLogoDataUrl() {
   try {
-    const logoPath = path.join(process.cwd(), "public", "aayat-logo.png");
+    const logoPath = path.join(process.cwd(), "public", "aayat-mark.png");
     const bytes = await readFile(logoPath);
     return `data:image/png;base64,${bytes.toString("base64")}`;
   } catch {

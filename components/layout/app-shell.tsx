@@ -152,18 +152,29 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                 {sidebarCollapsed ? "»" : "«"}
               </button>
             </div>
-            <Image
-              src="/aayat-logo.png"
-              alt="Aayat logo"
-              width={160}
-              height={160}
-              className={`mb-3 h-auto ${sidebarCollapsed ? "mx-auto w-10" : "w-28"}`}
-              priority
-            />
+            {sidebarCollapsed ? (
+              <Image
+                src="/aayat-mark.png"
+                alt="Aayat"
+                width={1200}
+                height={1200}
+                className="mx-auto mb-3 h-auto w-9"
+                priority
+              />
+            ) : (
+              <Image
+                src="/aayat-logo.png"
+                alt="Aayat"
+                width={2400}
+                height={472}
+                className="mb-3 h-auto w-32"
+                priority
+              />
+            )}
             {!sidebarCollapsed ? (
               <>
-                <h1 className="text-xl font-semibold tracking-tight">Profitability Portal</h1>
-                <p className="mt-2 text-sm text-slate-600">Amazon & Temu insights</p>
+                <h1 className="text-lg font-semibold tracking-tight text-[var(--md-secondary)]">Profitability Portal</h1>
+                <p className="mt-1 text-sm text-slate-600">Amazon & Temu insights</p>
               </>
             ) : null}
           </div>

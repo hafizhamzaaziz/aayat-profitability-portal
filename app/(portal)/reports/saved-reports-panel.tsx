@@ -1719,7 +1719,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
                   <p className="font-semibold capitalize">{report.platform}</p>
                   {report.source === "sp_api" ? (
                     <span
-                      className="rounded-full bg-[#FF9900]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-900"
+                      className="rounded-full bg-[var(--md-primary-container)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--md-secondary)]"
                       title="Auto-synced from Amazon SP-API"
                     >
                       SP-API

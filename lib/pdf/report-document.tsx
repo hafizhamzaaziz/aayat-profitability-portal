@@ -96,10 +96,10 @@ const styles = StyleSheet.create({
   page: { fontSize: 11, paddingTop: 28, paddingLeft: 28, paddingRight: 28, paddingBottom: 72, color: "#1f2937", fontFamily: "Helvetica" },
   topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
   logo: { width: 56, height: 56, objectFit: "contain" as const },
-  heading: { fontSize: 18, fontWeight: 700, maxWidth: "78%" },
+  heading: { fontSize: 18, fontWeight: 700, maxWidth: "78%", color: "#401634" },
   sub: { color: "#6b7280", fontSize: 10, marginTop: 2 },
   section: { marginTop: 14, borderWidth: 1, borderColor: "#e5e7eb", borderRadius: 8, padding: 10 },
-  sectionTitle: { fontSize: 12, fontWeight: 700, marginBottom: 8 },
+  sectionTitle: { fontSize: 12, fontWeight: 700, marginBottom: 8, color: "#401634" },
   row: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -704,7 +704,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
 
 async function getFooterLogoDataUrl() {
   try {
-    const logoPath = path.join(process.cwd(), "public", "aayat-logo.png");
+    const logoPath = path.join(process.cwd(), "public", "aayat-mark.png");
     const bytes = await readFile(logoPath);
     return `data:image/png;base64,${bytes.toString("base64")}`;
   } catch {

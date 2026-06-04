@@ -905,7 +905,7 @@ function AmazonConnectionPanel({
           <>
             <a
               href={connectHref}
-              className="rounded-lg bg-[#FF9900] px-4 py-2 text-sm font-semibold text-black hover:brightness-95"
+              className="rounded-lg bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
             >
               Connect Amazon
             </a>
@@ -1030,7 +1030,7 @@ function AmazonConnectionPanel({
               type="button"
               onClick={() => void runSync()}
               disabled={syncing || !syncFrom || !syncTo || syncFrom > syncTo}
-              className="rounded-lg bg-[#FF9900] px-4 py-2 text-sm font-semibold text-black disabled:opacity-60"
+              className="rounded-lg bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
               title="Backfill financial events for the chosen date range."
             >
               {syncing ? "Syncing… (may take 1–3 min)" : "Sync from Amazon"}
@@ -1443,7 +1443,7 @@ function AmazonAdsConnectionPanel({
         ) : (
           <a
             href={connectHref}
-            className="rounded-lg bg-[#FF9900] px-4 py-2 text-sm font-semibold text-black hover:brightness-95"
+            className="rounded-lg bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
           >
             Connect Amazon Ads
           </a>
@@ -1528,7 +1528,7 @@ function AmazonAdsConnectionPanel({
               type="button"
               onClick={() => void runSync()}
               disabled={syncing || !syncFrom || !syncTo || syncFrom > syncTo}
-              className="rounded-lg bg-[#FF9900] px-4 py-2 text-sm font-semibold text-black disabled:opacity-60"
+              className="rounded-lg bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
             >
               {sync.phase === "starting"
                 ? "Requesting reports…"

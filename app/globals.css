@@ -1,15 +1,48 @@
 @import "tailwindcss";
 
+/*
+ * Aayat brand system (2026 rebrand).
+ * Primary = Plum (#6f2a57 family), Accent = Magenta (#e6126e family).
+ * The portal is token-driven via the --md-* variables, so updating these
+ * cascades the new brand across every component automatically.
+ */
 :root {
-  --md-primary: #e11672;
-  --md-primary-container: #ffe2f0;
-  --md-secondary: #3a0f45;
-  --md-secondary-container: #efe7f6;
-  --md-tertiary: #c01366;
-  --md-surface: #fff7fb;
-  --md-surface-container: #fdf2f9;
-  --md-outline: #e8cedf;
-  --md-on-surface: #2a1a24;
+  /* Plum scale (primary brand) */
+  --plum-50: #f7eef4;
+  --plum-100: #ecd6e4;
+  --plum-200: #d6a9c5;
+  --plum-300: #bd79a3;
+  --plum-400: #99497d;
+  --plum-500: #6f2a57;
+  --plum-600: #551f43;
+  --plum-700: #401634;
+  --plum-800: #2b0a26;
+  --plum-900: #1e0719;
+  --plum-950: #140310;
+
+  /* Magenta scale (accent) */
+  --magenta-50: #fdeef5;
+  --magenta-100: #fcd6e7;
+  --magenta-200: #f9aecf;
+  --magenta-300: #f578ad;
+  --magenta-400: #ef4a8c;
+  --magenta-500: #e6126e;
+  --magenta-600: #c70d5f;
+  --magenta-700: #a30b4e;
+  --magenta-800: #7e0a3e;
+  --magenta-900: #5f0a31;
+
+  /* Semantic tokens consumed across the portal */
+  --md-primary: #e6126e;            /* magenta-500 — primary actions/accents */
+  --md-primary-hover: #c70d5f;      /* magenta-600 */
+  --md-primary-container: #fcd6e7;  /* magenta-100 — soft fills/chips */
+  --md-secondary: #401634;          /* plum-700 — deep brand ink */
+  --md-secondary-container: #f7eef4;/* plum-50 */
+  --md-tertiary: #6f2a57;           /* plum-500 */
+  --md-surface: #fdf7fb;
+  --md-surface-container: #ffffff;
+  --md-outline: #ecd6e4;            /* plum-100 */
+  --md-on-surface: #1b1119;         /* brand foreground */
   --md-on-primary: #ffffff;
 }
 
@@ -17,12 +50,51 @@
   --color-primary: var(--md-primary);
   --color-surface: var(--md-surface);
   --color-surface-container: var(--md-surface-container);
+
+  --color-plum-50: var(--plum-50);
+  --color-plum-100: var(--plum-100);
+  --color-plum-200: var(--plum-200);
+  --color-plum-300: var(--plum-300);
+  --color-plum-400: var(--plum-400);
+  --color-plum-500: var(--plum-500);
+  --color-plum-600: var(--plum-600);
+  --color-plum-700: var(--plum-700);
+  --color-plum-800: var(--plum-800);
+  --color-plum-900: var(--plum-900);
+  --color-plum-950: var(--plum-950);
+
+  --color-magenta-50: var(--magenta-50);
+  --color-magenta-100: var(--magenta-100);
+  --color-magenta-200: var(--magenta-200);
+  --color-magenta-300: var(--magenta-300);
+  --color-magenta-400: var(--magenta-400);
+  --color-magenta-500: var(--magenta-500);
+  --color-magenta-600: var(--magenta-600);
+  --color-magenta-700: var(--magenta-700);
+  --color-magenta-800: var(--magenta-800);
+  --color-magenta-900: var(--magenta-900);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-sora), var(--font-inter), ui-sans-serif, sans-serif;
 }
 
 body {
-  font-family: "Google Sans", "Google Sans Text", "Inter", "Segoe UI", Roboto, Arial, sans-serif;
+  font-family: var(--font-inter), "Inter", "Segoe UI", Roboto, Arial, sans-serif;
   color: var(--md-on-surface);
-  background: radial-gradient(circle at top right, #fff0f8, #fff7fb 36%, #ffffff 100%);
+  background: radial-gradient(circle at top right, #fbeaf3, var(--md-surface) 38%, #ffffff 100%);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-sora), var(--font-inter), ui-sans-serif, sans-serif;
+  letter-spacing: -0.01em;
+}
+
+::selection {
+  background: var(--md-primary);
+  color: #ffffff;
 }
 
 .md-card {
@@ -34,13 +106,20 @@ body {
 
 .md-card:hover {
   transform: translateY(-1px);
-  box-shadow: 0 12px 24px rgba(58, 15, 69, 0.08);
+  box-shadow: 0 12px 24px rgba(64, 22, 52, 0.1);
 }
 
 .md-chip {
   @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-medium;
   background: var(--md-primary-container);
   color: var(--md-primary);
+}
+
+.text-gradient {
+  background: linear-gradient(100deg, var(--magenta-500), var(--magenta-300));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 button,
@@ -53,7 +132,7 @@ textarea {
 
 button:enabled:hover {
   transform: translateY(-1px);
-  box-shadow: 0 6px 16px rgba(58, 15, 69, 0.12);
+  box-shadow: 0 6px 16px rgba(64, 22, 52, 0.14);
 }
 
 /* Hide number input spinner arrows (up/down steppers) */

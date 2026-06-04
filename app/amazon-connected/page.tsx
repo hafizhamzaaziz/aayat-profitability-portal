@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -33,6 +34,14 @@ export default function AmazonConnectedPage({
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
       <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+        <Image
+          src="/aayat-logo.png"
+          alt="Aayat"
+          width={2400}
+          height={472}
+          className="mb-6 h-auto w-32"
+          priority
+        />
         <div
           className={`mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full ${
             status === "ok" ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
