@@ -21,7 +21,8 @@ import {
   allocateTemuAds,
   type TemuAdReport,
 } from "@/lib/reports/temu-ad-report";
-import { AMAZON_METHODOLOGY_ID, TEMU_METHODOLOGY_ID } from "@/lib/reports/methodology";
+import { computeTiktokPnl, deriveTiktokTotals, computeTiktokPerSku } from "@/lib/reports/tiktok-pnl";
+import { AMAZON_METHODOLOGY_ID, TEMU_METHODOLOGY_ID, TIKTOK_METHODOLOGY_ID } from "@/lib/reports/methodology";
 import { computeExpenseTotals } from "@/lib/reports/expense-totals";
 import {
   computeExpenseOccurrencesForPeriod,
@@ -34,7 +35,7 @@ import type { AdReport } from "@/lib/reports/types";
 type SavedReport = {
   id: string;
   account_id: string;
-  platform: "amazon" | "temu";
+  platform: "amazon" | "temu" | "tiktok";
   period_start: string;
   period_end: string;
   gross_sales: number;
@@ -150,13 +151,16 @@ function money(value: number) {
 }
 
 function primarySalesLabel(platform: SavedReport["platform"]) {
-  return platform === "amazon" ? "Product Sales" : "Order Payments";
+  if (platform === "amazon") return "Product Sales";
+  if (platform === "tiktok") return "Order Amount";
+  return "Order Payments";
 }
 
 function isReportMethodologyCurrent(report: SavedReport) {
   const marker = report.breakdown?.methodologyId;
   if (report.platform === "amazon") return marker === AMAZON_METHODOLOGY_ID;
   if (report.platform === "temu") return marker === TEMU_METHODOLOGY_ID;
+  if (report.platform === "tiktok") return marker === TIKTOK_METHODOLOGY_ID;
   return true;
 }
 
@@ -739,6 +743,121 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
           },
           adsOverride: newAdsOverride,
           methodologyId: AMAZON_METHODOLOGY_ID,
+          warnings: recomputedWarnings,
+          perSkuRollup: {
+            marketplaceNetProfitSum: marketplaceNetProfit,
+            externalExpensesNet: money(expensesNow.net),
+          },
+        };
+
+        reportPatch = {
+          gross_sales: Number(settlementValue.toFixed(2)),
+          total_cogs: Number(purchaseCost.toFixed(2)),
+          total_fees: Number(totalFeesAbs.toFixed(2)),
+          output_vat: Number(outputVat.toFixed(2)),
+          input_vat: Number(inputVat.toFixed(2)),
+          net_profit: Number(netProfit.toFixed(2)),
+          breakdown: newBreakdown,
+          cogs_vat_reclaim_pct: Number(Number(effectiveCogsVatPct).toFixed(2)),
+        };
+      } else if (target.platform === "tiktok") {
+        // -------- TikTok recompute --------
+        const pnl = computeTiktokPnl(aoa);
+        if (pnl.rowsProcessed === 0) {
+          throw new Error(
+            `Recompute could not locate recognisable TikTok order rows in the saved transactions (${allRows.length} rows scanned). Re-upload the original transaction sheet via "New Report" to refresh the saved data.`
+          );
+        }
+
+        const totals = deriveTiktokTotals({
+          pnl,
+          cogsLookup,
+          vatRatePct: vatRate,
+          defaultDateIso: target.period_start,
+        });
+        const { lines } = computeTiktokPerSku({
+          pnl,
+          cogsLookup,
+          vatRatePct: vatRate,
+          defaultDateIso: target.period_start,
+        });
+        skuLines = lines;
+
+        const missingSkus: string[] = [];
+        const missingSkusWithSales: Array<{ sku: string; units: number; netSales: number }> = [];
+        for (const line of skuLines) {
+          if (line.units > 0 && !line.costKnown) {
+            const upper = String(line.sku).toUpperCase();
+            missingSkus.push(upper);
+            missingSkusWithSales.push({ sku: upper, units: line.units, netSales: line.netSales });
+          }
+        }
+
+        const purchaseCost = -totals.cogs;
+        const settlementNet = totals.netSales + totals.totalTiktokFeesExvat;
+        const outputVat = totals.outputVat;
+        const inputVatFees = totals.totalInputVatTiktokFees;
+        const inputVatPurchases = totals.inputVatCogs + expensesNow.vat;
+        const inputVat = inputVatFees + inputVatPurchases;
+        const netProfit = totals.operatingProfit - expensesNow.net;
+        const marketplaceNetProfit = Number(totals.operatingProfit.toFixed(2));
+        const settlementValue = totals.settlementValue;
+        const totalFeesAbs = Math.abs(totals.commissionExvat);
+
+        newAdsOverride = null;
+
+        recomputedWarnings = deriveReportWarnings({
+          missingSkus,
+          missingSkusWithSales,
+          netProfit: Number(netProfit.toFixed(2)),
+          outputVat: Number(outputVat.toFixed(2)),
+          inputVat: Number(inputVat.toFixed(2)),
+          skuLines: skuLines.map((l) => ({
+            sku: l.sku,
+            netProfit: l.netProfit,
+            netSales: l.netSales,
+            units: l.units,
+            costKnown: l.costKnown,
+            adOnly: l.adOnly,
+          })),
+          accountNetProfit: Number(netProfit.toFixed(2)),
+          skuReconcileBaseline: marketplaceNetProfit,
+          adOverride: null,
+          periodStart: target.period_start,
+          periodEnd: target.period_end,
+          rowsProcessed: pnl.rowsProcessed,
+          rowsSkipped: pnl.rowsSkipped,
+          netSales: totals.netSales,
+          productSalesRefunds: -(totals.refundsInclVat / (1 + (vatRate / 100 || 0.2))),
+          vatRatePct: vatRate,
+          currency,
+        });
+
+        newBreakdown = {
+          ...((target.breakdown as Record<string, unknown>) || {}),
+          platform: "tiktok" as const,
+          summaryLines: [
+            { label: "Order Amount", value: Number(totals.grossOrderAmountInclVat.toFixed(2)) },
+            { label: "Refunds", value: Number((-totals.refundsInclVat).toFixed(2)) },
+            { label: "TikTok Commission", value: Number((-totals.commissionInclVat).toFixed(2)) },
+          ],
+          settlementLabel: "Net TikTok Settlement (incl VAT)",
+          settlementValue: Number(settlementValue.toFixed(2)),
+          transferLabel: "Transfers to Bank",
+          transferValue: 0,
+          pnl: {
+            settlementNet: Number(settlementNet.toFixed(2)),
+            purchaseCost: Number(purchaseCost.toFixed(2)),
+            netProfit: Number(netProfit.toFixed(2)),
+          },
+          vat: {
+            outputVat: Number(outputVat.toFixed(2)),
+            inputVatFees: Number(inputVatFees.toFixed(2)),
+            inputVatPurchases: Number(inputVatPurchases.toFixed(2)),
+            finalVat: Number((outputVat - inputVat).toFixed(2)),
+          },
+          adsOverride: null,
+          methodologyId: TIKTOK_METHODOLOGY_ID,
           warnings: recomputedWarnings,
           perSkuRollup: {
             marketplaceNetProfitSum: marketplaceNetProfit,
@@ -1473,7 +1592,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
     const selectedRows = reports.filter((r) => selectedForCombine.includes(r.id));
     if (selectedRows.length < 2) return "Select at least 2 reports.";
     const platform = selectedRows[0].platform;
-    if (selectedRows.some((r) => r.platform !== platform)) return "You cannot mix Amazon and Temu in one combined file.";
+    if (selectedRows.some((r) => r.platform !== platform)) return "You cannot mix different platforms in one combined file.";
     const sorted = [...selectedRows].sort((a, b) => (a.period_start < b.period_start ? -1 : 1));
     for (let i = 1; i < sorted.length; i++) {
       const expectedStart = addDays(sorted[i - 1].period_end, 1);
@@ -1981,13 +2100,15 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
                   </p>
                   {canEdit ? (
                     <div className="flex gap-2">
-                      <button
-                        onClick={onUpdateAdsClick}
-                        disabled={adUpdating || recomputing}
-                        className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 disabled:opacity-60"
-                      >
-                        {adUpdating ? "Uploading..." : adMeta ? "Replace ads report" : "Upload ads report"}
-                      </button>
+                      {selected.platform !== "tiktok" ? (
+                        <button
+                          onClick={onUpdateAdsClick}
+                          disabled={adUpdating || recomputing}
+                          className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 disabled:opacity-60"
+                        >
+                          {adUpdating ? "Uploading..." : adMeta ? "Replace ads report" : "Upload ads report"}
+                        </button>
+                      ) : null}
                       <button
                         onClick={() => void recomputeReport({ cogsVatReclaimPct: cogsVatPctDraft })}
                         disabled={recomputing || adUpdating}
@@ -2038,7 +2159,9 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
                   <p className="text-xs text-slate-500">
                     {selected.platform === "temu"
                       ? "No Temu ads report saved for this period yet. Without one, advertising costs are taken from the transaction sheet (account-level total, not per-SKU)."
-                      : "No ads report saved for this period yet. Without one, advertising costs are allocated to SKUs pro-rata by net sales."}
+                      : selected.platform === "tiktok"
+                        ? "TikTok advertising, affiliate and shipping costs are entered manually on the Expenses page (marketplace = TikTok) and applied as external expenses."
+                        : "No ads report saved for this period yet. Without one, advertising costs are allocated to SKUs pro-rata by net sales."}
                   </p>
                 )}
               </div>

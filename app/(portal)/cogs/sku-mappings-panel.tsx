@@ -12,6 +12,7 @@ type MappingRow = {
   product_name: string;
   amazon_sku: string | null;
   temu_sku_id: string | null;
+  tiktok_seller_sku: string | null;
   /** Temu parent listing identifier (Goods ID). Stored on sku_catalog (one
    *  per product), surfaced here for convenience so the variant row can
    *  display + edit it without a join. */
@@ -65,6 +66,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   const [amazonSkuCol, setAmazonSkuCol] = useState("");
   const [temuSkuCol, setTemuSkuCol] = useState("");
   const [temuGoodsIdCol, setTemuGoodsIdCol] = useState("");
+  const [tiktokSkuCol, setTiktokSkuCol] = useState("");
   const [leadTimeCol, setLeadTimeCol] = useState("");
 
   const loadRows = async () => {
@@ -75,7 +77,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
 
     let dataQuery = supabase
       .from("sku_mappings")
-      .select("id, sku_catalog_id, amazon_sku, temu_sku_id, lead_time_days, created_at, sku_catalog:sku_catalog_id(product_name, temu_goods_id)")
+      .select("id, sku_catalog_id, amazon_sku, temu_sku_id, tiktok_seller_sku, lead_time_days, created_at, sku_catalog:sku_catalog_id(product_name, temu_goods_id)")
       .eq("account_id", accountId)
       .order("created_at", { ascending: false });
     let countQuery = supabase.from("sku_mappings").select("id", { count: "exact", head: true }).eq("account_id", accountId);
@@ -93,6 +95,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       const orParts = [
         `amazon_sku.ilike.${needle}`,
         `temu_sku_id.ilike.${needle}`,
+        `tiktok_seller_sku.ilike.${needle}`,
       ];
       if (matchingCatalogIds.length > 0) {
         orParts.push(`sku_catalog_id.in.(${matchingCatalogIds.join(",")})`);
@@ -116,6 +119,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         sku_catalog_id: string;
         amazon_sku: string | null;
         temu_sku_id: string | null;
+        tiktok_seller_sku: string | null;
         lead_time_days: number | null;
         created_at: string;
         sku_catalog?: { product_name?: string; temu_goods_id?: string | null } | null;
@@ -126,6 +130,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         product_name: rec.sku_catalog?.product_name || "Unnamed product",
         amazon_sku: rec.amazon_sku,
         temu_sku_id: rec.temu_sku_id,
+        tiktok_seller_sku: rec.tiktok_seller_sku,
         temu_goods_id: rec.sku_catalog?.temu_goods_id ?? null,
         lead_time_days: rec.lead_time_days,
         created_at: rec.created_at,
@@ -202,9 +207,10 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       setBulkHeaders(headers);
       setBulkFileName(file.name);
       setProductCol(pickColumn(headers, ["productname", "product", "title", "name", "goodsname"]));
-      setAmazonSkuCol(pickColumn(headers, ["amazonsku", "sellersku"]));
+      setAmazonSkuCol(pickColumn(headers, ["amazonsku"]));
       setTemuSkuCol(pickColumn(headers, ["temuskuid", "temusku", "skuid"]));
       setTemuGoodsIdCol(pickColumn(headers, ["temugoodsid", "goodsid", "temugoods", "parentgoods"]));
+      setTiktokSkuCol(pickColumn(headers, ["tiktoksellersku", "tiktoksku", "sellersku"]));
       setLeadTimeCol(pickColumn(headers, ["leadtimedays", "leadtime", "lead"]));
       setMessage("File loaded. Confirm column mapping and click Import Mappings.");
     } catch (err) {
@@ -233,21 +239,37 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       const supabase = createClient();
       const { data: existingData, error: existingError } = await supabase
         .from("sku_mappings")
-        .select("id, sku_catalog_id, amazon_sku, temu_sku_id")
+        .select("id, sku_catalog_id, amazon_sku, temu_sku_id, tiktok_seller_sku")
         .eq("account_id", accountId);
       if (existingError) throw existingError;
 
       const byAmazon = new Map<string, { id: string; sku_catalog_id: string }>();
       const byTemu = new Map<string, { id: string; sku_catalog_id: string }>();
-      const byCatalog = new Map<string, { id: string; amazon_sku: string | null; temu_sku_id: string | null }[]>();
+      const byTiktok = new Map<string, { id: string; sku_catalog_id: string }>();
+      const byCatalog = new Map<
+        string,
+        { id: string; amazon_sku: string | null; temu_sku_id: string | null; tiktok_seller_sku: string | null }[]
+      >();
       (existingData || []).forEach((row) => {
-        const rec = row as { id?: string; sku_catalog_id?: string; amazon_sku?: string | null; temu_sku_id?: string | null };
+        const rec = row as {
+          id?: string;
+          sku_catalog_id?: string;
+          amazon_sku?: string | null;
+          temu_sku_id?: string | null;
+          tiktok_seller_sku?: string | null;
+        };
         if (!rec.id || !rec.sku_catalog_id) return;
         const payload = { id: rec.id, sku_catalog_id: rec.sku_catalog_id };
         if (rec.amazon_sku) byAmazon.set(rec.amazon_sku.trim().toUpperCase(), payload);
         if (rec.temu_sku_id) byTemu.set(rec.temu_sku_id.trim().toUpperCase(), payload);
+        if (rec.tiktok_seller_sku) byTiktok.set(rec.tiktok_seller_sku.trim().toUpperCase(), payload);
         const list = byCatalog.get(rec.sku_catalog_id) || [];
-        list.push({ id: rec.id, amazon_sku: rec.amazon_sku || null, temu_sku_id: rec.temu_sku_id || null });
+        list.push({
+          id: rec.id,
+          amazon_sku: rec.amazon_sku || null,
+          temu_sku_id: rec.temu_sku_id || null,
+          tiktok_seller_sku: rec.tiktok_seller_sku || null,
+        });
         byCatalog.set(rec.sku_catalog_id, list);
       });
 
@@ -260,14 +282,19 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         const amazonSku = amazonSkuCol ? normalizeSkuToken(row[amazonSkuCol] ?? "") : "";
         const temuSkuId = temuSkuCol ? normalizeSkuToken(row[temuSkuCol] ?? "") : "";
         const temuGoodsId = temuGoodsIdCol ? normalizeSkuToken(row[temuGoodsIdCol] ?? "") : "";
+        const tiktokSellerSku = tiktokSkuCol ? normalizeSkuToken(row[tiktokSkuCol] ?? "") : "";
         const leadTimeRaw = leadTimeCol ? String(row[leadTimeCol] ?? "").trim() : "";
         const leadTimeDays = leadTimeRaw ? Number(leadTimeRaw) : null;
-        if (!productName || (!amazonSku && !temuSkuId)) {
+        if (!productName || (!amazonSku && !temuSkuId && !tiktokSellerSku)) {
           skipped += 1;
           continue;
         }
 
-        const existing = (amazonSku && byAmazon.get(amazonSku)) || (temuSkuId && byTemu.get(temuSkuId)) || null;
+        const existing =
+          (amazonSku && byAmazon.get(amazonSku)) ||
+          (temuSkuId && byTemu.get(temuSkuId)) ||
+          (tiktokSellerSku && byTiktok.get(tiktokSellerSku)) ||
+          null;
 
         if (existing) {
           const catalogPatch: Record<string, unknown> = { product_name: productName };
@@ -283,6 +310,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
             .update({
               amazon_sku: amazonSku || null,
               temu_sku_id: temuSkuId || null,
+              tiktok_seller_sku: tiktokSellerSku || null,
               lead_time_days: Number.isFinite(leadTimeDays) ? leadTimeDays : null,
             })
             .eq("id", existing.id);
@@ -315,7 +343,10 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
           }
 
           const reusable = (byCatalog.get(catalogId) || []).find(
-            (m) => (!m.amazon_sku && Boolean(amazonSku)) || (!m.temu_sku_id && Boolean(temuSkuId))
+            (m) =>
+              (!m.amazon_sku && Boolean(amazonSku)) ||
+              (!m.temu_sku_id && Boolean(temuSkuId)) ||
+              (!m.tiktok_seller_sku && Boolean(tiktokSellerSku))
           );
           if (reusable) {
             const { error: mappingPatchError } = await supabase
@@ -323,6 +354,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
               .update({
                 amazon_sku: amazonSku || null,
                 temu_sku_id: temuSkuId || null,
+                tiktok_seller_sku: tiktokSellerSku || null,
                 lead_time_days: Number.isFinite(leadTimeDays) ? leadTimeDays : null,
               })
               .eq("id", reusable.id);
@@ -330,6 +362,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
             const payload = { id: reusable.id, sku_catalog_id: catalogId };
             if (amazonSku) byAmazon.set(amazonSku, payload);
             if (temuSkuId) byTemu.set(temuSkuId, payload);
+            if (tiktokSellerSku) byTiktok.set(tiktokSellerSku, payload);
             updated += 1;
             continue;
           }
@@ -341,6 +374,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
               sku_catalog_id: catalogId,
               amazon_sku: amazonSku || null,
               temu_sku_id: temuSkuId || null,
+              tiktok_seller_sku: tiktokSellerSku || null,
               lead_time_days: Number.isFinite(leadTimeDays) ? leadTimeDays : null,
             })
             .select("id")
@@ -349,8 +383,14 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
           const payload = { id: String(mapping.id), sku_catalog_id: catalogId };
           if (amazonSku) byAmazon.set(amazonSku, payload);
           if (temuSkuId) byTemu.set(temuSkuId, payload);
+          if (tiktokSellerSku) byTiktok.set(tiktokSellerSku, payload);
           const nextList = byCatalog.get(catalogId) || [];
-          nextList.push({ id: String(mapping.id), amazon_sku: amazonSku || null, temu_sku_id: temuSkuId || null });
+          nextList.push({
+            id: String(mapping.id),
+            amazon_sku: amazonSku || null,
+            temu_sku_id: temuSkuId || null,
+            tiktok_seller_sku: tiktokSellerSku || null,
+          });
           byCatalog.set(catalogId, nextList);
           created += 1;
         }
@@ -405,6 +445,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         sku_catalog_id: targetCatalogId,
         amazon_sku: normalizeSkuToken(row.amazon_sku || "") || null,
         temu_sku_id: normalizeSkuToken(row.temu_sku_id || "") || null,
+        tiktok_seller_sku: normalizeSkuToken(row.tiktok_seller_sku || "") || null,
         lead_time_days: row.lead_time_days ?? null,
       })
       .eq("id", row.id);
@@ -432,7 +473,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
   return (
     <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold text-slate-800">SKU Mapping (Amazon SKU ↔ Temu SKU ID)</h3>
+        <h3 className="text-sm font-semibold text-slate-800">SKU Mapping (Amazon SKU ↔ Temu SKU ID ↔ TikTok Seller SKU)</h3>
         <div className="flex flex-wrap items-center gap-2">
           <input
             value={search}
@@ -460,7 +501,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
       {canEdit ? (
         <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
           <p className="text-xs text-slate-600">
-            Bulk upload CSV/XLSX with columns: <span className="font-semibold">Product Name, Amazon SKU, Temu SKU ID, Temu Goods ID, Lead Time</span>.
+            Bulk upload CSV/XLSX with columns: <span className="font-semibold">Product Name, Amazon SKU, Temu SKU ID, Temu Goods ID, TikTok Seller SKU, Lead Time</span>.
           </p>
           <div className="grid gap-3 md:grid-cols-[1fr_auto]">
             <FileDropzone
@@ -483,7 +524,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
             </div>
           </div>
           {bulkRows.length > 0 ? (
-            <div className="grid gap-2 md:grid-cols-5">
+            <div className="grid gap-2 md:grid-cols-6">
               <label className="text-xs text-slate-600">
                 <span className="mb-1 block uppercase tracking-wide text-slate-500">Product Name Column</span>
                 <select
@@ -545,6 +586,21 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
                 </select>
               </label>
               <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">TikTok Seller SKU Column</span>
+                <select
+                  value={tiktokSkuCol}
+                  onChange={(e) => setTiktokSkuCol(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">Select column</option>
+                  {bulkHeaders.map((header) => (
+                    <option key={header} value={header}>
+                      {header}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-slate-600">
                 <span className="mb-1 block uppercase tracking-wide text-slate-500">Lead Time Column</span>
                 <select
                   value={leadTimeCol}
@@ -575,6 +631,7 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
               <th className="px-3 py-2">Amazon SKU</th>
               <th className="px-3 py-2">Temu SKU ID</th>
               <th className="px-3 py-2">Temu Goods ID</th>
+              <th className="px-3 py-2">TikTok Seller SKU</th>
               <th className="px-3 py-2">Lead Time (days)</th>
               {canEdit ? <th className="px-3 py-2">Actions</th> : null}
             </tr>
@@ -582,13 +639,13 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-3 py-3 text-slate-500" colSpan={canEdit ? 6 : 5}>
+                <td className="px-3 py-3 text-slate-500" colSpan={canEdit ? 7 : 6}>
                   Loading mappings...
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td className="px-3 py-3 text-slate-500" colSpan={canEdit ? 6 : 5}>
+                <td className="px-3 py-3 text-slate-500" colSpan={canEdit ? 7 : 6}>
                   No mappings found.
                 </td>
               </tr>
@@ -715,6 +772,18 @@ function EditableMappingRow({
           />
         ) : (
           row.temu_goods_id || "-"
+        )}
+      </td>
+      <td className="px-3 py-2">
+        {canEdit ? (
+          <input
+            value={row.tiktok_seller_sku || ""}
+            onChange={(e) => onChange({ tiktok_seller_sku: e.target.value.toUpperCase() || null })}
+            className="w-full rounded-lg border border-slate-300 px-2 py-1"
+            placeholder="Seller SKU"
+          />
+        ) : (
+          row.tiktok_seller_sku || "-"
         )}
       </td>
       <td className="px-3 py-2">

@@ -64,7 +64,7 @@ type ReportRow = {
   id: string;
   period_start: string;
   period_end: string;
-  platform: "amazon" | "temu";
+  platform: "amazon" | "temu" | "tiktok";
   output_vat: number;
   input_vat: number;
   net_profit: number;
@@ -73,7 +73,7 @@ type ReportRow = {
 };
 
 type ReportTxRow = {
-  platform: "amazon" | "temu";
+  platform: "amazon" | "temu" | "tiktok";
   transaction_date: string | null;
   sku: string | null;
   quantity: number | null;
@@ -115,8 +115,16 @@ function findRawValue(rawRow: Record<string, unknown>, terms: string[]) {
   return undefined;
 }
 
-function isUnitsSaleTx(platform: "amazon" | "temu", rawRow: Record<string, unknown> | null) {
+function isUnitsSaleTx(platform: "amazon" | "temu" | "tiktok", rawRow: Record<string, unknown> | null) {
   if (!rawRow) return true;
+  if (platform === "tiktok") {
+    // TikTok rows are order-line granular and carry an "Order Status"; a sale
+    // is any line whose order isn't cancelled.
+    const status = String(findRawValue(rawRow, ["order status"]) ?? "")
+      .trim()
+      .toLowerCase();
+    return status !== "canceled" && status !== "cancelled";
+  }
   const txType = String(findRawValue(rawRow, ["transaction type", "type"]) ?? "")
     .trim()
     .toLowerCase();
@@ -486,7 +494,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       const cogsSnapshotMap = new Map<string, { sku: string; quantity: number; unit_cost: number; includes_vat: boolean; effective_from: string }>();
 
       ((txRows || []) as unknown as ReportTxRow[]).forEach((tx) => {
-        const platform = tx.platform === "temu" ? "temu" : "amazon";
+        const platform = tx.platform === "temu" ? "temu" : tx.platform === "tiktok" ? "tiktok" : "amazon";
         if (!isUnitsSaleTx(platform, tx.raw_row || null)) return;
         const sku = normalizeSku(tx.sku || "");
         const qty = Math.abs(Number(tx.quantity || 0));

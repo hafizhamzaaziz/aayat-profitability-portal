@@ -33,6 +33,7 @@ type MappingRow = {
   id: string;
   amazon_sku: string | null;
   temu_sku_id: string | null;
+  tiktok_seller_sku: string | null;
 };
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
@@ -91,7 +92,7 @@ export async function buildBridgedCogsLookup(
       .order("effective_from", { ascending: true }),
     supabase
       .from("sku_mappings")
-      .select("id, amazon_sku, temu_sku_id")
+      .select("id, amazon_sku, temu_sku_id, tiktok_seller_sku")
       .eq("account_id", accountId),
   ]);
 
@@ -111,6 +112,7 @@ export async function buildBridgedCogsLookup(
     const ids: string[] = [];
     if (m.amazon_sku) ids.push(norm(m.amazon_sku));
     if (m.temu_sku_id) ids.push(norm(m.temu_sku_id));
+    if (m.tiktok_seller_sku) ids.push(norm(m.tiktok_seller_sku));
     if (ids.length === 0) continue;
     sistersById.set(m.id, ids);
     for (const id of ids) {

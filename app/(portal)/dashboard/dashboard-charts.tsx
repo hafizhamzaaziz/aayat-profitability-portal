@@ -36,11 +36,15 @@ export default function DashboardCharts({ reports, currency }: Props) {
     (acc, row) => {
       if (row.platform === "amazon") acc.amazon += row.net_profit;
       if (row.platform === "temu") acc.temu += row.net_profit;
+      if (row.platform === "tiktok") acc.tiktok += row.net_profit;
       return acc;
     },
-    { amazon: 0, temu: 0 }
+    { amazon: 0, temu: 0, tiktok: 0 }
   );
-  const totalAbs = Math.max(Math.abs(platformTotals.amazon) + Math.abs(platformTotals.temu), 1);
+  const totalAbs = Math.max(
+    Math.abs(platformTotals.amazon) + Math.abs(platformTotals.temu) + Math.abs(platformTotals.tiktok),
+    1
+  );
 
   // Build monthly aggregated sales vs net-profit timeline (latest 12 months).
   const monthly = useMemo(() => {
@@ -77,15 +81,26 @@ export default function DashboardCharts({ reports, currency }: Props) {
               {recent.map((row) => {
                 const widthPct = Math.max((Math.abs(row.net_profit) / maxAbsProfit) * 100, 4);
                 const positive = row.net_profit >= 0;
-                const isAmazon = row.platform === "amazon";
-                const barColor = isAmazon ? "bg-[#146eb4]" : "bg-[#ff9900]";
-                const textColor = isAmazon ? "text-[#146eb4]" : "text-[#ff9900]";
+                const barColor =
+                  row.platform === "amazon"
+                    ? "bg-[#146eb4]"
+                    : row.platform === "tiktok"
+                      ? "bg-[#ee1d52]"
+                      : "bg-[#ff9900]";
+                const textColor =
+                  row.platform === "amazon"
+                    ? "text-[#146eb4]"
+                    : row.platform === "tiktok"
+                      ? "text-[#ee1d52]"
+                      : "text-[#ff9900]";
+                const platformLabel =
+                  row.platform === "amazon" ? "Amazon" : row.platform === "tiktok" ? "TikTok" : "Temu";
                 return (
                   <div key={row.id} className="space-y-1">
                     <div className="flex items-center justify-between text-xs text-slate-600">
                       <span>
                         {shortPeriod(row.period_start, row.period_end)}{" "}
-                        <span className={textColor}>({isAmazon ? "Amazon" : "Temu"})</span>
+                        <span className={textColor}>({platformLabel})</span>
                       </span>
                       <span className={positive ? "text-emerald-700" : "text-rose-700"}>
                         {currency}
@@ -123,6 +138,14 @@ export default function DashboardCharts({ reports, currency }: Props) {
                 currency={currency}
                 colorClass="bg-[#ff9900]"
                 labelClass="text-[#ff9900]"
+              />
+              <PlatformBar
+                label="TikTok"
+                value={platformTotals.tiktok}
+                widthPct={(Math.abs(platformTotals.tiktok) / totalAbs) * 100}
+                currency={currency}
+                colorClass="bg-[#ee1d52]"
+                labelClass="text-[#ee1d52]"
               />
             </div>
           )}

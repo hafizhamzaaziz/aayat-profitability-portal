@@ -64,6 +64,7 @@ export default function DashboardFilters() {
           <option value="all">All</option>
           <option value="amazon">Amazon</option>
           <option value="temu">Temu</option>
+          <option value="tiktok">TikTok</option>
         </select>
       </div>
       <div className="sm:col-span-2 lg:col-span-2 flex flex-wrap gap-2 lg:justify-end">

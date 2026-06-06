@@ -58,7 +58,7 @@ type Input = {
     net_profit: number;
   };
   breakdown: {
-    platform: "amazon" | "temu";
+    platform: "amazon" | "temu" | "tiktok";
     summaryLines: Array<{ label: string; value: number }>;
     settlementLabel: string;
     settlementValue: number;
@@ -379,7 +379,11 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
             <View style={{ ...styles.col, ...styles.colLeft }}>
               <View style={styles.tightSection}>
               <Text style={styles.sectionTitle}>
-                {data.breakdown.platform === "amazon" ? "Amazon Report Summary" : "Temu Report Summary"}
+                {data.breakdown.platform === "amazon"
+                  ? "Amazon Report Summary"
+                  : data.breakdown.platform === "tiktok"
+                    ? "TikTok Report Summary"
+                    : "Temu Report Summary"}
                 {showVatSummary ? " (excl. VAT)" : ""}
               </Text>
               {data.breakdown.summaryLines.map((line) => (

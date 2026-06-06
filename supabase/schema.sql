@@ -157,7 +157,7 @@ create table if not exists public.reports (
   account_id uuid not null references public.accounts(id) on delete cascade,
   period_start date not null,
   period_end date not null,
-  platform text not null check (platform in ('amazon', 'temu')),
+  platform text not null check (platform in ('amazon', 'temu', 'tiktok')),
   gross_sales numeric(14,2) not null default 0,
   total_cogs numeric(14,2) not null default 0,
   total_fees numeric(14,2) not null default 0,
@@ -180,7 +180,7 @@ create table if not exists public.report_transactions (
   id uuid primary key default gen_random_uuid(),
   report_id uuid not null references public.reports(id) on delete cascade,
   account_id uuid not null references public.accounts(id) on delete cascade,
-  platform text not null check (platform in ('amazon', 'temu')),
+  platform text not null check (platform in ('amazon', 'temu', 'tiktok')),
   transaction_date date,
   sku text,
   quantity numeric(14,4),
@@ -287,15 +287,21 @@ create table if not exists public.sku_mappings (
   sku_catalog_id uuid not null references public.sku_catalog(id) on delete cascade,
   amazon_sku text,
   temu_sku_id text,
+  tiktok_seller_sku text,
   lead_time_days integer,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  check (amazon_sku is not null or temu_sku_id is not null)
+  check (amazon_sku is not null or temu_sku_id is not null or tiktok_seller_sku is not null)
 );
+-- TikTok seller SKU (col G "Seller SKU" on the TikTok order export). Added to
+-- bridge COGS lookups across Amazon ↔ Temu ↔ TikTok identifiers.
+alter table public.sku_mappings add column if not exists tiktok_seller_sku text;
 create unique index if not exists sku_mappings_amazon_unique
   on public.sku_mappings(account_id, amazon_sku) where amazon_sku is not null;
 create unique index if not exists sku_mappings_temu_unique
   on public.sku_mappings(account_id, temu_sku_id) where temu_sku_id is not null;
+create unique index if not exists sku_mappings_tiktok_unique
+  on public.sku_mappings(account_id, tiktok_seller_sku) where tiktok_seller_sku is not null;
 
 -- Optional link from COGS rows to canonical mapping.
 alter table public.cogs add column if not exists sku_mapping_id uuid references public.sku_mappings(id) on delete set null;

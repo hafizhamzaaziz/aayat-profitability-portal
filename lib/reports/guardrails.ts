@@ -1,4 +1,4 @@
-type Platform = "amazon" | "temu";
+type Platform = "amazon" | "temu" | "tiktok";
 
 const expectedBreakdownLabels: Record<Platform, string[]> = {
   amazon: [
@@ -21,6 +21,11 @@ const expectedBreakdownLabels: Record<Platform, string[]> = {
     "Chargebacks",
     "Penalties",
     "Seller Repayment",
+  ],
+  tiktok: [
+    "Order Amount",
+    "Refunds",
+    "TikTok Commission",
   ],
 };
 

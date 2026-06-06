@@ -10,10 +10,11 @@ import FileDropzone from "@/components/ui/file-dropzone";
 import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
 import { computePerSku } from "@/lib/reports/per-sku";
 import { computeTemuPnl, deriveTemuTotals, computeTemuPerSku, type TemuAdOverride } from "@/lib/reports/temu-pnl";
+import { computeTiktokPnl, deriveTiktokTotals, computeTiktokPerSku } from "@/lib/reports/tiktok-pnl";
 import { loadAdReport } from "@/lib/reports/ad-report";
 import { loadTemuAdReport, allocateTemuAds, type TemuAdReport } from "@/lib/reports/temu-ad-report";
 import { buildBridgedCogsLookup } from "@/lib/reports/cogs-lookup";
-import { AMAZON_METHODOLOGY_ID, TEMU_METHODOLOGY_ID } from "@/lib/reports/methodology";
+import { AMAZON_METHODOLOGY_ID, TEMU_METHODOLOGY_ID, TIKTOK_METHODOLOGY_ID } from "@/lib/reports/methodology";
 import { computeExpenseTotals } from "@/lib/reports/expense-totals";
 import {
   computeExpenseOccurrencesForPeriod,
@@ -23,7 +24,7 @@ import {
 import type { AdReport, SkuLine } from "@/lib/reports/types";
 import PerSkuTable, { type PerSkuRow } from "@/components/reports/per-sku-table";
 
-type Platform = "amazon" | "temu";
+type Platform = "amazon" | "temu" | "tiktok";
 
 type RowData = Record<string, unknown>;
 
@@ -246,6 +247,7 @@ function extractTransactionDate(row: RowData, fallbackIso: string): string {
       n.includes("posted") ||
       n.includes("transaction time") ||
       n.includes("order time") ||
+      n.includes("created time") ||
       n.includes("settlement")
     );
   });
@@ -539,6 +541,138 @@ function processTemu(input: {
           pnl.refundSellerDiscount +
           pnl.refundPlatformIncentive
       ),
+      adSkusUnmatched: {},
+      missingSkusWithSales,
+    },
+  };
+}
+
+/**
+ * TikTok Shop P&L. Operates on the parsed "All orders" export (OrderSKUList
+ * sheet). Cancelled orders are dropped; revenue is the order-level "Order
+ * Amount" (incl VAT, counted once per order); commission = 12% × Order Amount
+ * + £0.50 per order; COGS resolved per net unit via the bridged COGS lookup
+ * (TikTok Seller SKU ↔ Amazon SKU ↔ Temu SKU ID). Output VAT extracted from
+ * net revenue; input VAT reclaimed on commission + COGS. External costs
+ * (affiliate / ads / shipping) come from the Expenses page.
+ */
+function processTikTok(input: {
+  rows: RowData[];
+  cogsLookup: CogsLookup;
+  vatRatePct: number;
+  expenses: { net: number; vat: number };
+  periodStartIso: string;
+}): CalculationPreview {
+  const { rows, cogsLookup, vatRatePct, expenses, periodStartIso } = input;
+
+  const aoa = rowsToAoa(rows);
+  const pnl = computeTiktokPnl(aoa);
+
+  const portalCogsLookup = new Map<string, { unitCost: number; includesVat: boolean; effectiveFrom: string }[]>();
+  cogsLookup.forEach((versions, sku) => {
+    portalCogsLookup.set(String(sku).toLowerCase(), versions.map((v) => ({ ...v })));
+  });
+
+  const totals = deriveTiktokTotals({
+    pnl,
+    cogsLookup: portalCogsLookup,
+    vatRatePct,
+    defaultDateIso: periodStartIso,
+  });
+  const { lines: skuLines } = computeTiktokPerSku({
+    pnl,
+    cogsLookup: portalCogsLookup,
+    vatRatePct,
+    defaultDateIso: periodStartIso,
+  });
+
+  const purchaseCost = -totals.cogs; // positive
+
+  // ---- Missing-SKU + COGS snapshot from per-SKU lines ----
+  const missingSet = new Set<string>();
+  const missingSkusWithSales: Array<{ sku: string; units: number; netSales: number }> = [];
+  const cogsSnapshotMap = new Map<string, CogsSnapshotEntry>();
+  for (const line of skuLines) {
+    if (line.units > 0 && !line.costKnown) {
+      const upper = String(line.sku).toUpperCase();
+      missingSet.add(upper);
+      missingSkusWithSales.push({ sku: upper, units: line.units, netSales: line.netSales });
+      continue;
+    }
+    if (line.units > 0 && line.costKnown) {
+      const cogs = resolveCogsVersion(cogsLookup, line.sku.toUpperCase(), periodStartIso);
+      if (cogs) {
+        const key = `${line.sku.toUpperCase()}|${cogs.unitCost}|${cogs.includesVat ? "1" : "0"}|${cogs.effectiveFrom}`;
+        cogsSnapshotMap.set(key, {
+          sku: line.sku.toUpperCase(),
+          quantity: (cogsSnapshotMap.get(key)?.quantity || 0) + line.units,
+          unit_cost: cogs.unitCost,
+          includes_vat: cogs.includesVat,
+          effective_from: cogs.effectiveFrom,
+        });
+      }
+    }
+  }
+
+  const summaryLines = [
+    { label: "Order Amount", value: round2(totals.grossOrderAmountInclVat) },
+    { label: "Refunds", value: round2(-totals.refundsInclVat) },
+    { label: "TikTok Commission", value: round2(-totals.commissionInclVat) },
+  ];
+
+  const totalFees = Math.abs(totals.commissionExvat);
+  const settlementNet = totals.netSales + totals.totalTiktokFeesExvat;
+  const inputVatTotal = totals.totalInputVatIncludingCogs + expenses.vat;
+  const finalVat = totals.outputVat - inputVatTotal;
+  const operatingProfit = totals.operatingProfit;
+  const netProfit = round2(operatingProfit - expenses.net);
+  const marketplaceNetProfit = round2(operatingProfit);
+  const unitsSold = skuLines.reduce((acc, l) => acc + Math.max(0, l.units), 0);
+
+  return {
+    grossSales: round2(totals.settlementValue),
+    totalCogs: round2(purchaseCost),
+    totalFees: round2(totalFees),
+    outputVat: round2(totals.outputVat),
+    inputVat: round2(inputVatTotal),
+    netProfit,
+    marketplaceNetProfit,
+    unitsSold,
+    missingSkus: Array.from(missingSet),
+    cogsSnapshot: Array.from(cogsSnapshotMap.values()),
+    breakdown: {
+      platform: "tiktok",
+      summaryLines,
+      settlementLabel: "Net TikTok Settlement (incl VAT)",
+      settlementValue: round2(totals.settlementValue),
+      transferLabel: "Transfers to Bank",
+      transferValue: 0,
+      pnl: {
+        settlementNet: round2(settlementNet),
+        purchaseCost: round2(purchaseCost),
+        netProfit,
+      },
+      vat: {
+        outputVat: round2(totals.outputVat),
+        inputVatFees: round2(totals.totalInputVatTiktokFees),
+        inputVatPurchases: round2(totals.inputVatCogs + expenses.vat),
+        finalVat: round2(finalVat),
+      },
+      methodologyId: TIKTOK_METHODOLOGY_ID,
+      perSkuRollup: {
+        marketplaceNetProfitSum: marketplaceNetProfit,
+        externalExpensesNet: Number(Number(expenses.net || 0).toFixed(2)),
+      },
+    },
+    skuLines,
+    diagnostics: {
+      rowsProcessed: totals.rowsProcessed,
+      rowsSkipped: totals.rowsSkipped,
+      deliveryUnmatched: 0,
+      retrochargeUnmatched: 0,
+      reimburseUnallocated: 0,
+      netSales: round2(totals.netSales),
+      productSalesRefunds: round2(-(totals.refundsInclVat / (1 + (vatRatePct / 100 || 0.2)))),
       adSkusUnmatched: {},
       missingSkusWithSales,
     },
@@ -842,7 +976,8 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
 
   const previewProductSales = useMemo(() => {
     if (!preview) return 0;
-    const label = platform === "amazon" ? "Product Sales" : "Order Payments";
+    const label =
+      platform === "amazon" ? "Product Sales" : platform === "tiktok" ? "Order Amount" : "Order Payments";
     const fromBreakdown = preview.breakdown.summaryLines.find((line) => line.label === label)?.value;
     return Number(fromBreakdown ?? preview.grossSales ?? 0);
   }, [preview, platform]);
@@ -855,13 +990,20 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
   useEffect(() => {
     if (!headers.length) return;
     const temuSku = autoPickHeader(headers, ["skuid", "temuskuid"]);
+    const tiktokSku = autoPickHeader(headers, ["sellersku"]);
     const genericSku = autoPickHeader(headers, ["sku", "asin", "itemid", "reference"]);
-    setSkuCol(platform === "temu" ? (temuSku || genericSku) : genericSku);
+    setSkuCol(
+      platform === "temu"
+        ? temuSku || genericSku
+        : platform === "tiktok"
+          ? tiktokSku || genericSku
+          : genericSku
+    );
     setQtyCol(autoPickHeader(headers, ["qty", "quantity", "units"]));
   }, [platform, headers]);
 
   useEffect(() => {
-    if (isZeroVatAccount && platform !== "amazon") {
+    if (isZeroVatAccount && platform !== "amazon" && platform !== "tiktok") {
       setPlatform("amazon");
     }
   }, [isZeroVatAccount, platform]);
@@ -903,8 +1045,15 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       setHeaders(nextHeaders);
       setFileName(file.name);
       const temuSku = autoPickHeader(nextHeaders, ["skuid", "temuskuid"]);
+      const tiktokSku = autoPickHeader(nextHeaders, ["sellersku"]);
       const genericSku = autoPickHeader(nextHeaders, ["sku", "asin", "itemid", "reference"]);
-      setSkuCol(platform === "temu" ? (temuSku || genericSku) : genericSku);
+      setSkuCol(
+        platform === "temu"
+          ? temuSku || genericSku
+          : platform === "tiktok"
+            ? tiktokSku || genericSku
+            : genericSku
+      );
       setQtyCol(autoPickHeader(nextHeaders, ["qty", "quantity", "units"]));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to parse file.");
@@ -1032,16 +1181,24 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
               adReport,
               cogsVatReclaimPct,
             })
-          : processTemu({
-              rows,
-              cogsLookup,
-              vatRatePct: account.vat_rate,
-              expenses: expenseTotals,
-              periodStartIso: periodStart,
-              cogsVatReclaimPct,
-              adReport: temuAdReport,
-              goodsToSkuIds,
-            });
+          : platform === "tiktok"
+            ? processTikTok({
+                rows,
+                cogsLookup,
+                vatRatePct: account.vat_rate,
+                expenses: expenseTotals,
+                periodStartIso: periodStart,
+              })
+            : processTemu({
+                rows,
+                cogsLookup,
+                vatRatePct: account.vat_rate,
+                expenses: expenseTotals,
+                periodStartIso: periodStart,
+                cogsVatReclaimPct,
+                adReport: temuAdReport,
+                goodsToSkuIds,
+              });
       const result = applyZeroVatPresentation(computed, account.vat_rate, expenseTotals.net);
 
       const breakdownError = validateBreakdown(platform, result.breakdown);
@@ -1427,6 +1584,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
           >
             <option value="amazon">Amazon</option>
             {!isZeroVatAccount ? <option value="temu">Temu</option> : null}
+            <option value="tiktok">TikTok</option>
           </select>
         </div>
 
@@ -1764,7 +1922,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
             </div>
           ) : null}
 
-          {platform === "amazon" && preview.skuLines && preview.skuLines.length > 0 ? (
+          {(platform === "amazon" || platform === "tiktok") && preview.skuLines && preview.skuLines.length > 0 ? (
             <div className="rounded-2xl border border-slate-200 bg-white p-4">
               <div className="mb-3 flex items-center justify-between">
                 <h4 className="text-sm font-semibold text-slate-800">Per-SKU Profitability</h4>

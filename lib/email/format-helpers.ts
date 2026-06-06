@@ -17,6 +17,7 @@ export function formatPeriodLabel(periodStart: string, periodEnd: string) {
 export function platformLabel(platform: string) {
   if (platform === "amazon") return "Amazon";
   if (platform === "temu") return "Temu";
+  if (platform === "tiktok") return "TikTok";
   if (platform === "all") return "All platforms";
   return platform.charAt(0).toUpperCase() + platform.slice(1);
 }
