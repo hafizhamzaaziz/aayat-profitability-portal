@@ -175,6 +175,108 @@ function dailyEntryMappingLabel(m?: SkuRef) {
   return `${sku} — ${m.productName}`;
 }
 
+// Type-ahead SKU picker used in place of long native <select> dropdowns. Renders
+// a single-line trigger that opens a panel with a search box and a filtered list.
+function SkuCombobox({
+  value,
+  onChange,
+  mappings,
+  mappingById,
+  placeholder = "Select SKU",
+  allowAll = false,
+  disabled = false,
+  className,
+}: {
+  value: string;
+  onChange: (mappingId: string) => void;
+  mappings: SkuRef[];
+  mappingById: Map<string, SkuRef>;
+  placeholder?: string;
+  allowAll?: boolean;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return mappings;
+    return mappings.filter(
+      (m) =>
+        String(m.amazonSku || "").toLowerCase().includes(q) ||
+        String(m.temuSkuId || "").toLowerCase().includes(q) ||
+        String(m.productName || "").toLowerCase().includes(q)
+    );
+  }, [mappings, query]);
+
+  const label =
+    value === "all" ? "All SKUs" : value ? dailyEntryMappingLabel(mappingById.get(value)) : placeholder;
+
+  return (
+    <div className={`relative ${className ?? ""}`}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-1 rounded-lg border border-slate-300 px-2 py-2 text-left text-sm disabled:opacity-50"
+        title={value && value !== "all" ? dailyEntryMappingLabel(mappingById.get(value)) : undefined}
+      >
+        <span className={`truncate ${value ? "text-slate-800" : "text-slate-400"}`}>{label}</span>
+        <span className="shrink-0 text-[10px] text-slate-400">▾</span>
+      </button>
+      {open ? (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-20 mt-1 w-full min-w-[16rem] rounded-lg border border-slate-200 bg-white p-2 shadow-lg">
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Type to search SKU / product"
+              className="mb-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+            />
+            <div className="max-h-56 overflow-auto">
+              {allowAll ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChange("all");
+                    setOpen(false);
+                  }}
+                  className={`mb-1 block w-full rounded-md px-2 py-1 text-left text-xs ${
+                    value === "all" ? "bg-[var(--md-primary)] text-white" : "text-slate-700 hover:bg-slate-100"
+                  }`}
+                >
+                  All SKUs
+                </button>
+              ) : null}
+              {filtered.length === 0 ? (
+                <p className="px-2 py-1 text-[11px] text-slate-500">No results found.</p>
+              ) : (
+                filtered.slice(0, 100).map((m) => (
+                  <button
+                    key={m.mappingId}
+                    type="button"
+                    onClick={() => {
+                      onChange(m.mappingId);
+                      setOpen(false);
+                    }}
+                    className={`mb-1 block w-full truncate rounded-md px-2 py-1 text-left text-xs ${
+                      value === m.mappingId ? "bg-[var(--md-primary)] text-white" : "text-slate-700 hover:bg-slate-100"
+                    }`}
+                  >
+                    {(m.amazonSku || m.temuSkuId || "—") + " — " + shortenName(m.productName, 40)}
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 const DEFAULTS: InventoryDefaults = {
   leadTimeDays: 90,
   amazonCoverDays: 30,
@@ -424,6 +526,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     mappingId: "all",
   });
   const [dailyEntryRows, setDailyEntryRows] = useState<DailyEntryRow[]>([createDailyEntryRow()]);
+  const [openEntrySkuDropdownId, setOpenEntrySkuDropdownId] = useState<string | null>(null);
   const [editingDailySaleId, setEditingDailySaleId] = useState<string | null>(null);
   const [dailySaleDraft, setDailySaleDraft] = useState<DailySaleEditDraft | null>(null);
   const [savedPlans, setSavedPlans] = useState<SavedShipmentPlan[]>([]);
@@ -1029,6 +1132,39 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
     return map;
   }, [txFacts, nowIso]);
+
+  // Column totals for the Overview & Velocity table, computed across the whole
+  // filtered set (not just the current page) so the figures reflect the
+  // selected period as a whole.
+  const overviewTotals = useMemo(() => {
+    const totals = {
+      selectedAmazon: 0,
+      selectedTemu: 0,
+      selectedCombined: 0,
+      ytd: 0,
+      avgPerMonth: 0,
+      amazonStock: 0,
+      warehouseStock: 0,
+      stockValue: 0,
+      potentialSales: 0,
+      potentialProfit: 0,
+    };
+    visibleRows.forEach((row) => {
+      const selAmz = periodUnitsByMapping.get(row.mappingId)?.amazon || 0;
+      const selTemu = periodUnitsByMapping.get(row.mappingId)?.temu || 0;
+      totals.selectedAmazon += selAmz;
+      totals.selectedTemu += selTemu;
+      totals.selectedCombined += selAmz + selTemu;
+      totals.ytd += ytdComparisonByMapping.get(row.mappingId)?.current || 0;
+      totals.avgPerMonth += Number(row.yearAvgPerMonth || 0);
+      totals.amazonStock += Number(row.amazonUnitsOnHand || 0);
+      totals.warehouseStock += Number(row.warehouseUnitsOnHand || 0);
+      totals.stockValue += Number(row.stockValue || 0);
+      totals.potentialSales += Number(row.potentialSalesValue || 0);
+      totals.potentialProfit += Number(row.potentialProfitValue || 0);
+    });
+    return totals;
+  }, [visibleRows, periodUnitsByMapping, ytdComparisonByMapping]);
 
   useEffect(() => {
     setOverviewOffset(0);
@@ -1855,7 +1991,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
 
   const getFilteredMappingsForRow = (row: DailyEntryRow) => {
     const q = row.skuSearch.trim().toLowerCase();
-    if (!q) return [];
+    if (!q) return mappings;
     return mappings.filter((m) => {
       const sku = String(m.amazonSku || m.temuSkuId || "").toLowerCase();
       const productName = String(m.productName || "").toLowerCase();
@@ -2142,9 +2278,14 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   const ledgerPaged = ledgerEntries.slice((ledgerCurrentPage - 1) * LEDGER_PAGE_SIZE, ledgerCurrentPage * LEDGER_PAGE_SIZE);
 
   const addMappingToPlan = (mappingId: string) => {
-    setSelectedMappingIds((prev) => (prev.includes(mappingId) ? prev : [...prev, mappingId]));
-    setActiveTab("shipment-planning");
-    setMessage("SKU added to shipment plan selection.");
+    setSelectedMappingIds((prev) => {
+      if (prev.includes(mappingId)) {
+        setMessage("SKU removed from shipment plan selection.");
+        return prev.filter((id) => id !== mappingId);
+      }
+      setMessage("SKU added to shipment plan selection. Open Shipment Planning when ready.");
+      return [...prev, mappingId];
+    });
   };
 
   const downloadDailySalesCsv = () => {
@@ -2489,7 +2630,25 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   </td>
                 </tr>
               ) : (
-                overviewRows.map((row) => {
+                <>
+                <tr className="border-t border-slate-200 bg-slate-100/80 font-semibold text-slate-700">
+                  <td className="px-2 py-2"></td>
+                  <td className="px-2 py-2">Totals</td>
+                  <td className="px-2 py-2 text-[11px] font-normal text-slate-500">{overviewTotalCount} SKUs</td>
+                  <td className="px-2 py-2">{overviewTotals.selectedAmazon}</td>
+                  <td className="px-2 py-2">{overviewTotals.selectedTemu}</td>
+                  <td className="px-2 py-2">{overviewTotals.selectedCombined}</td>
+                  <td className="px-2 py-2">{overviewTotals.ytd}</td>
+                  <td className="px-2 py-2">{Math.round(overviewTotals.avgPerMonth)}</td>
+                  <td className="px-2 py-2">{overviewTotals.amazonStock}</td>
+                  <td className="px-2 py-2">{overviewTotals.warehouseStock}</td>
+                  <td className="px-2 py-2">-</td>
+                  <td className="px-2 py-2">-</td>
+                  <td className="px-2 py-2">{currency}{overviewTotals.stockValue.toFixed(2)}</td>
+                  <td className="px-2 py-2">{currency}{overviewTotals.potentialSales.toFixed(2)}</td>
+                  <td className="px-2 py-2">{currency}{overviewTotals.potentialProfit.toFixed(2)}</td>
+                </tr>
+                {overviewRows.map((row) => {
                   const selectedAmazon = periodUnitsByMapping.get(row.mappingId)?.amazon || 0;
                   const selectedTemu = periodUnitsByMapping.get(row.mappingId)?.temu || 0;
                   const selectedCombined = selectedAmazon + selectedTemu;
@@ -2596,7 +2755,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     </td>
                   </tr>
                 );
-                })
+                })}
+                </>
               )}
             </tbody>
           </table>
@@ -2677,7 +2837,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                 )}
               </div>
             </div>
-            <div className="grid gap-2 md:grid-cols-8">
+            <div className="grid gap-2 md:grid-cols-10">
               <input value={newProfile.profileName} onChange={(e) => setNewProfile((p) => ({ ...p, profileName: e.target.value }))} placeholder="Profile name" className="rounded-lg border border-slate-300 px-2 py-2 text-sm md:col-span-2" />
               <input value={newProfile.unitsPerBox} onChange={(e) => setNewProfile((p) => ({ ...p, unitsPerBox: e.target.value }))} type="number" placeholder="Units/box" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
               <input value={newProfile.boxLength} onChange={(e) => setNewProfile((p) => ({ ...p, boxLength: e.target.value }))} type="number" placeholder="Length" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
@@ -2687,6 +2847,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                 <option value="mm">mm</option>
                 <option value="cm">cm</option>
                 <option value="in">in</option>
+              </select>
+              <input value={newProfile.boxWeight} onChange={(e) => setNewProfile((p) => ({ ...p, boxWeight: e.target.value }))} type="number" placeholder="Weight" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
+              <select value={newProfile.weightUnit} onChange={(e) => setNewProfile((p) => ({ ...p, weightUnit: e.target.value as "kg" | "lb" }))} className="rounded-lg border border-slate-300 px-2 py-2 text-sm">
+                <option value="kg">kg</option>
+                <option value="lb">lb</option>
               </select>
               <button onClick={() => void addPackProfile()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
                 Save profile
@@ -2955,14 +3120,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               Use this for supplier inbound, seller returns, B2B/wholesale deductions, and warehouse-to-Amazon transfers.
             </p>
             <div className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-[1fr_160px_120px_120px_1fr_140px_auto]">
-              <select value={intake.mappingId} onChange={(e) => setIntake((prev) => ({ ...prev, mappingId: e.target.value }))} className="rounded-lg border border-slate-300 px-2 py-2 text-sm">
-                <option value="">Select SKU</option>
-                {mappings.map((m) => (
-                  <option key={m.mappingId} value={m.mappingId}>
-                    {(m.amazonSku || m.temuSkuId || "—") + " — " + m.productName}
-                  </option>
-                ))}
-              </select>
+              <SkuCombobox
+                value={intake.mappingId}
+                onChange={(mappingId) => setIntake((prev) => ({ ...prev, mappingId }))}
+                mappings={mappings}
+                mappingById={mappingById}
+                placeholder="Select SKU"
+              />
               <select
                 value={intake.profileId}
                 onChange={(e) => {
@@ -3648,40 +3812,54 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   key={entryRow.id}
                   className="grid gap-2 rounded-lg border border-slate-200 bg-white p-2 md:grid-cols-[1fr_124px_108px_170px_96px_96px_96px_1fr_auto]"
                 >
-                  <div className="space-y-1">
-                    <input
-                      value={entryRow.skuSearch}
-                      onChange={(e) => updateDailyEntryRow(entryRow.id, { skuSearch: e.target.value })}
-                      placeholder="Search SKU / product"
-                      className="w-full rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
-                    />
-                    {entryRow.skuSearch.trim() ? (
-                      <div className="max-h-24 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-1">
-                        {filteredMappings.length === 0 ? (
-                          <p className="px-2 py-1 text-[11px] text-slate-500">No results found.</p>
-                        ) : (
-                          filteredMappings.slice(0, 50).map((m) => (
-                            <button
-                              key={m.mappingId}
-                              type="button"
-                              onClick={() => updateDailyEntryRow(entryRow.id, { mappingId: m.mappingId })}
-                              className={`mb-1 block w-full rounded-md px-2 py-1 text-left text-[11px] ${
-                                entryRow.mappingId === m.mappingId ? "bg-[var(--md-primary)] text-white" : "bg-white text-slate-700 hover:bg-slate-100"
-                              }`}
-                              disabled={!canEdit}
-                            >
-                              {(m.amazonSku || m.temuSkuId || "—") + " — " + shortenName(m.productName, 36)}
-                            </button>
-                          ))
-                        )}
-                      </div>
-                    ) : (
-                      <p className="px-1 text-[11px] text-slate-500">Start typing to search SKU/product.</p>
-                    )}
-                    {entryRow.mappingId ? (
-                      <p className="px-1 text-[11px] text-slate-600">
-                        Selected: <span className="font-semibold">{dailyEntryMappingLabel(mappingById.get(entryRow.mappingId))}</span>
-                      </p>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      disabled={!canEdit}
+                      onClick={() => setOpenEntrySkuDropdownId((prev) => (prev === entryRow.id ? null : entryRow.id))}
+                      className="flex w-full items-center justify-between gap-1 rounded-lg border border-slate-300 px-2 py-1.5 text-left text-xs disabled:opacity-50"
+                      title={entryRow.mappingId ? dailyEntryMappingLabel(mappingById.get(entryRow.mappingId)) : undefined}
+                    >
+                      <span className={`truncate ${entryRow.mappingId ? "text-slate-800" : "text-slate-400"}`}>
+                        {entryRow.mappingId ? dailyEntryMappingLabel(mappingById.get(entryRow.mappingId)) : "Select SKU / product"}
+                      </span>
+                      <span className="shrink-0 text-[10px] text-slate-400">▾</span>
+                    </button>
+                    {openEntrySkuDropdownId === entryRow.id ? (
+                      <>
+                        <div className="fixed inset-0 z-10" onClick={() => setOpenEntrySkuDropdownId(null)} />
+                        <div className="absolute left-0 top-full z-20 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-2 shadow-lg">
+                          <input
+                            autoFocus
+                            value={entryRow.skuSearch}
+                            onChange={(e) => updateDailyEntryRow(entryRow.id, { skuSearch: e.target.value })}
+                            placeholder="Search SKU / product"
+                            className="mb-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
+                          />
+                          <div className="max-h-52 overflow-auto">
+                            {filteredMappings.length === 0 ? (
+                              <p className="px-2 py-1 text-[11px] text-slate-500">No results found.</p>
+                            ) : (
+                              filteredMappings.slice(0, 50).map((m) => (
+                                <button
+                                  key={m.mappingId}
+                                  type="button"
+                                  onClick={() => {
+                                    updateDailyEntryRow(entryRow.id, { mappingId: m.mappingId });
+                                    setOpenEntrySkuDropdownId(null);
+                                  }}
+                                  className={`mb-1 block w-full rounded-md px-2 py-1 text-left text-[11px] ${
+                                    entryRow.mappingId === m.mappingId ? "bg-[var(--md-primary)] text-white" : "bg-white text-slate-700 hover:bg-slate-100"
+                                  }`}
+                                  disabled={!canEdit}
+                                >
+                                  {(m.amazonSku || m.temuSkuId || "—") + " — " + shortenName(m.productName, 36)}
+                                </button>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      </>
                     ) : null}
                   </div>
 
@@ -3730,9 +3908,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   </select>
 
                   <input
-                    type="number"
+                    type="text"
                     inputMode="numeric"
-                    min={0}
                     value={entryRow.soldUnits}
                     onChange={(e) => updateDailyEntryRow(entryRow.id, { soldUnits: sanitizeNonNegativeNumber(e.target.value) })}
                     placeholder="Units sold"
@@ -3741,9 +3918,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   />
 
                   <input
-                    type="number"
+                    type="text"
                     inputMode="numeric"
-                    min={0}
                     value={entryRow.returnsUnits}
                     onChange={(e) => updateDailyEntryRow(entryRow.id, { returnsUnits: sanitizeNonNegativeNumber(e.target.value) })}
                     placeholder="Returns"
@@ -3752,9 +3928,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   />
 
                   <input
-                    type="number"
+                    type="text"
                     inputMode="numeric"
-                    min={0}
                     value={entryRow.collectedUnits}
                     onChange={(e) => updateDailyEntryRow(entryRow.id, { collectedUnits: sanitizeNonNegativeNumber(e.target.value) })}
                     placeholder="Collected"
@@ -3985,12 +4160,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         <td className="px-2 py-2">
                           {isEditingRow ? (
                             <input
-                              type="number"
+                              type="text"
                               inputMode="numeric"
                               value={dailySaleDraft?.soldUnits || ""}
                               onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, soldUnits: sanitizeNonNegativeNumber(e.target.value) } : prev))}
                               className="no-spinner w-20 rounded border border-slate-300 px-2 py-1"
-                              min={0}
                             />
                           ) : (
                             row.sold_units
@@ -3999,12 +4173,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         <td className="px-2 py-2">
                           {isEditingRow ? (
                             <input
-                              type="number"
+                              type="text"
                               inputMode="numeric"
                               value={dailySaleDraft?.returnsUnits || ""}
                               onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, returnsUnits: sanitizeNonNegativeNumber(e.target.value) } : prev))}
                               className="no-spinner w-20 rounded border border-slate-300 px-2 py-1"
-                              min={0}
                             />
                           ) : (
                             row.returns_units
@@ -4013,12 +4186,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         <td className="px-2 py-2">
                           {isEditingRow ? (
                             <input
-                              type="number"
+                              type="text"
                               inputMode="numeric"
                               value={dailySaleDraft?.collectedUnits || ""}
                               onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, collectedUnits: sanitizeNonNegativeNumber(e.target.value) } : prev))}
                               className="no-spinner w-20 rounded border border-slate-300 px-2 py-1"
-                              min={0}
                             />
                           ) : (
                             row.collected_units
@@ -4156,6 +4328,28 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             </div>
           </div>
 
+          {canEdit && selectedMappingIds.length > 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs">
+              <span className="font-semibold text-sky-800">{selectedMappingIds.length} SKU{selectedMappingIds.length === 1 ? "" : "s"} selected for the shipment plan</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedMappingIds([])}
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 font-semibold text-slate-700"
+                >
+                  Clear selection
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("shipment-planning")}
+                  className="rounded-md bg-[var(--md-primary)] px-2 py-1 font-semibold text-white"
+                >
+                  Open Shipment Planning
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           <div className="overflow-x-auto rounded-xl border border-slate-200">
             <table className="min-w-full text-xs">
               <thead className="bg-slate-50 text-left uppercase tracking-wide text-slate-500">
@@ -4219,13 +4413,23 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         </td>
                         {canEdit ? (
                           <td className="px-2 py-2 text-right">
-                            <button
-                              type="button"
-                              onClick={() => addMappingToPlan(row.mappingId)}
-                              className="rounded bg-[var(--md-primary)] px-2 py-1 font-semibold text-white"
-                            >
-                              Add to plan
-                            </button>
+                            {selectedMappingIds.includes(row.mappingId) ? (
+                              <button
+                                type="button"
+                                onClick={() => addMappingToPlan(row.mappingId)}
+                                className="rounded border border-red-200 bg-red-50 px-2 py-1 font-semibold text-red-700"
+                              >
+                                Remove
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => addMappingToPlan(row.mappingId)}
+                                className="rounded bg-[var(--md-primary)] px-2 py-1 font-semibold text-white"
+                              >
+                                Add to plan
+                              </button>
+                            )}
                           </td>
                         ) : null}
                       </tr>
@@ -4325,22 +4529,18 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           </div>
 
           <div className="flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
-            <select
+            <SkuCombobox
               value={ledgerFilters.mappingId}
-              onChange={(e) => {
-                setLedgerFilters((prev) => ({ ...prev, mappingId: e.target.value }));
+              onChange={(mappingId) => {
+                setLedgerFilters((prev) => ({ ...prev, mappingId }));
                 setLedgerOffset(0);
               }}
-              className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
-            >
-              <option value="all">All SKUs</option>
-              {mappings.map((mp) => (
-                <option key={mp.mappingId} value={mp.mappingId}>
-                  {mp.amazonSku || mp.temuSkuId || "No SKU"}
-                  {mp.productName ? ` — ${shortenName(mp.productName, 24)}` : ""}
-                </option>
-              ))}
-            </select>
+              mappings={mappings}
+              mappingById={mappingById}
+              allowAll
+              placeholder="All SKUs"
+              className="w-56"
+            />
             <select
               value={ledgerFilters.eventKey}
               onChange={(e) => {

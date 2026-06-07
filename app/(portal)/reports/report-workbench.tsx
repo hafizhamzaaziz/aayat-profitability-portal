@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
 import { pushClientNotification } from "@/lib/notifications/client";
+import { applyCogsVersion } from "@/lib/cogs/apply-cogs-version";
 import { deriveReportWarnings, validateBreakdown, validatePeriodRange } from "@/lib/reports/guardrails";
 import FileDropzone from "@/components/ui/file-dropzone";
 import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
@@ -27,6 +29,15 @@ import PerSkuTable, { type PerSkuRow } from "@/components/reports/per-sku-table"
 type Platform = "amazon" | "temu" | "tiktok";
 
 type RowData = Record<string, unknown>;
+
+/** One editable row in the "missing SKU costs" modal. */
+type MissingCostDraft = {
+  sku: string;
+  productName: string;
+  unitCost: string;
+  includesVat: boolean;
+  effectiveFrom: string;
+};
 
 type CalculationPreview = {
   grossSales: number;
@@ -937,6 +948,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
   const [platform, setPlatform] = useState<Platform>("amazon");
   const [periodStart, setPeriodStart] = useState("");
   const [periodEnd, setPeriodEnd] = useState("");
+  const [tiktokSyncing, setTiktokSyncing] = useState(false);
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<RowData[]>([]);
   const [skuCol, setSkuCol] = useState("");
@@ -960,6 +972,13 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
   const [temuAdLoadError, setTemuAdLoadError] = useState<string | null>(null);
   const cogsVatReclaimPct = Number(account.cogs_vat_reclaim_pct ?? 100);
   const isZeroVatAccount = Number(account.vat_rate || 0) === 0;
+  // Missing-SKU cost-entry modal: SKUs in the uploaded report that have no
+  // COGS row for this account yet. Entered costs are persisted via the same
+  // path the COGS page uses, then the report is reprocessed.
+  const [missingModalOpen, setMissingModalOpen] = useState(false);
+  const [missingDrafts, setMissingDrafts] = useState<MissingCostDraft[]>([]);
+  const [savingMissing, setSavingMissing] = useState(false);
+  const [missingError, setMissingError] = useState<string | null>(null);
 
   const currency = account.currency || "£";
 
@@ -1067,6 +1086,59 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
     }
   };
 
+  const syncFromTiktok = async () => {
+    if (!periodStart || !periodEnd) {
+      setError("Set the reporting period (start and end) before syncing from TikTok.");
+      return;
+    }
+    setTiktokSyncing(true);
+    setError(null);
+    setMessage(null);
+    setPreview(null);
+    try {
+      const res = await fetch("/api/tiktok/orders/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: account.id, from: periodStart, to: periodEnd }),
+      });
+      const data = (await res.json()) as {
+        ok: boolean;
+        error?: string;
+        rows?: RowData[];
+        orderCount?: number;
+        lineCount?: number;
+        shopName?: string | null;
+      };
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || `Sync failed (${res.status}).`);
+      }
+      const parsedRows = data.rows || [];
+      if (!parsedRows.length) {
+        setRows([]);
+        setHeaders([]);
+        setFileName("");
+        throw new Error("No TikTok orders found in this period.");
+      }
+      const nextHeaders = Object.keys(parsedRows[0]);
+      setRows(parsedRows);
+      setHeaders(nextHeaders);
+      setFileName(
+        `TikTok sync${data.shopName ? ` · ${data.shopName}` : ""} (${data.orderCount ?? 0} orders)`
+      );
+      const tiktokSku = autoPickHeader(nextHeaders, ["sellersku"]);
+      const genericSku = autoPickHeader(nextHeaders, ["sku", "asin", "itemid", "reference"]);
+      setSkuCol(tiktokSku || genericSku);
+      setQtyCol(autoPickHeader(nextHeaders, ["qty", "quantity", "units"]));
+      setMessage(
+        `Pulled ${data.orderCount ?? 0} TikTok orders (${data.lineCount ?? parsedRows.length} SKU lines). Review and run the calculation.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "TikTok sync failed.");
+    } finally {
+      setTiktokSyncing(false);
+    }
+  };
+
   const onAdFileChange = async (file: File | null) => {
     if (!file) {
       setAdReport(null);
@@ -1129,6 +1201,84 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
     setTemuAdReport(null);
     setTemuAdFileName("");
     setTemuAdLoadError(null);
+  };
+
+  const buildMissingDrafts = (result: CalculationPreview): MissingCostDraft[] => {
+    const descBySku = new Map<string, string>();
+    (result.skuLines || []).forEach((line) => {
+      const key = String(line.sku || "").toUpperCase();
+      if (key && line.description) descBySku.set(key, line.description);
+    });
+    const defaultEffective = periodStart || new Date().toISOString().slice(0, 10);
+    return (result.missingSkus || []).map((sku) => {
+      const upper = String(sku).toUpperCase();
+      return {
+        sku: upper,
+        productName: descBySku.get(upper) || "",
+        unitCost: "",
+        includesVat: false,
+        effectiveFrom: defaultEffective,
+      };
+    });
+  };
+
+  const setMissingDraft = (index: number, patch: Partial<MissingCostDraft>) => {
+    setMissingDrafts((prev) => prev.map((draft, i) => (i === index ? { ...draft, ...patch } : draft)));
+  };
+
+  const saveMissingCosts = async () => {
+    setMissingError(null);
+    const toSave = missingDrafts
+      .map((draft) => ({ ...draft, cost: Number(draft.unitCost) }))
+      .filter((draft) => draft.unitCost.trim() !== "" && Number.isFinite(draft.cost) && draft.cost > 0);
+
+    if (toSave.length === 0) {
+      setMissingError("Enter a unit cost for at least one SKU, or close this dialog.");
+      return;
+    }
+    const missingName = toSave.find((draft) => !draft.productName.trim());
+    if (missingName) {
+      setMissingError(`Enter a product name for ${missingName.sku}.`);
+      return;
+    }
+
+    setSavingMissing(true);
+    try {
+      const supabase = createClient();
+      for (const draft of toSave) {
+        await applyCogsVersion(
+          supabase,
+          account.id,
+          {
+            productName: draft.productName,
+            sku: draft.sku,
+            unitCost: draft.cost,
+            includesVat: draft.includesVat,
+            effectiveFrom: draft.effectiveFrom,
+          },
+          { skipRecalc: true }
+        );
+      }
+      setMissingModalOpen(false);
+      setMissingDrafts([]);
+      setMessage(
+        `Saved ${toSave.length} SKU cost${toSave.length === 1 ? "" : "s"}. Reprocessing report with the new costs...`
+      );
+      // Reprocess so the preview reflects the freshly-saved COGS. This rebuilds
+      // the bridged lookup and recomputes every figure.
+      await runCalculation();
+    } catch (err) {
+      const text = err instanceof Error ? err.message : "Failed to save SKU costs.";
+      setMissingError(text);
+      await pushClientNotification({
+        title: "Missing COGS save failed",
+        body: text,
+        level: "error",
+        eventKey: `report-missing-cogs-fail:${account.id}:${Date.now()}`,
+      });
+    } finally {
+      setSavingMissing(false);
+    }
   };
 
   const runCalculation = async () => {
@@ -1247,6 +1397,15 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
         })
       );
       setMessage("Calculation complete. Review and save report.");
+
+      // Surface a cost-entry modal for any report SKU that has no COGS row for
+      // this account yet. `result.missingSkus` is the engine's authoritative
+      // set: report SKUs with sales that couldn't resolve a cost against the
+      // bridged COGS lookup (built from the `cogs`/`cogs_history`/`sku_mappings`
+      // tables). Pre-fill product descriptions from the per-SKU lines.
+      const drafts = buildMissingDrafts(result);
+      setMissingDrafts(drafts);
+      if (drafts.length > 0) setMissingModalOpen(true);
     } catch (err) {
       const text = err instanceof Error ? err.message : "Calculation failed.";
       setError(text);
@@ -1620,6 +1779,22 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
             hint="CSV or XLSX"
             selectedFileName={fileName || undefined}
           />
+          {platform === "tiktok" ? (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={() => void syncFromTiktok()}
+                disabled={!canProcess || tiktokSyncing || !periodStart || !periodEnd}
+                className="w-full rounded-xl border border-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-[var(--md-primary)] disabled:opacity-50"
+              >
+                {tiktokSyncing ? "Syncing from TikTok…" : "Sync orders from TikTok"}
+              </button>
+              <p className="mt-1 text-xs text-slate-500">
+                Pulls orders for the selected period directly from TikTok Shop (no file needed). Connect the
+                shop first in Settings.
+              </p>
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -1833,6 +2008,26 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
         </div>
       ) : null}
 
+      {canProcess && preview && preview.missingSkus.length > 0 ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--md-outline)] bg-[var(--md-primary-container)] px-4 py-3">
+          <p className="text-sm text-slate-800">
+            <span className="font-semibold">{preview.missingSkus.length}</span> SKU
+            {preview.missingSkus.length === 1 ? "" : "s"} in this report {preview.missingSkus.length === 1 ? "has" : "have"} no COGS
+            recorded yet. Add their costs so profit is accurate.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              if (missingDrafts.length === 0) setMissingDrafts(buildMissingDrafts(preview));
+              setMissingModalOpen(true);
+            }}
+            className="rounded-xl bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-[var(--md-on-primary)]"
+          >
+            Enter missing SKU costs
+          </button>
+        </div>
+      ) : null}
+
       {preview ? (
         <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5">
           <div className="grid gap-3 md:grid-cols-3">
@@ -1949,6 +2144,164 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
           ) : null}
         </div>
       ) : null}
+
+      {missingModalOpen ? (
+        <MissingCogsModal
+          currency={currency}
+          drafts={missingDrafts}
+          saving={savingMissing}
+          error={missingError}
+          onDraftChange={setMissingDraft}
+          onClose={() => setMissingModalOpen(false)}
+          onSave={() => void saveMissingCosts()}
+        />
+      ) : null}
     </div>
+  );
+}
+
+function MissingCogsModal({
+  currency,
+  drafts,
+  saving,
+  error,
+  onDraftChange,
+  onClose,
+  onSave,
+}: {
+  currency: string;
+  drafts: MissingCostDraft[];
+  saving: boolean;
+  error: string | null;
+  onDraftChange: (index: number, patch: Partial<MissingCostDraft>) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
+  if (!mounted) return null;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/45 p-4 pt-[5vh] pb-[5vh]"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Enter missing SKU costs"
+    >
+      <div
+        className="flex h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex flex-shrink-0 items-center justify-between border-b border-slate-200 px-5 py-3">
+          <div>
+            <h5 className="text-base font-semibold text-slate-900">Add missing SKU costs</h5>
+            <p className="text-xs text-slate-500">
+              These SKUs appear in the report but have no COGS recorded. Enter their unit costs to include them in profit.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close dialog"
+            className="rounded-md px-2 py-1 text-sm text-slate-600 hover:bg-slate-100"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {error ? <p className="mb-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
+          <div className="overflow-x-auto rounded-2xl border border-slate-200">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">SKU</th>
+                  <th className="px-3 py-2">Product / Description</th>
+                  <th className="px-3 py-2 w-32">Unit Cost ({currency})</th>
+                  <th className="px-3 py-2">Includes VAT</th>
+                  <th className="px-3 py-2 w-44">Effective From</th>
+                </tr>
+              </thead>
+              <tbody>
+                {drafts.map((draft, index) => (
+                  <tr key={draft.sku} className="border-t border-slate-100">
+                    <td className="px-3 py-2 font-mono text-xs text-slate-800">{draft.sku}</td>
+                    <td className="px-3 py-2">
+                      <input
+                        value={draft.productName}
+                        onChange={(e) => onDraftChange(index, { productName: e.target.value })}
+                        placeholder="Product name"
+                        className="w-full rounded-lg border border-slate-300 px-2 py-1"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input
+                        value={draft.unitCost}
+                        onChange={(e) => onDraftChange(index, { unitCost: e.target.value })}
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        placeholder="0.00"
+                        className="w-full rounded-lg border border-slate-300 px-2 py-1"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <label className="inline-flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={draft.includesVat}
+                          onChange={(e) => onDraftChange(index, { includesVat: e.target.checked })}
+                          className="accent-[var(--md-primary)]"
+                        />
+                        VAT included
+                      </label>
+                    </td>
+                    <td className="px-3 py-2">
+                      <input
+                        value={draft.effectiveFrom}
+                        onChange={(e) => onDraftChange(index, { effectiveFrom: e.target.value })}
+                        type="date"
+                        className="w-full rounded-lg border border-slate-300 px-2 py-1"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-3 text-xs text-slate-500">
+            Costs are saved to the COGS table (and its history) and will appear on the COGS page. Rows left blank are skipped.
+          </p>
+        </div>
+
+        <div className="flex flex-shrink-0 items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={saving}
+            className="rounded-xl border border-[var(--md-outline)] bg-white px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={saving}
+            className="rounded-xl bg-[var(--md-primary)] px-5 py-2 text-sm font-semibold text-[var(--md-on-primary)] disabled:opacity-60"
+          >
+            {saving ? "Saving & reprocessing..." : "Save costs & reprocess"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }

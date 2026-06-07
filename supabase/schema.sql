@@ -95,6 +95,33 @@ alter table public.account_amazon_credentials add column if not exists ads_profi
 -- (sellers) across every marketplace. We pin a single advertiser by name so
 -- the per-country profile map only contains that advertiser's profiles.
 alter table public.account_amazon_credentials add column if not exists ads_advertiser_name text;
+
+-- TikTok Shop Open Platform (Partner API v2) credentials, one row per account.
+-- Separate from Amazon: different OAuth app, signing scheme and token lifecycle.
+-- TikTok rotates the refresh token on every refresh, so both tokens are stored
+-- encrypted (AES-256-GCM via TOKEN_ENC_KEY) and re-persisted after each refresh.
+create table if not exists public.account_tiktok_credentials (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  provider text not null default 'tiktok-shop',
+  access_token_encrypted text,
+  access_token_expires_at timestamptz,
+  refresh_token_encrypted text not null,
+  refresh_token_expires_at timestamptz,
+  shop_cipher text,
+  shop_id text,
+  shop_name text,
+  seller_name text,
+  open_id text,
+  region text,
+  connected_at timestamptz not null default now(),
+  connected_by uuid references public.users(id) on delete set null,
+  last_synced_at timestamptz,
+  last_sync_error text,
+  unique(account_id, provider)
+);
+create index if not exists idx_account_tiktok_credentials_account on public.account_tiktok_credentials(account_id);
+
 -- 3) cogs
 create table if not exists public.cogs (
   id uuid primary key default gen_random_uuid(),
@@ -545,6 +572,7 @@ alter table public.client_team_members enable row level security;
 alter table public.account_team_members enable row level security;
 alter table public.account_client_members enable row level security;
 alter table public.account_amazon_credentials enable row level security;
+alter table public.account_tiktok_credentials enable row level security;
 alter table public.cogs enable row level security;
 alter table public.cogs_history enable row level security;
 alter table public.sku_catalog enable row level security;
@@ -663,6 +691,22 @@ using (public.current_user_role() in ('admin', 'team'));
 drop policy if exists "account_amazon_credentials_modify_admin_only" on public.account_amazon_credentials;
 create policy "account_amazon_credentials_modify_admin_only"
 on public.account_amazon_credentials
+for all
+to authenticated
+using (public.current_user_role() = 'admin')
+with check (public.current_user_role() = 'admin');
+
+-- account_tiktok_credentials policies
+drop policy if exists "account_tiktok_credentials_select_staff" on public.account_tiktok_credentials;
+create policy "account_tiktok_credentials_select_staff"
+on public.account_tiktok_credentials
+for select
+to authenticated
+using (public.current_user_role() in ('admin', 'team'));
+
+drop policy if exists "account_tiktok_credentials_modify_admin_only" on public.account_tiktok_credentials;
+create policy "account_tiktok_credentials_modify_admin_only"
+on public.account_tiktok_credentials
 for all
 to authenticated
 using (public.current_user_role() = 'admin')

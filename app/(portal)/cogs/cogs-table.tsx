@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
 import { pushClientNotification } from "@/lib/notifications/client";
 import FileDropzone from "@/components/ui/file-dropzone";
-import { computeExpenseOccurrencesForPeriod, type ExpenseLedgerRow } from "@/lib/reports/expense-ledger";
+import {
+  applyCogsVersion as applyCogsVersionShared,
+  recalculateReportsFromEffectiveDate as recalcReportsShared,
+  normalizeProductName,
+  type ApplyCogsInput,
+} from "@/lib/cogs/apply-cogs-version";
 
 type CogsRow = {
   id: string;
@@ -54,125 +59,8 @@ type Props = {
   canEdit: boolean;
 };
 
-type CogsVersion = {
-  unitCost: number;
-  includesVat: boolean;
-  effectiveFrom: string;
-};
-
-type ReportRow = {
-  id: string;
-  period_start: string;
-  period_end: string;
-  platform: "amazon" | "temu" | "tiktok";
-  output_vat: number;
-  input_vat: number;
-  net_profit: number;
-  total_cogs: number;
-  breakdown: Record<string, unknown> | null;
-};
-
-type ReportTxRow = {
-  platform: "amazon" | "temu" | "tiktok";
-  transaction_date: string | null;
-  sku: string | null;
-  quantity: number | null;
-  raw_row: Record<string, unknown> | null;
-};
-
-function normalizeProductName(input: unknown) {
-  return String(input ?? "")
-    .replace(/\u00a0/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function round2(value: number) {
-  return Number((value || 0).toFixed(2));
-}
-
-function normalizeSku(input: unknown) {
-  return String(input ?? "")
-    .replace(/\u00a0/g, " ")
-    .trim()
-    .toUpperCase();
-}
-
-function normalizeKey(input: string) {
-  return input.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function findRawValue(rawRow: Record<string, unknown>, terms: string[]) {
-  const keys = Object.keys(rawRow || {});
-  for (const term of terms) {
-    const key = keys.find((k) => normalizeKey(k) === term);
-    if (key) return rawRow[key];
-  }
-  for (const term of terms) {
-    const key = keys.find((k) => normalizeKey(k).includes(term));
-    if (key) return rawRow[key];
-  }
-  return undefined;
-}
-
-function isUnitsSaleTx(platform: "amazon" | "temu" | "tiktok", rawRow: Record<string, unknown> | null) {
-  if (!rawRow) return true;
-  if (platform === "tiktok") {
-    // TikTok rows are order-line granular and carry an "Order Status"; a sale
-    // is any line whose order isn't cancelled.
-    const status = String(findRawValue(rawRow, ["order status"]) ?? "")
-      .trim()
-      .toLowerCase();
-    return status !== "canceled" && status !== "cancelled";
-  }
-  const txType = String(findRawValue(rawRow, ["transaction type", "type"]) ?? "")
-    .trim()
-    .toLowerCase();
-  if (!txType) return true;
-  if (platform === "amazon") {
-    return txType.includes("order") && !txType.includes("refund") && !txType.includes("adjustment") && !txType.includes("transfer");
-  }
-  return txType.includes("order payment") || txType === "order";
-}
-
-function resolveCogsVersion(lookup: Map<string, CogsVersion[]>, sku: string, txDateIso: string) {
-  const versions = lookup.get(sku);
-  if (!versions || versions.length === 0) return null;
-  let selected: CogsVersion | null = null;
-  for (const version of versions) {
-    if (version.effectiveFrom <= txDateIso) selected = version;
-    else break;
-  }
-  return selected || versions[0] || null;
-}
-
-function computeExpenseTotals(expenses: Array<{ amount: number; includes_vat: boolean }>, vatRatePct: number) {
-  const vatRate = (Number(vatRatePct) || 0) / 100;
-  let net = 0;
-  let vat = 0;
-  for (const row of expenses) {
-    const amount = Number(row.amount || 0);
-    if (!amount) continue;
-    if (row.includes_vat && vatRate > 0) {
-      const vatPart = amount * (vatRate / (1 + vatRate));
-      vat += vatPart;
-      net += amount - vatPart;
-    } else {
-      net += amount;
-    }
-  }
-  return { net: round2(net), vat: round2(vat) };
-}
-
-async function removeCatalogIfUnused(supabase: ReturnType<typeof createClient>, catalogId: string) {
-  const { count } = await supabase
-    .from("sku_mappings")
-    .select("id", { count: "exact", head: true })
-    .eq("sku_catalog_id", catalogId);
-  if (Number(count || 0) === 0) {
-    await supabase.from("sku_catalog").delete().eq("id", catalogId);
-  }
-}
+type SortKey = "product_name" | "sku" | "unit_cost" | "effective_from";
+type SortDir = "asc" | "desc";
 
 export default function CogsTable({ accountId, canEdit }: Props) {
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -200,7 +88,6 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [offset, setOffset] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
-  const [mappingByAmazonSku, setMappingByAmazonSku] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
   const [searchActive, setSearchActive] = useState("");
   // Lifted editable drafts keyed by row id + the set of selected row ids for
@@ -208,6 +95,34 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [drafts, setDrafts] = useState<Record<string, CogsDraft>>({});
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  // Client-side sort over the currently loaded page of rows. Sorting never
+  // refetches; it only reorders what's visible.
+  const sortedRows = useMemo(() => {
+    if (!sortKey) return rows;
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      if (sortKey === "unit_cost") {
+        return (Number(a.unit_cost) - Number(b.unit_cost)) * dir;
+      }
+      const av = String(sortKey === "product_name" ? a.product_name || a.sku : a[sortKey] ?? "").toLowerCase();
+      const bv = String(sortKey === "product_name" ? b.product_name || b.sku : b[sortKey] ?? "").toLowerCase();
+      return av.localeCompare(bv) * dir;
+    });
+  }, [rows, sortKey, sortDir]);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const sortIndicator = (key: SortKey) => (sortKey === key ? (sortDir === "asc" ? " ▲" : " ▼") : "");
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -247,7 +162,6 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         mapByMappingId[String(rec.id)] = productName;
         if (rec.amazon_sku) mapByAmazonSku[String(rec.amazon_sku).trim().toUpperCase()] = String(rec.id);
       });
-      setMappingByAmazonSku(mapByAmazonSku);
 
       const trimmedSearch = activeSearch.trim();
       let cogsQuery = supabase
@@ -327,312 +241,14 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     return () => clearTimeout(handle);
   }, [search]);
 
-  const upsertProductAndMapping = async (supabase: ReturnType<typeof createClient>, sku: string, productName: string) => {
-    const normalizedSku = sku.trim().toUpperCase();
-    const normalizedName = normalizeProductName(productName);
-    if (!normalizedName) throw new Error("Product name is required.");
+  // COGS persistence is shared with the report workbench's "missing SKU"
+  // modal. These thin wrappers bind the current account so all existing call
+  // sites keep working unchanged.
+  const applyCogsVersion = (input: ApplyCogsInput, options?: { skipRecalc?: boolean }) =>
+    applyCogsVersionShared(createClient(), accountId, input, options);
 
-    const { data: existingMapping } = await supabase
-      .from("sku_mappings")
-      .select("id, sku_catalog_id")
-      .eq("account_id", accountId)
-      .eq("amazon_sku", normalizedSku)
-      .maybeSingle();
-
-    if (existingMapping?.id && existingMapping?.sku_catalog_id) {
-      const { data: existingCatalogByName, error: existingCatalogByNameError } = await supabase
-        .from("sku_catalog")
-        .select("id")
-        .eq("account_id", accountId)
-        .eq("product_name", normalizedName)
-        .maybeSingle();
-      if (existingCatalogByNameError) throw existingCatalogByNameError;
-
-      const currentCatalogId = String(existingMapping.sku_catalog_id);
-      if (existingCatalogByName?.id && String(existingCatalogByName.id) !== currentCatalogId) {
-        const { error: moveError } = await supabase
-          .from("sku_mappings")
-          .update({ sku_catalog_id: String(existingCatalogByName.id) })
-          .eq("id", String(existingMapping.id));
-        if (moveError) throw moveError;
-        await removeCatalogIfUnused(supabase, currentCatalogId);
-      } else {
-        const { error: renameError } = await supabase
-          .from("sku_catalog")
-          .update({ product_name: normalizedName })
-          .eq("id", currentCatalogId);
-        if (renameError) throw renameError;
-      }
-      return String(existingMapping.id);
-    }
-
-    const { data: existingCatalog } = await supabase
-      .from("sku_catalog")
-      .select("id")
-      .eq("account_id", accountId)
-      .eq("product_name", normalizedName)
-      .maybeSingle();
-    const catalogId =
-      existingCatalog?.id ||
-      (
-        await supabase
-          .from("sku_catalog")
-          .insert({ account_id: accountId, product_name: normalizedName })
-          .select("id")
-          .single()
-      ).data?.id;
-    if (!catalogId) throw new Error("Failed to resolve product catalog for COGS.");
-
-    const { data: reusableMapping } = await supabase
-      .from("sku_mappings")
-      .select("id")
-      .eq("account_id", accountId)
-      .eq("sku_catalog_id", String(catalogId))
-      .is("amazon_sku", null)
-      .limit(1)
-      .maybeSingle();
-    if (reusableMapping?.id) {
-      const { error: patchErr } = await supabase
-        .from("sku_mappings")
-        .update({ amazon_sku: normalizedSku })
-        .eq("id", String(reusableMapping.id));
-      if (!patchErr) return String(reusableMapping.id);
-    }
-
-    const { data: mappingBySku, error: mappingBySkuError } = await supabase
-      .from("sku_mappings")
-      .select("id")
-      .eq("account_id", accountId)
-      .eq("amazon_sku", normalizedSku)
-      .maybeSingle();
-    if (mappingBySkuError) throw mappingBySkuError;
-    if (mappingBySku?.id) return String(mappingBySku.id);
-
-    const { data: insertedMapping, error: insertedMappingError } = await supabase
-      .from("sku_mappings")
-      .insert({
-        account_id: accountId,
-        sku_catalog_id: String(catalogId),
-        amazon_sku: normalizedSku,
-        temu_sku_id: null,
-        lead_time_days: null,
-      })
-      .select("id")
-      .single();
-    if (insertedMappingError || !insertedMapping?.id) {
-      throw insertedMappingError || new Error("Failed to create SKU mapping.");
-    }
-    return String(insertedMapping.id);
-  };
-
-  const recalculateReportsFromEffectiveDate = async (supabase: ReturnType<typeof createClient>, effectiveFrom: string) => {
-    const { data: accountRow, error: accountError } = await supabase
-      .from("accounts")
-      .select("vat_rate")
-      .eq("id", accountId)
-      .single();
-    if (accountError) throw accountError;
-    const vatRatePct = Number(accountRow?.vat_rate || 0);
-
-    const { data: cogsHistory, error: cogsHistoryError } = await supabase
-      .from("cogs_history")
-      .select("sku, unit_cost, includes_vat, effective_from")
-      .eq("account_id", accountId)
-      .order("effective_from", { ascending: true });
-    if (cogsHistoryError) throw cogsHistoryError;
-    const lookup = new Map<string, CogsVersion[]>();
-    (cogsHistory || []).forEach((row) => {
-      const sku = normalizeSku(row.sku);
-      if (!sku) return;
-      const list = lookup.get(sku) || [];
-      list.push({
-        unitCost: Number(row.unit_cost || 0),
-        includesVat: Boolean(row.includes_vat),
-        effectiveFrom: String(row.effective_from || effectiveFrom),
-      });
-      lookup.set(sku, list);
-    });
-    lookup.forEach((rows, sku) => {
-      lookup.set(
-        sku,
-        rows.sort((a, b) => (a.effectiveFrom < b.effectiveFrom ? -1 : 1))
-      );
-    });
-
-    const { data: reports, error: reportsError } = await supabase
-      .from("reports")
-      .select("id, period_start, platform, output_vat, input_vat, net_profit, total_cogs, breakdown")
-      .eq("account_id", accountId)
-      .gte("period_end", effectiveFrom);
-    if (reportsError) throw reportsError;
-
-    let updatedCount = 0;
-    for (const rawReport of (reports || []) as unknown as ReportRow[]) {
-      const report = rawReport;
-      const { data: txRows, error: txError } = await supabase
-        .from("report_transactions")
-        .select("platform, transaction_date, sku, quantity, raw_row")
-        .eq("report_id", report.id);
-      if (txError) throw txError;
-
-      const { data: expenseLedgerRows, error: expenseError } = await supabase
-        .from("expense_ledger")
-        .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
-        .eq("account_id", accountId)
-        .lte("expense_date", String(report.period_end || report.period_start))
-        .or(`recurring_end_date.is.null,recurring_end_date.gte.${String(report.period_start)}`);
-      if (expenseError) throw expenseError;
-      const expenseRows = computeExpenseOccurrencesForPeriod({
-        rows: (expenseLedgerRows || []) as ExpenseLedgerRow[],
-        platform: String(report.platform || "amazon"),
-        periodStart: String(report.period_start),
-        periodEnd: String(report.period_end || report.period_start),
-      });
-
-      let purchaseCost = 0;
-      let purchaseVat = 0;
-      const cogsSnapshotMap = new Map<string, { sku: string; quantity: number; unit_cost: number; includes_vat: boolean; effective_from: string }>();
-
-      ((txRows || []) as unknown as ReportTxRow[]).forEach((tx) => {
-        const platform = tx.platform === "temu" ? "temu" : tx.platform === "tiktok" ? "tiktok" : "amazon";
-        if (!isUnitsSaleTx(platform, tx.raw_row || null)) return;
-        const sku = normalizeSku(tx.sku || "");
-        const qty = Math.abs(Number(tx.quantity || 0));
-        if (!sku || !qty) return;
-        const txDate = String(tx.transaction_date || report.period_start || effectiveFrom).slice(0, 10);
-        const cogs = resolveCogsVersion(lookup, sku, txDate);
-        if (!cogs) return;
-
-        const vatRate = vatRatePct > 0 ? vatRatePct / 100 : 0;
-        if (cogs.includesVat && vatRate > 0) {
-          const unitNet = cogs.unitCost / (1 + vatRate);
-          const unitVat = cogs.unitCost - unitNet;
-          purchaseCost += unitNet * qty;
-          purchaseVat += unitVat * qty;
-        } else {
-          purchaseCost += cogs.unitCost * qty;
-        }
-
-        const snapshotKey = `${sku}|${cogs.unitCost}|${cogs.includesVat ? "1" : "0"}|${cogs.effectiveFrom}`;
-        const current = cogsSnapshotMap.get(snapshotKey) || {
-          sku,
-          quantity: 0,
-          unit_cost: cogs.unitCost,
-          includes_vat: cogs.includesVat,
-          effective_from: cogs.effectiveFrom,
-        };
-        current.quantity += qty;
-        cogsSnapshotMap.set(snapshotKey, current);
-      });
-
-      const breakdown = (report.breakdown || {}) as Record<string, unknown>;
-      const pnl = (breakdown.pnl || {}) as Record<string, number>;
-      const vat = (breakdown.vat || {}) as Record<string, number>;
-      const expenseTotals = computeExpenseTotals(
-        ((expenseRows || []) as Array<{ amount: number; includes_vat: boolean }>).map((e) => ({
-          amount: Number(e.amount || 0),
-          includes_vat: Boolean(e.includes_vat),
-        })),
-        vatRatePct
-      );
-      const settlementNet = Number(pnl.settlementNet || report.net_profit + report.total_cogs + expenseTotals.net);
-      const inputVatFees = Number(vat.inputVatFees || 0);
-      const inputVatPurchases = vatRatePct > 0 ? round2(purchaseVat + expenseTotals.vat) : 0;
-      const inputVat = vatRatePct > 0 ? round2(inputVatFees + inputVatPurchases) : 0;
-      const outputVat = vatRatePct > 0 ? Number(report.output_vat || 0) : 0;
-      const finalVat = vatRatePct > 0 ? round2(outputVat - inputVat) : 0;
-      const nextPurchaseCost = round2(purchaseCost);
-      const nextNetProfit = round2(settlementNet - nextPurchaseCost - expenseTotals.net);
-
-      const nextBreakdown = {
-        ...breakdown,
-        pnl: {
-          ...(breakdown.pnl as object),
-          settlementNet: round2(settlementNet),
-          purchaseCost: nextPurchaseCost,
-          netProfit: nextNetProfit,
-        },
-        vat: vatRatePct > 0
-          ? {
-              ...(breakdown.vat as object),
-              outputVat: round2(outputVat),
-              inputVatFees: round2(inputVatFees),
-              inputVatPurchases,
-              finalVat,
-            }
-          : {
-              outputVat: 0,
-              inputVatFees: 0,
-              inputVatPurchases: 0,
-              finalVat: 0,
-            },
-      };
-
-      const { error: updateError } = await supabase
-        .from("reports")
-        .update({
-          total_cogs: nextPurchaseCost,
-          input_vat: inputVat,
-          output_vat: round2(outputVat),
-          net_profit: nextNetProfit,
-          cogs_snapshot: Array.from(cogsSnapshotMap.values()),
-          breakdown: nextBreakdown,
-        })
-        .eq("id", report.id);
-      if (updateError) throw updateError;
-      updatedCount += 1;
-    }
-    return updatedCount;
-  };
-
-  const applyCogsVersion = async (input: {
-    productName: string;
-    sku: string;
-    unitCost: number;
-    includesVat: boolean;
-    effectiveFrom: string;
-  }, options?: { skipRecalc?: boolean }) => {
-    const supabase = createClient();
-    const normalizedSku = input.sku.trim().toUpperCase();
-    const normalizedName = normalizeProductName(input.productName);
-    if (!normalizedSku) throw new Error("SKU is required.");
-    if (!normalizedName) throw new Error("Product name is required.");
-    if (!input.effectiveFrom) throw new Error("Effective from date is required.");
-    const mappingId = await upsertProductAndMapping(supabase, normalizedSku, normalizedName);
-
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    const { error: cogsError } = await supabase.from("cogs").upsert(
-      {
-        account_id: accountId,
-        sku: normalizedSku,
-        sku_mapping_id: mappingId || mappingByAmazonSku[normalizedSku] || null,
-        unit_cost: Number(input.unitCost.toFixed(2)),
-        includes_vat: input.includesVat,
-        effective_from: input.effectiveFrom,
-      },
-      { onConflict: "account_id,sku" }
-    );
-    if (cogsError) throw cogsError;
-
-    const { error: historyError } = await supabase.from("cogs_history").upsert(
-      {
-        account_id: accountId,
-        sku: normalizedSku,
-        unit_cost: Number(input.unitCost.toFixed(2)),
-        includes_vat: input.includesVat,
-        effective_from: input.effectiveFrom,
-        changed_by: user?.id || null,
-      },
-      { onConflict: "account_id,sku,effective_from" }
-    );
-    if (historyError) throw historyError;
-
-    if (options?.skipRecalc) return 0;
-    return recalculateReportsFromEffectiveDate(supabase, input.effectiveFrom);
-  };
+  const recalculateReportsFromEffectiveDate = (supabase: ReturnType<typeof createClient>, effectiveFrom: string) =>
+    recalcReportsShared(supabase, accountId, effectiveFrom);
 
   const loadHistory = async (sku: string) => {
     setHistorySku(sku);
@@ -1039,6 +655,18 @@ export default function CogsTable({ accountId, canEdit }: Props) {
             </button>
           </div>
 
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-600">
+              Upload columns: <span className="font-semibold">Product Name, SKU, Unit Cost</span>. VAT &amp; effective date are set below.
+            </p>
+            <a
+              href="/templates/cogs-template.csv"
+              download
+              className="rounded-lg border border-[var(--md-outline)] bg-white px-3 py-1.5 text-xs font-semibold text-[var(--md-primary)] hover:bg-slate-50"
+            >
+              Download template
+            </a>
+          </div>
           <div className="grid gap-3 rounded-xl bg-slate-50 p-3 md:grid-cols-[1fr_220px_180px_auto]">
             <FileDropzone
               accept=".csv,.xlsx,.xls,.xlsm,.xlxs"
@@ -1214,12 +842,28 @@ export default function CogsTable({ accountId, canEdit }: Props) {
                   />
                 </th>
               ) : null}
-              <th className="px-4 py-3">Product Name</th>
-              <th className="px-4 py-3">SKU</th>
+              <th className="px-4 py-3">
+                <button type="button" onClick={() => toggleSort("product_name")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  Product Name{sortIndicator("product_name")}
+                </button>
+              </th>
+              <th className="px-4 py-3">
+                <button type="button" onClick={() => toggleSort("sku")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  SKU{sortIndicator("sku")}
+                </button>
+              </th>
               <th className="px-4 py-3">Mapped</th>
-              <th className="px-4 py-3">Unit Cost</th>
+              <th className="px-4 py-3">
+                <button type="button" onClick={() => toggleSort("unit_cost")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  Unit Cost{sortIndicator("unit_cost")}
+                </button>
+              </th>
               <th className="px-4 py-3">Includes VAT</th>
-              <th className="px-4 py-3">Effective From</th>
+              <th className="px-4 py-3">
+                <button type="button" onClick={() => toggleSort("effective_from")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  Effective From{sortIndicator("effective_from")}
+                </button>
+              </th>
               <th className="px-4 py-3">Updated</th>
               {canEdit ? <th className="px-4 py-3">Actions</th> : null}
             </tr>
@@ -1238,7 +882,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
                 </td>
               </tr>
             ) : (
-              rows.map((row) => (
+              sortedRows.map((row) => (
                 <EditableCogsRow
                   key={row.id}
                   row={row}

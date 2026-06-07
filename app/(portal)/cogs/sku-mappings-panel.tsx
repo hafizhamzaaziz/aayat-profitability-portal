@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
@@ -25,6 +25,9 @@ type Props = {
   accountId: string;
   canEdit: boolean;
 };
+
+type SortKey = "product_name" | "amazon_sku" | "temu_sku_id" | "temu_goods_id" | "tiktok_seller_sku" | "lead_time_days";
+type SortDir = "asc" | "desc";
 
 function normalizeProductName(input: unknown) {
   return String(input ?? "")
@@ -154,7 +157,33 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
     return () => clearTimeout(handle);
   }, [search]);
 
-  const filtered = rows;
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  // Client-side sort over the currently loaded page of rows.
+  const filtered = useMemo(() => {
+    if (!sortKey) return rows;
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      if (sortKey === "lead_time_days") {
+        return ((a.lead_time_days ?? Number.NEGATIVE_INFINITY) - (b.lead_time_days ?? Number.NEGATIVE_INFINITY)) * dir;
+      }
+      const av = String(a[sortKey] ?? "").toLowerCase();
+      const bv = String(b[sortKey] ?? "").toLowerCase();
+      return av.localeCompare(bv) * dir;
+    });
+  }, [rows, sortKey, sortDir]);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((prev) => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const sortIndicator = (key: SortKey) => (sortKey === key ? (sortDir === "asc" ? " ▲" : " ▼") : "");
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -500,9 +529,18 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
 
       {canEdit ? (
         <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <p className="text-xs text-slate-600">
-            Bulk upload CSV/XLSX with columns: <span className="font-semibold">Product Name, Amazon SKU, Temu SKU ID, Temu Goods ID, TikTok Seller SKU, Lead Time</span>.
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-600">
+              Bulk upload CSV/XLSX with columns: <span className="font-semibold">Product Name, Amazon SKU, Temu SKU ID, Temu Goods ID, TikTok Seller SKU, Lead Time</span>.
+            </p>
+            <a
+              href="/templates/sku-mapping-template.csv"
+              download
+              className="rounded-lg border border-[var(--md-outline)] bg-white px-3 py-1.5 text-xs font-semibold text-[var(--md-primary)] hover:bg-slate-50"
+            >
+              Download template
+            </a>
+          </div>
           <div className="grid gap-3 md:grid-cols-[1fr_auto]">
             <FileDropzone
               accept=".csv,.xlsx,.xls"
@@ -627,12 +665,36 @@ export default function SkuMappingsPanel({ accountId, canEdit }: Props) {
         <table className="min-w-full text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
-              <th className="px-3 py-2">Product</th>
-              <th className="px-3 py-2">Amazon SKU</th>
-              <th className="px-3 py-2">Temu SKU ID</th>
-              <th className="px-3 py-2">Temu Goods ID</th>
-              <th className="px-3 py-2">TikTok Seller SKU</th>
-              <th className="px-3 py-2">Lead Time (days)</th>
+              <th className="px-3 py-2">
+                <button type="button" onClick={() => toggleSort("product_name")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  Product{sortIndicator("product_name")}
+                </button>
+              </th>
+              <th className="px-3 py-2">
+                <button type="button" onClick={() => toggleSort("amazon_sku")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  Amazon SKU{sortIndicator("amazon_sku")}
+                </button>
+              </th>
+              <th className="px-3 py-2">
+                <button type="button" onClick={() => toggleSort("temu_sku_id")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  Temu SKU ID{sortIndicator("temu_sku_id")}
+                </button>
+              </th>
+              <th className="px-3 py-2">
+                <button type="button" onClick={() => toggleSort("temu_goods_id")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  Temu Goods ID{sortIndicator("temu_goods_id")}
+                </button>
+              </th>
+              <th className="px-3 py-2">
+                <button type="button" onClick={() => toggleSort("tiktok_seller_sku")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  TikTok Seller SKU{sortIndicator("tiktok_seller_sku")}
+                </button>
+              </th>
+              <th className="px-3 py-2">
+                <button type="button" onClick={() => toggleSort("lead_time_days")} className="font-semibold uppercase tracking-wide hover:text-slate-700">
+                  Lead Time (days){sortIndicator("lead_time_days")}
+                </button>
+              </th>
               {canEdit ? <th className="px-3 py-2">Actions</th> : null}
             </tr>
           </thead>

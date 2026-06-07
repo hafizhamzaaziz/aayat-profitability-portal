@@ -537,6 +537,7 @@ export default function AdminSettingsPanelV2({
                     }
                   }}
                 />
+                <TiktokConnectionPanel accountId={editAccountId} />
               </div>
             ) : (
               <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-xs text-slate-600">
@@ -1839,6 +1840,117 @@ function ClientPicker({ clientUsers, selected, onChange }: { clientUsers: UserRo
           </label>
         ))}
       </div>
+    </div>
+  );
+}
+
+type TiktokCredentialRow = {
+  shop_name: string | null;
+  seller_name: string | null;
+  region: string | null;
+  connected_at: string | null;
+  last_synced_at: string | null;
+  last_sync_error: string | null;
+};
+
+/**
+ * TikTok Shop connection block for the account editor. Self-contained: loads
+ * its own status via the browser Supabase client (RLS limits reads to
+ * admin/team). Connect is a plain link to the OAuth start route; disconnect
+ * hits the disconnect API.
+ */
+function TiktokConnectionPanel({ accountId }: { accountId: string }) {
+  const [cred, setCred] = useState<TiktokCredentialRow | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const supabase = createClient();
+      const { data } = await supabase
+        .from("account_tiktok_credentials")
+        .select("shop_name, seller_name, region, connected_at, last_synced_at, last_sync_error")
+        .eq("account_id", accountId)
+        .eq("provider", "tiktok-shop")
+        .maybeSingle();
+      setCred((data as TiktokCredentialRow | null) ?? null);
+    } catch {
+      setCred(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId]);
+
+  const connectHref = `/api/tiktok/oauth/start?accountId=${encodeURIComponent(accountId)}`;
+  const connected = Boolean(cred);
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-semibold text-slate-800">TikTok Shop</p>
+          <p className="text-xs text-slate-500">
+            {loading
+              ? "Checking connection…"
+              : connected
+                ? `Connected${cred?.shop_name ? ` · ${cred.shop_name}` : cred?.seller_name ? ` · ${cred.seller_name}` : ""}${cred?.region ? ` (${cred.region})` : ""}`
+                : "Not connected"}
+          </p>
+          {connected && cred?.last_synced_at ? (
+            <p className="text-xs text-slate-400">Last sync: {new Date(cred.last_synced_at).toLocaleString()}</p>
+          ) : null}
+          {connected && cred?.last_sync_error ? (
+            <p className="text-xs text-red-600">Last error: {cred.last_sync_error}</p>
+          ) : null}
+        </div>
+        <div className="flex gap-2">
+          <a
+            href={connectHref}
+            className="rounded-lg bg-[var(--md-primary)] px-3 py-1.5 text-xs font-semibold text-white"
+          >
+            {connected ? "Reconnect" : "Connect TikTok Shop"}
+          </a>
+          {connected ? (
+            <button
+              type="button"
+              disabled={disconnecting}
+              onClick={async () => {
+                if (!confirm("Disconnect TikTok Shop for this account? You can reconnect anytime.")) return;
+                setDisconnecting(true);
+                setError(null);
+                try {
+                  const res = await fetch("/api/tiktok/oauth/disconnect", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ accountId }),
+                  });
+                  const json = await res.json();
+                  if (!res.ok || !json.ok) throw new Error(json.error || "Failed to disconnect.");
+                  await refresh();
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "Failed to disconnect TikTok.");
+                } finally {
+                  setDisconnecting(false);
+                }
+              }}
+              className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+            >
+              {disconnecting ? "Disconnecting…" : "Disconnect"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <p className="mt-2 text-xs text-slate-500">
+        Connect once; then pull orders for any period from Reports → TikTok → “Sync orders from TikTok”.
+      </p>
+      {error ? <p className="mt-1 text-xs text-red-600">{error}</p> : null}
     </div>
   );
 }
