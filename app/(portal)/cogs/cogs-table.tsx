@@ -73,7 +73,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [newCost, setNewCost] = useState("");
   const [newIncludesVat, setNewIncludesVat] = useState(false);
   const [newEffectiveFrom, setNewEffectiveFrom] = useState(todayIso);
-  const [importIncludesVat, setImportIncludesVat] = useState(false);
+  const [importIncludesVat, setImportIncludesVat] = useState(true);
   const [importEffectiveFrom, setImportEffectiveFrom] = useState(todayIso);
   const [importing, setImporting] = useState(false);
   const [importFileName, setImportFileName] = useState("");
@@ -82,6 +82,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   const [importNameCol, setImportNameCol] = useState("");
   const [importSkuCol, setImportSkuCol] = useState("");
   const [importCostCol, setImportCostCol] = useState("");
+  const [importVatCol, setImportVatCol] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [historySku, setHistorySku] = useState<string | null>(null);
   const [historyRows, setHistoryRows] = useState<CogsHistoryRow[]>([]);
@@ -139,6 +140,13 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     if (value === null || value === undefined || value === "") return 0;
     const cleaned = String(value).replace(/[^0-9.-]/g, "");
     return Number.parseFloat(cleaned) || 0;
+  };
+
+  // Interpret a per-row "Includes VAT" cell. Truthy values (yes/y/true/1/incl)
+  // mean the cost already includes VAT.
+  const parseYesNo = (value: unknown) => {
+    const v = String(value ?? "").trim().toLowerCase();
+    return ["yes", "y", "true", "1", "inc", "incl", "included", "vat"].includes(v);
   };
 
   const loadRows = async (nextOffset = offset, activeSearch = searchActive) => {
@@ -516,6 +524,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
       setImportNameCol(pickColumn(headers, ["productname", "name", "title", "description", "itemname"]));
       setImportSkuCol(pickColumn(headers, ["sku", "asin", "itemid", "reference", "itemcode"]));
       setImportCostCol(pickColumn(headers, ["unitcost", "cost", "cogs", "buyingprice", "purchasecost"]));
+      setImportVatCol(pickColumn(headers, ["includesvat", "includevat", "incvat", "vatincluded", "vat"]));
       setMessage("File loaded. Confirm Product Name, SKU and Cost columns, then click Import.");
     } catch (err) {
       const msg = getErrorMessage(err, "Failed to import COGS file.");
@@ -554,11 +563,18 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         const sku = String(row[importSkuCol] ?? "").trim().toUpperCase();
         const unitCost = Number(parseMoney(row[importCostCol]).toFixed(2));
         if (!productName || !sku || unitCost <= 0) continue;
+        // Per-row "Includes VAT" wins when the column is mapped and the cell has
+        // a value; otherwise fall back to the global toggle.
+        let includesVat = importIncludesVat;
+        if (importVatCol) {
+          const raw = String(row[importVatCol] ?? "").trim();
+          if (raw !== "") includesVat = parseYesNo(raw);
+        }
         dedup.set(sku, {
           product_name: productName,
           sku,
           unit_cost: unitCost,
-          includes_vat: importIncludesVat,
+          includes_vat: includesVat,
           effective_from: importEffectiveFrom,
         });
       }
@@ -657,7 +673,8 @@ export default function CogsTable({ accountId, canEdit }: Props) {
 
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-slate-600">
-              Upload columns: <span className="font-semibold">Product Name, SKU, Unit Cost</span>. VAT &amp; effective date are set below.
+              Upload columns: <span className="font-semibold">Product Name, SKU, Unit Cost</span> and an optional{" "}
+              <span className="font-semibold">Includes VAT</span> (Yes/No) column. The VAT default &amp; effective date are set below.
             </p>
             <a
               href="/templates/cogs-template.csv"
@@ -683,7 +700,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
                 onChange={(event) => setImportIncludesVat(event.target.checked)}
                 disabled={importing}
               />
-              Imported costs include VAT
+              Imported costs include VAT (default)
             </label>
             <label className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm">
               <span className="mb-1 block text-xs uppercase tracking-wide text-slate-500">Import Effective From</span>
@@ -701,7 +718,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
           </div>
 
           {importRows.length > 0 ? (
-            <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-3 md:grid-cols-[1fr_1fr_1fr_auto]">
+            <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto]">
               <div>
                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Name Column</label>
                 <select
@@ -740,6 +757,23 @@ export default function CogsTable({ accountId, canEdit }: Props) {
                   className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
                 >
                   <option value="">Select column</option>
+                  {importHeaders.map((header) => (
+                    <option key={header} value={header}>
+                      {header}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Includes VAT Column
+                </label>
+                <select
+                  value={importVatCol}
+                  onChange={(event) => setImportVatCol(event.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="">None (use default)</option>
                   {importHeaders.map((header) => (
                     <option key={header} value={header}>
                       {header}

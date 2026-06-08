@@ -1,4 +1,4 @@
-Product Name,SKU,Unit Cost
-Example Widget,SKU-001,4.50
-Example Gadget,SKU-002,12.00
-Premium Item,SKU-003,7.25
+Product Name,SKU,Unit Cost,Includes VAT
+Example Widget,SKU-001,5.40,Yes
+Example Gadget,SKU-002,14.40,Yes
+Premium Item,SKU-003,8.70,Yes
