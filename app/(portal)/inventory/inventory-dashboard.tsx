@@ -167,6 +167,7 @@ type SavedShipmentPlan = {
   totalUnits: number;
   totalPallets: number;
   createdAt: string;
+  convertedAt: string | null;
 };
 
 function dailyEntryMappingLabel(m?: SkuRef) {
@@ -1642,6 +1643,122 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     await loadAll();
   };
 
+  const convertPlanToStockIntake = async (planId: string) => {
+    if (!canEdit) return;
+    const supabase = createClient();
+    const { data, error: loadErr } = await supabase
+      .from("shipment_plans")
+      .select("id, plan_type, title, converted_at, shipment_plan_items(sku_mapping_id, planned_units, planned_boxes, units_per_box)")
+      .eq("id", planId)
+      .eq("account_id", accountId)
+      .single();
+    if (loadErr || !data) {
+      setError(loadErr?.message || "Failed to load plan.");
+      return;
+    }
+    const planRow = data as unknown as {
+      plan_type: string;
+      title: string;
+      converted_at: string | null;
+      shipment_plan_items: Array<{
+        sku_mapping_id: string;
+        planned_units: number | null;
+        planned_boxes: number | null;
+        units_per_box: number | null;
+      }> | null;
+    };
+    if (planRow.converted_at) {
+      setError(`\u201c${planRow.title}\u201d was already converted to stock intake. Duplicate it to run again.`);
+      return;
+    }
+    const items = (planRow.shipment_plan_items || []).filter((it) => Number(it.planned_units || 0) > 0);
+    if (items.length === 0) {
+      setError("This plan has no planned units to convert.");
+      return;
+    }
+
+    const actionType: IntakeAction = planRow.plan_type === "amazon_requirement" ? "amazon_transfer" : "supplier_inbound";
+    const destination: "warehouse" | "amazon" = "warehouse";
+    const actionPreview =
+      actionType === "amazon_transfer" ? "Transfer warehouse \u2192 Amazon" : "Supplier inbound \u2192 warehouse";
+
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        `Convert \u201c${planRow.title}\u201d into Stock Intake Actions?\n\n` +
+          `${items.length} SKU(s) will be recorded as: ${actionPreview}.\n` +
+          `This updates stock levels and adds movements. Run it only once per plan.`,
+      )
+    ) {
+      return;
+    }
+
+    const today = todayIsoUtc();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    let applied = 0;
+    let totalUnits = 0;
+    const failures: string[] = [];
+    for (const it of items) {
+      const units = Math.max(0, Number(it.planned_units || 0));
+      if (!units) continue;
+      const action = intakeActionDeltas(actionType, destination, units);
+      const mapping = mappings.find((m) => m.mappingId === it.sku_mapping_id);
+      const skuLabel = mapping?.amazonSku || mapping?.temuSkuId || it.sku_mapping_id;
+      try {
+        await applyDeltaToLatestLevel(it.sku_mapping_id, action.amazonDelta, action.warehouseDelta, today);
+      } catch (err) {
+        failures.push(`${skuLabel}: ${err instanceof Error ? err.message : "stock error"}`);
+        continue;
+      }
+      const linkedIds = profileIdsByMapping[it.sku_mapping_id] || [];
+      const matchedProfile = packProfiles
+        .filter((p) => linkedIds.includes(p.id))
+        .find((p) => Number(p.unitsPerBox) === Number(it.units_per_box || 0));
+      const { error: movementError } = await supabase.from("inventory_movements").insert({
+        account_id: accountId,
+        sku_mapping_id: it.sku_mapping_id,
+        movement_date: today,
+        movement_type: action.movementType,
+        units_delta: action.warehouseDelta !== 0 ? action.warehouseDelta : action.amazonDelta,
+        boxes: it.planned_boxes ? Number(it.planned_boxes) : null,
+        pack_profile_id: matchedProfile?.id || null,
+        notes: `${action.label} \u2014 from plan \u201c${planRow.title}\u201d`,
+        created_by: user?.id || null,
+      });
+      if (movementError) {
+        failures.push(`${skuLabel}: ${movementError.message}`);
+        continue;
+      }
+      applied += 1;
+      totalUnits += units;
+    }
+
+    if (applied > 0) {
+      await supabase
+        .from("shipment_plans")
+        .update({ converted_at: new Date().toISOString() })
+        .eq("id", planId)
+        .eq("account_id", accountId);
+    }
+
+    await loadAll();
+    await loadSavedPlans();
+    if (applied > 0) setActiveTab("stock-intake");
+    const failNote = failures.length
+      ? ` ${failures.length} skipped: ${failures.slice(0, 5).join("; ")}${failures.length > 5 ? "\u2026" : ""}.`
+      : "";
+    if (applied > 0) {
+      setMessage(
+        `Converted \u201c${planRow.title}\u201d \u2192 ${applied} stock intake action(s), ${totalUnits.toLocaleString()} units.${failNote}`,
+      );
+    } else {
+      setError(`No actions recorded for \u201c${planRow.title}\u201d.${failNote}`);
+    }
+  };
+
   const beginEditMovement = (movement: InventoryMovement) => {
     setEditingMovementId(movement.id);
     setMovementDraft({
@@ -1954,6 +2071,57 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     setMessage(`Editing “${planRow.title}”. Make changes and click Update plan.`);
   };
 
+  const duplicatePlan = async (planId: string) => {
+    if (!canEdit) return;
+    const supabase = createClient();
+    const { data, error: loadError } = await supabase
+      .from("shipment_plans")
+      .select("id, plan_type, title, notes, shipment_plan_items(sku_mapping_id, planned_units, planned_boxes, units_per_box)")
+      .eq("id", planId)
+      .eq("account_id", accountId)
+      .single();
+    if (loadError || !data) {
+      setError(loadError?.message || "Failed to load the plan to duplicate.");
+      return;
+    }
+    const planRow = data as unknown as {
+      plan_type: string;
+      title: string;
+      notes: string | null;
+      shipment_plan_items: Array<{
+        sku_mapping_id: string;
+        planned_units: number | null;
+        planned_boxes: number | null;
+        units_per_box: number | null;
+      }> | null;
+    };
+    const items = planRow.shipment_plan_items || [];
+    const nextOverrides: Record<string, PlanRowOverride> = {};
+    const nextProfileByMapping: Record<string, string> = {};
+    items.forEach((it) => {
+      nextOverrides[it.sku_mapping_id] = {
+        plannedUnits: Number(it.planned_units || 0),
+        plannedBoxes: Number(it.planned_boxes || 0),
+      };
+      const linkedIds = profileIdsByMapping[it.sku_mapping_id] || [];
+      const linkedProfiles = packProfiles.filter((p) => linkedIds.includes(p.id));
+      const match =
+        linkedProfiles.find((p) => Number(p.unitsPerBox) === Number(it.units_per_box || 0)) || linkedProfiles[0];
+      if (match) nextProfileByMapping[it.sku_mapping_id] = match.id;
+    });
+    setSelectedMappingIds(items.map((it) => it.sku_mapping_id));
+    setOverrides(nextOverrides);
+    setProfileByMapping(nextProfileByMapping);
+    setPlanType(planRow.plan_type === "warehouse_requirement" ? "warehouse_requirement" : "amazon_requirement");
+    setPlanTitle(`${planRow.title} (copy)`);
+    setPlanNotes(planRow.notes || "");
+    // Detach from the source plan so saving creates a brand-new plan.
+    setEditingPlanId(null);
+    setSavedPlanId(null);
+    setActiveTab("shipment-planning");
+    setMessage(`Duplicated “${planRow.title}”. Adjust as needed and click Save plan.`);
+  };
+
   const openQuickProfile = (mappingId: string) => {
     setQuickProfile({
       profileName: "",
@@ -2036,7 +2204,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     const supabase = createClient();
     const { data, error: plansError } = await supabase
       .from("shipment_plans")
-      .select("id, plan_date, plan_type, title, notes, orientation, created_at, shipment_plan_items(planned_units, pallets)")
+      .select("id, plan_date, plan_type, title, notes, orientation, converted_at, created_at, shipment_plan_items(planned_units, pallets)")
       .eq("account_id", accountId)
       .order("created_at", { ascending: false })
       .limit(200);
@@ -2057,6 +2225,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         totalUnits: items.reduce((acc, it) => acc + Number(it.planned_units || 0), 0),
         totalPallets: items.reduce((acc, it) => acc + Number(it.pallets || 0), 0),
         createdAt: String(row.created_at || ""),
+        convertedAt: (row.converted_at as string | null) || null,
       };
     });
     setSavedPlans(next);
@@ -3997,7 +4166,17 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   {savedPlans.map((plan) => (
                     <tr key={plan.id} className="border-t border-slate-100">
                       <td className="px-2 py-2 font-medium text-slate-800" title={plan.notes || undefined}>
-                        {plan.title}
+                        <div className="flex items-center gap-2">
+                          <span>{plan.title}</span>
+                          {plan.convertedAt ? (
+                            <span
+                              className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700"
+                              title={`Converted to stock intake on ${formatUkDate(plan.convertedAt.slice(0, 10))}`}
+                            >
+                              Converted
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                       <td className="px-2 py-2 text-slate-600">
                         {plan.planType === "amazon_requirement"
@@ -4012,7 +4191,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                       <td className="px-2 py-2">{plan.totalPallets.toFixed(2)}</td>
                       <td className="px-2 py-2">
                         <div className="flex justify-end gap-1">
-                          {canEdit ? (
+                          {canEdit && !plan.convertedAt ? (
                             <button
                               type="button"
                               onClick={() => void startEditPlan(plan.id)}
@@ -4023,6 +4202,26 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                               }`}
                             >
                               {editingPlanId === plan.id ? "Editing" : "Edit"}
+                            </button>
+                          ) : null}
+                          {canEdit && !plan.convertedAt ? (
+                            <button
+                              type="button"
+                              onClick={() => void convertPlanToStockIntake(plan.id)}
+                              className="rounded bg-emerald-50 px-2 py-1 font-semibold text-emerald-700"
+                              title="Record this plan as stock intake actions"
+                            >
+                              To Intake
+                            </button>
+                          ) : null}
+                          {canEdit ? (
+                            <button
+                              type="button"
+                              onClick={() => void duplicatePlan(plan.id)}
+                              className="rounded bg-slate-100 px-2 py-1 font-semibold text-slate-700"
+                              title="Copy this plan into a new draft"
+                            >
+                              Duplicate
                             </button>
                           ) : null}
                           <button

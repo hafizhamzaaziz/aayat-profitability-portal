@@ -413,6 +413,7 @@ create table if not exists public.shipment_plans (
   title text not null,
   notes text,
   orientation text not null default 'portrait' check (orientation in ('portrait','landscape')),
+  converted_at timestamptz,
   created_by uuid references public.users(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
