@@ -1,33 +1,21 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import AccountSettingsForm from "./account-settings-form";
 import AdminSettingsPanelV2 from "./admin-settings-panel-v2";
 import AuditEventsPanel from "./audit-events-panel";
 
-type AccountForForm = {
-  id: string;
-  name: string;
-  currency: string;
-  vat_rate: number;
-  logo_url: string | null;
-} | null;
-
-type TabId = "account" | "accounts" | "users" | "audit";
+type TabId = "accounts" | "users" | "audit";
 
 const STORAGE_KEY = "settings.activeTab";
 
 export default function SettingsTabs({
-  account,
   isAdmin,
   currentUserId,
 }: {
-  account: AccountForForm;
   isAdmin: boolean;
   currentUserId: string;
 }) {
-  const initialTab: TabId = account ? "account" : isAdmin ? "accounts" : "account";
-  const [active, setActive] = useState<TabId>(initialTab);
+  const [active, setActive] = useState<TabId>("accounts");
 
   useEffect(() => {
     try {
@@ -40,7 +28,6 @@ export default function SettingsTabs({
   }, []);
 
   const tabs: Array<{ id: TabId; label: string; visible: boolean }> = [
-    { id: "account", label: "Account Settings", visible: !!account },
     { id: "accounts", label: "Accounts Management", visible: isAdmin },
     { id: "users", label: "Users Management", visible: isAdmin },
     { id: "audit", label: "Audit Trail", visible: isAdmin },
@@ -85,7 +72,6 @@ export default function SettingsTabs({
         </div>
       </section>
 
-      {active === "account" && account ? <AccountSettingsForm account={account} /> : null}
       {active === "accounts" && isAdmin ? (
         <AdminSettingsPanelV2 currentUserId={currentUserId} view="accounts" />
       ) : null}

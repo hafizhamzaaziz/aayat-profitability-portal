@@ -213,15 +213,15 @@ function SkuCombobox({
     value === "all" ? "All SKUs" : value ? dailyEntryMappingLabel(mappingById.get(value)) : placeholder;
 
   return (
-    <div className={`relative ${className ?? ""}`}>
+    <div className={`relative min-w-0 ${className ?? ""}`}>
       <button
         type="button"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between gap-1 rounded-lg border border-slate-300 px-2 py-2 text-left text-sm disabled:opacity-50"
+        className="flex w-full min-w-0 items-center justify-between gap-1 rounded-lg border border-slate-300 px-2 py-2 text-left text-sm disabled:opacity-50"
         title={value && value !== "all" ? dailyEntryMappingLabel(mappingById.get(value)) : undefined}
       >
-        <span className={`truncate ${value ? "text-slate-800" : "text-slate-400"}`}>{label}</span>
+        <span className={`min-w-0 truncate ${value ? "text-slate-800" : "text-slate-400"}`}>{label}</span>
         <span className="shrink-0 text-[10px] text-slate-400">▾</span>
       </button>
       {open ? (
@@ -297,6 +297,33 @@ function normalizeSkuToken(input: unknown) {
   if (!raw) return "";
   if (/^\d+\.0+$/.test(raw)) return raw.replace(/\.0+$/, "");
   return raw;
+}
+
+// PostgREST caps every response at the project's "Max rows" setting (1000 by
+// default) regardless of the requested `.range()`. Tables like
+// `inventory_sales_facts_cache` hold tens of thousands of rows per account, so
+// a single fetch silently returns an arbitrary slice and the dashboard badly
+// undercounts. This pages through the full result set so aggregates are exact.
+// `pageSize` must stay <= the server cap; 1000 matches the Supabase default.
+async function fetchAllRows<T>(
+  makeQuery: (
+    from: number,
+    to: number,
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  pageSize = 1000,
+): Promise<{ data: T[]; error: { message: string } | null }> {
+  const all: T[] = [];
+  let from = 0;
+  // Guard against an unexpected infinite loop (e.g. backend never shrinks page).
+  for (let guard = 0; guard < 5000; guard++) {
+    const { data, error } = await makeQuery(from, from + pageSize - 1);
+    if (error) return { data: all, error };
+    const batch = (data || []) as T[];
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+    from += pageSize;
+  }
+  return { data: all, error: null };
 }
 
 function daysBetweenInclusive(startIso: string, endIso: string) {
@@ -517,6 +544,22 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   const [profileByMapping, setProfileByMapping] = useState<Record<string, string>>({});
   const [overrides, setOverrides] = useState<Record<string, PlanRowOverride>>({});
   const [savedPlanId, setSavedPlanId] = useState<string | null>(null);
+  // When set, we're editing an existing saved plan (Save updates it in place).
+  const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
+  // When set, the inline "create pack profile" modal is open for this SKU; the
+  // new profile is auto-linked to it so the planner never sends you elsewhere.
+  const [quickProfileMappingId, setQuickProfileMappingId] = useState<string | null>(null);
+  const [quickProfileSaving, setQuickProfileSaving] = useState(false);
+  const [quickProfile, setQuickProfile] = useState({
+    profileName: "",
+    unitsPerBox: "",
+    boxLength: "",
+    boxWidth: "",
+    boxHeight: "",
+    dimensionUnit: "cm" as "mm" | "cm" | "in",
+    boxWeight: "",
+    weightUnit: "kg" as "kg" | "lb",
+  });
   const [dailyHistorySkuSearch, setDailyHistorySkuSearch] = useState("");
   const [dailyFilters, setDailyFilters] = useState({
     from: addDays(todayIsoUtc(), -29),
@@ -551,7 +594,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     setError(null);
     const supabase = createClient();
 
-    const [mappingRes, defaultsRes, salesFactsRes, skuUniverseRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, dailySalesRes, accountRes, skuDescRes] = await Promise.all([
+    const [mappingRes, defaultsRes, salesFactsRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, dailySalesRes, accountRes, skuDescRes] = await Promise.all([
       supabase
         .from("sku_mappings")
         .select("id, amazon_sku, temu_sku_id, lead_time_days, sku_catalog:sku_catalog_id(product_name)")
@@ -559,21 +602,22 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         .order("created_at", { ascending: false }),
       supabase.from("inventory_defaults").select("*").eq("account_id", accountId).maybeSingle(),
       // Pre-aggregated per-day units from `inventory_sales_facts_cache` (refreshed
-      // whenever a report is uploaded / recomputed / deleted). Reading a small
-      // indexed table is O(rows in cache), not O(raw transactions), so this
-      // stays in the millisecond range as monthly data accumulates.
-      supabase
-        .from("inventory_sales_facts_cache")
-        .select("platform, sku, sale_date, qty")
-        .eq("account_id", accountId)
-        .range(0, 199999),
-      // Lightweight SKU universe used by mapping repair helpers — derived from
-      // the same cache so we never touch the heavy JSONB column on page load.
-      supabase
-        .from("inventory_sales_facts_cache")
-        .select("platform, sku")
-        .eq("account_id", accountId)
-        .range(0, 199999),
+      // whenever a report is uploaded / recomputed / deleted). Paged through in
+      // full because accounts routinely exceed the PostgREST row cap — a single
+      // fetch would return an arbitrary slice and undercount every total. The
+      // deterministic ordering keeps page boundaries stable. The SKU universe
+      // used by mapping-repair helpers is derived from this same dataset.
+      fetchAllRows<{ platform: string | null; sku: string | null; sale_date: string; qty: number | string | null }>(
+        (from, to) =>
+          supabase
+            .from("inventory_sales_facts_cache")
+            .select("platform, sku, sale_date, qty")
+            .eq("account_id", accountId)
+            .order("sale_date", { ascending: true })
+            .order("sku", { ascending: true })
+            .order("platform", { ascending: true })
+            .range(from, to),
+      ),
       supabase
         .from("inventory_levels")
         .select("sku_mapping_id, level_date, amazon_units, warehouse_units")
@@ -600,12 +644,18 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         .order("sale_date", { ascending: false })
         .limit(3000),
       supabase.from("accounts").select("vat_rate").eq("id", accountId).maybeSingle(),
-      supabase
-        .from("report_sku_breakdowns")
-        .select("sku, description")
-        .eq("account_id", accountId)
-        .not("description", "is", null)
-        .range(0, 99999),
+      // Paged: a busy account holds several thousand SKU description rows, more
+      // than the PostgREST row cap, so a single fetch dropped product names.
+      fetchAllRows<{ sku: string; description: string | null }>(
+        (from, to) =>
+          supabase
+            .from("report_sku_breakdowns")
+            .select("sku, description")
+            .eq("account_id", accountId)
+            .not("description", "is", null)
+            .order("sku", { ascending: true })
+            .range(from, to),
+      ),
     ]);
 
     if (mappingRes.error) {
@@ -621,11 +671,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     }
     if (salesFactsRes.error) {
       setError(salesFactsRes.error.message);
-      setLoading(false);
-      return;
-    }
-    if (skuUniverseRes.error) {
-      setError(skuUniverseRes.error.message);
       setLoading(false);
       return;
     }
@@ -910,7 +955,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         setTimeout(() => {
           void (async () => {
             try {
-              const skuUniverse = ((skuUniverseRes.data || []) as Array<{
+              const skuUniverse = ((salesFactsRes.data || []) as Array<{
                 platform: string | null;
                 sku: string | null;
               }>).map((row) => ({ platform: row.platform, sku: row.sku }));
@@ -1717,36 +1762,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     }, 0);
   }, [selectedRows, packProfiles, profileByMapping, overrides, planType]);
 
-  const saveShipmentPlan = async () => {
-    if (!canEdit) return;
-    if (selectedRows.length === 0) {
-      setError("Select at least one SKU to create shipment plan.");
-      return;
-    }
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    const orientation = selectedRows.length > 8 ? "landscape" : "portrait";
-    const { data: plan, error: planError } = await supabase
-      .from("shipment_plans")
-      .insert({
-        account_id: accountId,
-        plan_type: planType,
-        title: planTitle.trim() || "Shipment plan",
-        notes: planNotes.trim() || null,
-        orientation,
-        created_by: user?.id || null,
-      })
-      .select("id")
-      .single();
-    if (planError || !plan?.id) {
-      setError(planError?.message || "Failed to create shipment plan.");
-      return;
-    }
-
-    const items = selectedRows.map((row) => {
+  const buildPlanItems = (planId: string) =>
+    selectedRows.map((row) => {
       const profile = packProfiles.find((p) => p.id === profileByMapping[row.mappingId]);
       const suggested = planType === "amazon_requirement" ? row.suggestedAmazonUnits : row.suggestedWarehouseUnits;
       const plannedUnits = Math.max(0, Number(overrides[row.mappingId]?.plannedUnits ?? suggested));
@@ -1757,7 +1774,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         : estimate.pallets;
       const leadTimeDays = mappings.find((m) => m.mappingId === row.mappingId)?.leadTimeDays ?? defaults.leadTimeDays;
       return {
-        shipment_plan_id: plan.id,
+        shipment_plan_id: planId,
         sku_mapping_id: row.mappingId,
         suggested_units: suggested,
         planned_units: plannedUnits,
@@ -1769,14 +1786,250 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         lead_time_days: leadTimeDays,
       };
     });
-    const { error: itemsError } = await supabase.from("shipment_plan_items").insert(items);
+
+  const saveShipmentPlan = async () => {
+    if (!canEdit) return;
+    if (selectedRows.length === 0) {
+      setError("Select at least one SKU to create shipment plan.");
+      return;
+    }
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const title = planTitle.trim() || "Shipment plan";
+
+    // Block duplicate plan names. The user decides whether to overwrite the
+    // existing plan or go back and rename this one. The plan currently being
+    // edited is excluded so re-saving it under its own name is always allowed.
+    const duplicate = savedPlans.find(
+      (p) => p.title.trim().toLowerCase() === title.toLowerCase() && p.id !== editingPlanId
+    );
+    if (duplicate) {
+      const replace =
+        typeof window !== "undefined" &&
+        window.confirm(
+          `A shipment plan named “${title}” already exists.\n\n` +
+            `OK — replace the existing plan\n` +
+            `Cancel — keep it and change this plan's name first.`
+        );
+      if (!replace) {
+        setError(`A plan named “${title}” already exists — replace it or choose a different name.`);
+        return;
+      }
+      const { error: dupDeleteError } = await supabase
+        .from("shipment_plans")
+        .delete()
+        .eq("id", duplicate.id)
+        .eq("account_id", accountId);
+      if (dupDeleteError) {
+        setError(dupDeleteError.message);
+        return;
+      }
+      if (savedPlanId === duplicate.id) setSavedPlanId(null);
+    }
+
+    const orientation = selectedRows.length > 8 ? "landscape" : "portrait";
+    const isEditing = Boolean(editingPlanId && editingPlanId !== duplicate?.id);
+    let targetPlanId = isEditing ? editingPlanId : null;
+
+    if (isEditing && targetPlanId) {
+      const { error: updateError } = await supabase
+        .from("shipment_plans")
+        .update({ plan_type: planType, title, notes: planNotes.trim() || null, orientation })
+        .eq("id", targetPlanId)
+        .eq("account_id", accountId);
+      if (updateError) {
+        setError(updateError.message);
+        return;
+      }
+      // Replace the item set so removed/added SKUs and edits are reflected.
+      const { error: clearError } = await supabase
+        .from("shipment_plan_items")
+        .delete()
+        .eq("shipment_plan_id", targetPlanId);
+      if (clearError) {
+        setError(clearError.message);
+        return;
+      }
+    } else {
+      const { data: plan, error: planError } = await supabase
+        .from("shipment_plans")
+        .insert({
+          account_id: accountId,
+          plan_type: planType,
+          title,
+          notes: planNotes.trim() || null,
+          orientation,
+          created_by: user?.id || null,
+        })
+        .select("id")
+        .single();
+      if (planError || !plan?.id) {
+        setError(planError?.message || "Failed to create shipment plan.");
+        return;
+      }
+      targetPlanId = String(plan.id);
+    }
+
+    if (!targetPlanId) {
+      setError("Could not resolve the shipment plan id.");
+      return;
+    }
+
+    const { error: itemsError } = await supabase.from("shipment_plan_items").insert(buildPlanItems(targetPlanId));
     if (itemsError) {
       setError(itemsError.message);
       return;
     }
-    setSavedPlanId(String(plan.id));
-    setMessage("Shipment plan saved.");
+    setSavedPlanId(targetPlanId);
+    // Stay "attached" to the saved plan so a follow-up save updates it in place
+    // instead of creating a duplicate.
+    setEditingPlanId(targetPlanId);
+    setMessage(isEditing ? "Shipment plan updated." : "Shipment plan saved.");
     await loadSavedPlans();
+  };
+
+  const resetPlanner = () => {
+    setEditingPlanId(null);
+    setSavedPlanId(null);
+    setSelectedMappingIds([]);
+    setOverrides({});
+    setProfileByMapping({});
+    setPlanTitle("Weekly replenishment plan");
+    setPlanNotes("");
+    setPlanType("amazon_requirement");
+  };
+
+  const startEditPlan = async (planId: string) => {
+    if (!canEdit) return;
+    const supabase = createClient();
+    const { data, error: loadError } = await supabase
+      .from("shipment_plans")
+      .select("id, plan_type, title, notes, shipment_plan_items(sku_mapping_id, planned_units, planned_boxes, units_per_box)")
+      .eq("id", planId)
+      .eq("account_id", accountId)
+      .single();
+    if (loadError || !data) {
+      setError(loadError?.message || "Failed to load the plan for editing.");
+      return;
+    }
+    const planRow = data as unknown as {
+      id: string;
+      plan_type: string;
+      title: string;
+      notes: string | null;
+      shipment_plan_items: Array<{
+        sku_mapping_id: string;
+        planned_units: number | null;
+        planned_boxes: number | null;
+        units_per_box: number | null;
+      }> | null;
+    };
+    const items = planRow.shipment_plan_items || [];
+    const nextOverrides: Record<string, PlanRowOverride> = {};
+    const nextProfileByMapping: Record<string, string> = {};
+    items.forEach((it) => {
+      nextOverrides[it.sku_mapping_id] = {
+        plannedUnits: Number(it.planned_units || 0),
+        plannedBoxes: Number(it.planned_boxes || 0),
+      };
+      // Best-effort: re-attach a linked profile, preferring one whose box size
+      // matches what was saved so pallet maths line up.
+      const linkedIds = profileIdsByMapping[it.sku_mapping_id] || [];
+      const linkedProfiles = packProfiles.filter((p) => linkedIds.includes(p.id));
+      const match =
+        linkedProfiles.find((p) => Number(p.unitsPerBox) === Number(it.units_per_box || 0)) || linkedProfiles[0];
+      if (match) nextProfileByMapping[it.sku_mapping_id] = match.id;
+    });
+    setSelectedMappingIds(items.map((it) => it.sku_mapping_id));
+    setOverrides(nextOverrides);
+    setProfileByMapping(nextProfileByMapping);
+    setPlanType(planRow.plan_type === "warehouse_requirement" ? "warehouse_requirement" : "amazon_requirement");
+    setPlanTitle(planRow.title || "Shipment plan");
+    setPlanNotes(planRow.notes || "");
+    setEditingPlanId(planId);
+    setSavedPlanId(planId);
+    setActiveTab("shipment-planning");
+    setMessage(`Editing “${planRow.title}”. Make changes and click Update plan.`);
+  };
+
+  const openQuickProfile = (mappingId: string) => {
+    setQuickProfile({
+      profileName: "",
+      unitsPerBox: "",
+      boxLength: "",
+      boxWidth: "",
+      boxHeight: "",
+      dimensionUnit: "cm",
+      boxWeight: "",
+      weightUnit: "kg",
+    });
+    setQuickProfileMappingId(mappingId);
+  };
+
+  const saveQuickProfile = async () => {
+    if (!canEdit || !quickProfileMappingId) return;
+    if (
+      !quickProfile.profileName.trim() ||
+      !quickProfile.unitsPerBox ||
+      !quickProfile.boxLength ||
+      !quickProfile.boxWidth ||
+      !quickProfile.boxHeight
+    ) {
+      setError("Profile name, units/box and dimensions are required.");
+      return;
+    }
+    setQuickProfileSaving(true);
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      const { data: savedProfile, error: saveError } = await supabase
+        .from("pack_profiles")
+        .insert({
+          account_id: accountId,
+          profile_name: quickProfile.profileName.trim(),
+          units_per_box: Number(quickProfile.unitsPerBox),
+          box_length: Number(quickProfile.boxLength),
+          box_width: Number(quickProfile.boxWidth),
+          box_height: Number(quickProfile.boxHeight),
+          dimension_unit: quickProfile.dimensionUnit,
+          box_weight: quickProfile.boxWeight ? Number(quickProfile.boxWeight) : null,
+          weight_unit: quickProfile.weightUnit,
+        })
+        .select("id")
+        .single();
+      if (saveError || !savedProfile?.id) {
+        setError(saveError?.message || "Failed to save profile.");
+        return;
+      }
+      const newProfileId = String(savedProfile.id);
+      const { error: linkError } = await supabase.from("inventory_movements").insert({
+        account_id: accountId,
+        sku_mapping_id: quickProfileMappingId,
+        movement_date: todayIsoUtc(),
+        movement_type: "adjustment" as const,
+        units_delta: 0,
+        boxes: null,
+        pack_profile_id: newProfileId,
+        notes: "__profile_link__",
+        created_by: user?.id || null,
+      });
+      if (linkError) {
+        setError(linkError.message);
+        return;
+      }
+      const mappingId = quickProfileMappingId;
+      setQuickProfileMappingId(null);
+      await loadAll();
+      // Auto-select the freshly created profile for this row.
+      setProfileByMapping((prev) => ({ ...prev, [mappingId]: newProfileId }));
+      setMessage("Pack profile created and linked to this SKU.");
+    } finally {
+      setQuickProfileSaving(false);
+    }
   };
 
   const loadSavedPlans = async () => {
@@ -1823,6 +2076,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       return;
     }
     if (savedPlanId === planId) setSavedPlanId(null);
+    if (editingPlanId === planId) setEditingPlanId(null);
     setMessage("Shipment plan deleted.");
     await loadSavedPlans();
   };
@@ -3552,11 +3806,27 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           <input value={planTitle} onChange={(e) => setPlanTitle(e.target.value)} placeholder="Plan title" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
           <input value={planNotes} onChange={(e) => setPlanNotes(e.target.value)} placeholder="Notes" className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
           {canEdit ? (
-            <button onClick={() => void saveShipmentPlan()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
-              Save plan
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={() => void saveShipmentPlan()} className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white">
+                {editingPlanId ? "Update plan" : "Save plan"}
+              </button>
+              {editingPlanId ? (
+                <button
+                  type="button"
+                  onClick={resetPlanner}
+                  className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700"
+                >
+                  New plan
+                </button>
+              ) : null}
+            </div>
           ) : null}
         </div>
+        {editingPlanId ? (
+          <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+            Editing a saved plan — changes overwrite it when you click “Update plan”. Click “New plan” to start a fresh one.
+          </p>
+        ) : null}
 
         <div className="overflow-x-auto rounded-xl border border-slate-200">
           <table className="min-w-full text-xs">
@@ -3618,35 +3888,45 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                       </td>
                       <td className="px-2 py-2">
                         {canEdit ? (
-                          <select
-                            value={profileByMapping[row.mappingId] || ""}
-                            onChange={(e) => {
-                              const nextProfileId = e.target.value;
-                              setProfileByMapping((prev) => ({ ...prev, [row.mappingId]: nextProfileId }));
-                              const selectedProfile = packProfiles.find((p) => p.id === nextProfileId);
-                              if (selectedProfile) {
-                                setOverrides((prev) => ({
-                                  ...prev,
-                                  [row.mappingId]: {
-                                    plannedUnits: Number(prev[row.mappingId]?.plannedUnits ?? suggested),
-                                    plannedBoxes: Math.ceil(
-                                      Number(prev[row.mappingId]?.plannedUnits ?? suggested) / selectedProfile.unitsPerBox
-                                    ),
-                                  },
-                                }));
-                              }
-                            }}
-                            className="rounded-lg border border-slate-300 px-2 py-1"
-                          >
-                            <option value="">
-                              {availableProfiles.length > 0 ? "Select profile" : "No linked profile"}
-                            </option>
-                            {availableProfiles.map((p) => (
-                              <option key={p.id} value={p.id}>
-                                {p.profileName}
+                          <div className="flex items-center gap-1">
+                            <select
+                              value={profileByMapping[row.mappingId] || ""}
+                              onChange={(e) => {
+                                const nextProfileId = e.target.value;
+                                setProfileByMapping((prev) => ({ ...prev, [row.mappingId]: nextProfileId }));
+                                const selectedProfile = packProfiles.find((p) => p.id === nextProfileId);
+                                if (selectedProfile) {
+                                  setOverrides((prev) => ({
+                                    ...prev,
+                                    [row.mappingId]: {
+                                      plannedUnits: Number(prev[row.mappingId]?.plannedUnits ?? suggested),
+                                      plannedBoxes: Math.ceil(
+                                        Number(prev[row.mappingId]?.plannedUnits ?? suggested) / selectedProfile.unitsPerBox
+                                      ),
+                                    },
+                                  }));
+                                }
+                              }}
+                              className="rounded-lg border border-slate-300 px-2 py-1"
+                            >
+                              <option value="">
+                                {availableProfiles.length > 0 ? "Select profile" : "No linked profile"}
                               </option>
-                            ))}
-                          </select>
+                              {availableProfiles.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.profileName}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => openQuickProfile(row.mappingId)}
+                              title="Create a new pack profile and link it to this SKU"
+                              className="shrink-0 rounded-lg border border-[var(--md-primary)] px-2 py-1 text-xs font-semibold text-[var(--md-primary)] hover:bg-[var(--md-primary)] hover:text-white"
+                            >
+                              + New
+                            </button>
+                          </div>
                         ) : (
                           profile?.profileName || "-"
                         )}
@@ -3732,6 +4012,19 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                       <td className="px-2 py-2">{plan.totalPallets.toFixed(2)}</td>
                       <td className="px-2 py-2">
                         <div className="flex justify-end gap-1">
+                          {canEdit ? (
+                            <button
+                              type="button"
+                              onClick={() => void startEditPlan(plan.id)}
+                              className={`rounded px-2 py-1 font-semibold ${
+                                editingPlanId === plan.id
+                                  ? "bg-[var(--md-primary)] text-white"
+                                  : "bg-slate-100 text-slate-700"
+                              }`}
+                            >
+                              {editingPlanId === plan.id ? "Editing" : "Edit"}
+                            </button>
+                          ) : null}
                           <button
                             type="button"
                             onClick={() => void downloadPlanPdf(plan.id)}
@@ -3757,6 +4050,109 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             </div>
           )}
         </div>
+
+        {quickProfileMappingId ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+            <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-4 shadow-xl">
+              <div className="mb-1 flex items-center justify-between">
+                <h4 className="text-sm font-semibold text-slate-800">New pack profile</h4>
+                <button
+                  type="button"
+                  onClick={() => setQuickProfileMappingId(null)}
+                  className="rounded-lg px-2 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-100"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="mb-3 text-xs text-slate-500">
+                Creating and linking a profile to{" "}
+                <span className="font-semibold text-slate-700">
+                  {dailyEntryMappingLabel(mappingById.get(quickProfileMappingId))}
+                </span>
+                .
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input
+                  value={quickProfile.profileName}
+                  onChange={(e) => setQuickProfile((p) => ({ ...p, profileName: e.target.value }))}
+                  placeholder="Profile name"
+                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm sm:col-span-2"
+                />
+                <input
+                  value={quickProfile.unitsPerBox}
+                  onChange={(e) => setQuickProfile((p) => ({ ...p, unitsPerBox: e.target.value }))}
+                  type="number"
+                  placeholder="Units / box"
+                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                />
+                <select
+                  value={quickProfile.dimensionUnit}
+                  onChange={(e) => setQuickProfile((p) => ({ ...p, dimensionUnit: e.target.value as "mm" | "cm" | "in" }))}
+                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  <option value="mm">mm</option>
+                  <option value="cm">cm</option>
+                  <option value="in">in</option>
+                </select>
+                <input
+                  value={quickProfile.boxLength}
+                  onChange={(e) => setQuickProfile((p) => ({ ...p, boxLength: e.target.value }))}
+                  type="number"
+                  placeholder="Length"
+                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                />
+                <input
+                  value={quickProfile.boxWidth}
+                  onChange={(e) => setQuickProfile((p) => ({ ...p, boxWidth: e.target.value }))}
+                  type="number"
+                  placeholder="Width"
+                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                />
+                <input
+                  value={quickProfile.boxHeight}
+                  onChange={(e) => setQuickProfile((p) => ({ ...p, boxHeight: e.target.value }))}
+                  type="number"
+                  placeholder="Height"
+                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                />
+                <div className="grid grid-cols-[1fr_92px] gap-2">
+                  <input
+                    value={quickProfile.boxWeight}
+                    onChange={(e) => setQuickProfile((p) => ({ ...p, boxWeight: e.target.value }))}
+                    type="number"
+                    placeholder="Weight"
+                    className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                  />
+                  <select
+                    value={quickProfile.weightUnit}
+                    onChange={(e) => setQuickProfile((p) => ({ ...p, weightUnit: e.target.value as "kg" | "lb" }))}
+                    className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                  >
+                    <option value="kg">kg</option>
+                    <option value="lb">lb</option>
+                  </select>
+                </div>
+              </div>
+              <div className="mt-3 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setQuickProfileMappingId(null)}
+                  className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveQuickProfile()}
+                  disabled={quickProfileSaving}
+                  className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                >
+                  {quickProfileSaving ? "Saving..." : "Create & link"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </section>
       ) : null}
 
@@ -4528,35 +4924,41 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             ) : null}
           </div>
 
-          <div className="flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
-            <SkuCombobox
-              value={ledgerFilters.mappingId}
-              onChange={(mappingId) => {
-                setLedgerFilters((prev) => ({ ...prev, mappingId }));
-                setLedgerOffset(0);
-              }}
-              mappings={mappings}
-              mappingById={mappingById}
-              allowAll
-              placeholder="All SKUs"
-              className="w-56"
-            />
-            <select
-              value={ledgerFilters.eventKey}
-              onChange={(e) => {
-                setLedgerFilters((prev) => ({ ...prev, eventKey: e.target.value as "all" | LedgerEventKey }));
-                setLedgerOffset(0);
-              }}
-              className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
-            >
-              <option value="all">All events</option>
-              <option value="intake">Intake</option>
-              <option value="send_amazon">Send to Amazon</option>
-              <option value="outbound">Outbound</option>
-              <option value="adjustment">Adjustment</option>
-              <option value="sale">Sale</option>
-              <option value="return">Return</option>
-            </select>
+          <div className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <label className="text-xs text-slate-600">
+              <span className="mb-1 block uppercase tracking-wide text-slate-500">SKU</span>
+              <SkuCombobox
+                value={ledgerFilters.mappingId}
+                onChange={(mappingId) => {
+                  setLedgerFilters((prev) => ({ ...prev, mappingId }));
+                  setLedgerOffset(0);
+                }}
+                mappings={mappings}
+                mappingById={mappingById}
+                allowAll
+                placeholder="All SKUs"
+                className="w-56"
+              />
+            </label>
+            <label className="text-xs text-slate-600">
+              <span className="mb-1 block uppercase tracking-wide text-slate-500">Event</span>
+              <select
+                value={ledgerFilters.eventKey}
+                onChange={(e) => {
+                  setLedgerFilters((prev) => ({ ...prev, eventKey: e.target.value as "all" | LedgerEventKey }));
+                  setLedgerOffset(0);
+                }}
+                className="h-[38px] w-44 rounded-lg border border-slate-300 px-2 py-2 text-sm"
+              >
+                <option value="all">All events</option>
+                <option value="intake">Intake</option>
+                <option value="send_amazon">Send to Amazon</option>
+                <option value="outbound">Outbound</option>
+                <option value="adjustment">Adjustment</option>
+                <option value="sale">Sale</option>
+                <option value="return">Return</option>
+              </select>
+            </label>
             <label className="text-xs text-slate-600">
               <span className="mb-1 block uppercase tracking-wide text-slate-500">From</span>
               <input
@@ -4566,7 +4968,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   setLedgerFilters((prev) => ({ ...prev, from: e.target.value }));
                   setLedgerOffset(0);
                 }}
-                className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                className="h-[38px] rounded-lg border border-slate-300 px-2 py-2 text-sm"
               />
             </label>
             <label className="text-xs text-slate-600">
@@ -4578,7 +4980,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   setLedgerFilters((prev) => ({ ...prev, to: e.target.value }));
                   setLedgerOffset(0);
                 }}
-                className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                className="h-[38px] rounded-lg border border-slate-300 px-2 py-2 text-sm"
               />
             </label>
           </div>

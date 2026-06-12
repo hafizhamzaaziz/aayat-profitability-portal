@@ -4,11 +4,32 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@/lib/supabase/client";
 import type { UserRole } from "@/lib/types/auth";
+import FileDropzone from "@/components/ui/file-dropzone";
 import AuditEventsPanel from "./audit-events-panel";
 
 type UserRow = { id: string; full_name: string; email: string; role: UserRole };
-type AccountRow = { id: string; name: string; currency: string; vat_rate: number; assigned_client_id: string | null };
-type AccountForm = { name: string; currency: string; vatRate: string; assignedClientIds: string[]; assignedTeamIds: string[] };
+type AccountRow = { id: string; name: string; currency: string; vat_rate: number; assigned_client_id: string | null; logo_url: string | null };
+type InventoryDefaultsRow = {
+  account_id: string;
+  lead_time_days: number | null;
+  amazon_cover_days: number | null;
+  warehouse_cover_days: number | null;
+  storage_cost_per_pallet: number | null;
+  storage_cost_period: "week" | "month" | null;
+};
+type AccountForm = {
+  name: string;
+  currency: string;
+  vatRate: string;
+  assignedClientIds: string[];
+  assignedTeamIds: string[];
+  logoUrl: string;
+  leadTimeDays: string;
+  amazonCoverDays: string;
+  warehouseCoverDays: string;
+  storageCostPerPallet: string;
+  storageCostPeriod: "week" | "month";
+};
 type UserForm = { fullName: string; email: string; role: UserRole; password: string };
 type AmazonCredential = {
   account_id: string;
@@ -28,7 +49,19 @@ type AmazonAdsCredential = {
   ads_advertiser_name: string | null;
 };
 
-const emptyAccount: AccountForm = { name: "", currency: "£", vatRate: "20", assignedClientIds: [], assignedTeamIds: [] };
+const emptyAccount: AccountForm = {
+  name: "",
+  currency: "£",
+  vatRate: "20",
+  assignedClientIds: [],
+  assignedTeamIds: [],
+  logoUrl: "",
+  leadTimeDays: "90",
+  amazonCoverDays: "30",
+  warehouseCoverDays: "120",
+  storageCostPerPallet: "0",
+  storageCostPeriod: "month",
+};
 const emptyUser: UserForm = { fullName: "", email: "", role: "client", password: "" };
 
 export default function AdminSettingsPanelV2({
@@ -56,6 +89,8 @@ export default function AdminSettingsPanelV2({
   const [createAccountOpen, setCreateAccountOpen] = useState(false);
   const [editAccountId, setEditAccountId] = useState<string | null>(null);
   const [accountForm, setAccountForm] = useState<AccountForm>(emptyAccount);
+  const [accountLogoFile, setAccountLogoFile] = useState<File | null>(null);
+  const [inventoryDefaultsByAccount, setInventoryDefaultsByAccount] = useState<Record<string, InventoryDefaultsRow>>({});
   const [createUserOpen, setCreateUserOpen] = useState(false);
   const [editUserId, setEditUserId] = useState<string | null>(null);
   const [userForm, setUserForm] = useState<UserForm>(emptyUser);
@@ -79,15 +114,19 @@ export default function AdminSettingsPanelV2({
         { data: linksData, error: linksError },
         { data: clientLinksData, error: clientLinksError },
         { data: amazonCredsData, error: amazonCredsError },
+        { data: defaultsData, error: defaultsError },
       ] = await Promise.all([
         supabase.from("users").select("id, full_name, email, role").order("full_name", { ascending: true }),
-        supabase.from("accounts").select("id, name, currency, vat_rate, assigned_client_id").order("name", { ascending: true }),
+        supabase.from("accounts").select("id, name, currency, vat_rate, assigned_client_id, logo_url").order("name", { ascending: true }),
         supabase.from("account_team_members").select("account_id, team_id"),
         supabase.from("account_client_members").select("account_id, client_id"),
         supabase
           .from("account_amazon_credentials")
           .select("account_id, provider, selling_partner_id, connected_at, last_synced_at, last_sync_error, ads_profile_ids, ads_advertiser_name")
           .in("provider", ["sp-api", "ads-api"]),
+        supabase
+          .from("inventory_defaults")
+          .select("account_id, lead_time_days, amazon_cover_days, warehouse_cover_days, storage_cost_per_pallet, storage_cost_period"),
       ]);
       if (usersError) throw usersError;
       if (accountsError) throw accountsError;
@@ -96,6 +135,12 @@ export default function AdminSettingsPanelV2({
       // Soft-fail if credentials can't be read (e.g. table doesn't exist yet
       // in older environments). The Amazon panel will simply show "Not connected".
       if (amazonCredsError) console.warn("Failed to load Amazon credentials:", amazonCredsError.message);
+      if (defaultsError) console.warn("Failed to load inventory defaults:", defaultsError.message);
+
+      const nextDefaultsMap: Record<string, InventoryDefaultsRow> = {};
+      ((defaultsData || []) as InventoryDefaultsRow[]).forEach((row) => {
+        nextDefaultsMap[row.account_id] = row;
+      });
 
       const nextMap: Record<string, string[]> = {};
       ((linksData || []) as Array<{ account_id: string; team_id: string }>).forEach((row) => {
@@ -134,6 +179,7 @@ export default function AdminSettingsPanelV2({
       setAccountClientMap(nextClientMap);
       setAmazonCredsByAccount(nextAmazonMap);
       setAdsCredsByAccount(nextAdsMap);
+      setInventoryDefaultsByAccount(nextDefaultsMap);
       setLoading(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load admin settings.");
@@ -165,6 +211,7 @@ export default function AdminSettingsPanelV2({
 
   const openCreateAccount = () => {
     setAccountForm(emptyAccount);
+    setAccountLogoFile(null);
     setEditAccountId(null);
     setCreateAccountOpen(true);
   };
@@ -173,13 +220,21 @@ export default function AdminSettingsPanelV2({
     const merged = Array.from(
       new Set(account.assigned_client_id ? [...fromJoin, account.assigned_client_id] : fromJoin)
     );
+    const defaults = inventoryDefaultsByAccount[account.id];
     setAccountForm({
       name: account.name,
       currency: account.currency,
       vatRate: String(account.vat_rate),
       assignedClientIds: merged,
       assignedTeamIds: accountTeamMap[account.id] || [],
+      logoUrl: account.logo_url || "",
+      leadTimeDays: String(defaults?.lead_time_days ?? 90),
+      amazonCoverDays: String(defaults?.amazon_cover_days ?? 30),
+      warehouseCoverDays: String(defaults?.warehouse_cover_days ?? 120),
+      storageCostPerPallet: String(defaults?.storage_cost_per_pallet ?? 0),
+      storageCostPeriod: defaults?.storage_cost_period || "month",
     });
+    setAccountLogoFile(null);
     setEditAccountId(account.id);
   };
   const openCreateUser = () => {
@@ -212,25 +267,52 @@ export default function AdminSettingsPanelV2({
         currency: accountForm.currency,
         vat_rate: Number(accountForm.vatRate || 0),
         assigned_client_id: primaryClient,
+        logo_url: accountForm.logoUrl || null,
       };
+      let resolvedId = editAccountId;
       if (editAccountId) {
         const { error: updateError } = await supabase.from("accounts").update(payload).eq("id", editAccountId);
         if (updateError) throw updateError;
       } else {
         const { data: inserted, error: insertError } = await supabase.from("accounts").insert(payload).select("id").single();
         if (insertError) throw insertError;
-        if (inserted?.id) setEditAccountId(String(inserted.id));
+        resolvedId = inserted?.id ? String(inserted.id) : null;
+        if (resolvedId) setEditAccountId(resolvedId);
       }
-      if (editAccountId) {
-        await syncAccountTeams(editAccountId, accountForm.assignedTeamIds);
-        await syncAccountClients(editAccountId, accountForm.assignedClientIds);
-      } else {
-        const { data: latest } = await supabase.from("accounts").select("id").eq("name", accountForm.name.trim()).order("created_at", { ascending: false }).limit(1).maybeSingle();
-        if (latest?.id) {
-          await syncAccountTeams(String(latest.id), accountForm.assignedTeamIds);
-          await syncAccountClients(String(latest.id), accountForm.assignedClientIds);
-        }
+      if (!resolvedId) throw new Error("Could not resolve the account id after save.");
+
+      // Upload a freshly selected logo, then point the account at its public URL.
+      if (accountLogoFile) {
+        const extension = accountLogoFile.name.split(".").pop() || "png";
+        const filePath = `${resolvedId}/${Date.now()}.${extension}`;
+        const { error: uploadError } = await supabase.storage
+          .from("account_logos")
+          .upload(filePath, accountLogoFile, { upsert: true });
+        if (uploadError) throw uploadError;
+        const { data: publicData } = supabase.storage.from("account_logos").getPublicUrl(filePath);
+        const newLogoUrl = publicData.publicUrl;
+        const { error: logoUpdateError } = await supabase.from("accounts").update({ logo_url: newLogoUrl }).eq("id", resolvedId);
+        if (logoUpdateError) throw logoUpdateError;
+        setAccountForm((p) => ({ ...p, logoUrl: newLogoUrl }));
+        setAccountLogoFile(null);
       }
+
+      await syncAccountTeams(resolvedId, accountForm.assignedTeamIds);
+      await syncAccountClients(resolvedId, accountForm.assignedClientIds);
+
+      const { error: defaultsSaveError } = await supabase.from("inventory_defaults").upsert(
+        {
+          account_id: resolvedId,
+          lead_time_days: Number(accountForm.leadTimeDays || 0),
+          amazon_cover_days: Number(accountForm.amazonCoverDays || 0),
+          warehouse_cover_days: Number(accountForm.warehouseCoverDays || 0),
+          storage_cost_per_pallet: Number(accountForm.storageCostPerPallet || 0),
+          storage_cost_period: accountForm.storageCostPeriod,
+        },
+        { onConflict: "account_id" }
+      );
+      if (defaultsSaveError) throw defaultsSaveError;
+
       setCreateAccountOpen(false);
       setMessage(editAccountId ? "Account updated." : "Account created.");
       await loadData();
@@ -464,6 +546,78 @@ export default function AdminSettingsPanelV2({
                   onChange={(ids) => setAccountForm((p) => ({ ...p, assignedTeamIds: ids }))}
                 />
               </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="mb-1 text-sm font-semibold text-slate-800">Inventory Planning Defaults</p>
+              <p className="mb-3 text-xs text-slate-500">Used by the Inventory dashboard for cover, replenishment and storage estimates.</p>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Lead Time (days)</label>
+                  <input
+                    type="number"
+                    value={accountForm.leadTimeDays}
+                    onChange={(e) => setAccountForm((p) => ({ ...p, leadTimeDays: e.target.value }))}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Amazon Cover (days)</label>
+                  <input
+                    type="number"
+                    value={accountForm.amazonCoverDays}
+                    onChange={(e) => setAccountForm((p) => ({ ...p, amazonCoverDays: e.target.value }))}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Warehouse Cover (days)</label>
+                  <input
+                    type="number"
+                    value={accountForm.warehouseCoverDays}
+                    onChange={(e) => setAccountForm((p) => ({ ...p, warehouseCoverDays: e.target.value }))}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Storage Cost / Pallet</label>
+                  <div className="grid grid-cols-[1fr_92px] gap-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={accountForm.storageCostPerPallet}
+                      onChange={(e) => setAccountForm((p) => ({ ...p, storageCostPerPallet: e.target.value }))}
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    />
+                    <select
+                      value={accountForm.storageCostPeriod}
+                      onChange={(e) => setAccountForm((p) => ({ ...p, storageCostPeriod: e.target.value as "week" | "month" }))}
+                      className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                    >
+                      <option value="week">/ wk</option>
+                      <option value="month">/ mo</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Account Logo</label>
+              <p className="mb-2 text-xs text-slate-500">Shown on this account&apos;s reports and PDFs.</p>
+              <FileDropzone
+                accept="image/*"
+                onFileSelect={(file) => setAccountLogoFile(file)}
+                label="Upload account logo"
+                hint="PNG, JPG, WEBP"
+                selectedFileName={accountLogoFile?.name}
+              />
+              {accountForm.logoUrl && !accountLogoFile ? (
+                <div className="mt-3 inline-flex rounded-xl border border-slate-200 bg-white p-3">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={accountForm.logoUrl} alt="Account logo" className="h-12 w-auto object-contain" />
+                </div>
+              ) : null}
             </div>
 
             {editAccountId ? (

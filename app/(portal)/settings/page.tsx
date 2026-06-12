@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { requireRole } from "@/lib/auth/guards";
-import { getAccountByIdForRole } from "@/lib/data/accounts";
 import SettingsTabs from "./settings-tabs";
 
 export const metadata: Metadata = {
@@ -12,10 +11,7 @@ export default async function SettingsPage({
 }: {
   searchParams: { accountId?: string; amazon?: string; amazon_message?: string };
 }) {
-  const { supabase, user, role } = await requireRole(["admin", "team"]);
-  const accountId = searchParams.accountId;
-
-  const account = accountId ? await getAccountByIdForRole(supabase, accountId, role, user.id) : null;
+  const { user, role } = await requireRole(["admin", "team"]);
   const isAdmin = role === "admin";
 
   const amazonKind: "ok" | "error" | "info" | null =
@@ -46,22 +42,14 @@ export default async function SettingsPage({
         </div>
       ) : null}
 
-      {accountId && !account ? (
-        <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm text-red-700">
-          The selected account was not found or you do not have access.
-        </p>
-      ) : null}
-      {!accountId && !isAdmin ? (
+      {!isAdmin ? (
         <p className="text-slate-600">
-          Select an account from the topbar context switcher to edit logo, currency, VAT, and inventory defaults.
+          Settings are managed by administrators. Account details, currency, VAT, logo and inventory
+          defaults are edited under Accounts Management.
         </p>
       ) : null}
 
-      <SettingsTabs
-        account={account}
-        isAdmin={isAdmin}
-        currentUserId={user.id}
-      />
+      <SettingsTabs isAdmin={isAdmin} currentUserId={user.id} />
     </div>
   );
 }
