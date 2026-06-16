@@ -13,6 +13,7 @@ $$;
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
+set search_path = ''
 as $$
 begin
   new.updated_at = now();
@@ -498,6 +499,9 @@ set search_path = public
 as $$
   select role from public.users where id = auth.uid();
 $$;
+-- Used inside RLS policies (evaluated as the signed-in user); keep authenticated
+-- only and keep it off the anonymous REST surface.
+revoke execute on function public.current_user_role() from public, anon;
 grant execute on function public.current_user_role() to authenticated;
 -- triggers
 DO $$ BEGIN
@@ -1035,12 +1039,11 @@ values ('account_logos', 'account_logos', true)
 on conflict (id) do nothing;
 
 -- Storage object policies
+-- NOTE: a public bucket serves objects via their public URL without any SELECT
+-- policy on storage.objects. We intentionally do NOT add a broad "public read"
+-- SELECT policy here because it would let anyone *list* every file in the
+-- bucket (flagged by the linter as public_bucket_allows_listing).
 drop policy if exists "account_logos_public_read" on storage.objects;
-create policy "account_logos_public_read"
-on storage.objects
-for select
-to public
-using (bucket_id = 'account_logos');
 
 drop policy if exists "account_logos_insert_admin_team" on storage.objects;
 create policy "account_logos_insert_admin_team"
@@ -1099,6 +1102,9 @@ begin
   return null;
 end;
 $$;
+-- This is a trigger-only helper: triggers fire it regardless of EXECUTE grants,
+-- so no role should be able to call it directly via the REST API.
+revoke execute on function public.log_audit_event() from public, anon, authenticated;
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_accounts_changes') THEN
