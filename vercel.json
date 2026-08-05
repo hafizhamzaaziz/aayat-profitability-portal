@@ -3,6 +3,10 @@
     {
       "path": "/api/amazon/ads/collect",
       "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/amazon/keepalive",
+      "schedule": "0 3 * * 1"
     }
   ]
 }
