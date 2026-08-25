@@ -19,8 +19,12 @@
  *   • Service Fee 'Cost of Advertising': ex-VAT in 'other transaction fees'
  *     and VAT in 'other' (already separated by Amazon).
  *   • Service Fee 'Subscription' in 'other': VAT-inclusive.
- *   • FBA Inventory Fee in 'other': VAT-inclusive.
- *   • Delivery Services in 'other': VAT-inclusive.
+ *   • FBA Inventory Fee in 'other': VAT-inclusive (no HMRC reclaim).
+ *   • Delivery Services: VAT-inclusive. Label/return postage lives in 'other';
+ *     Easy Ship weight handling lives in 'other transaction fees' on the same
+ *     row type — both must be included.
+ *   • 'Fulfilment by Amazon (FBA) transaction fees' and 'Fee Adjustment' rows
+ *     are VAT-inclusive FBA / other-tx fees and must not be dropped.
  *   • Adjustment (FBA Inventory Reimbursement): outside scope of VAT.
  *   • Amazon Fees deal participation/performance: VAT-inclusive in selling_fees,
  *     no SKU on the row → allocated to SKUs by net-sales pro-rata.
@@ -63,9 +67,9 @@ function toFloat(value: unknown): number {
 
 /**
  * Map of canonical field name → list of header substrings (in priority order).
- * The first header whose normalized text contains ALL of the substrings is
- * matched. Mirrors the Python script's positional indices but resolves them
- * dynamically so we tolerate different export shapes.
+ * Alias groups are tried in order. Exact header equality is preferred;
+ * substring matches refuse to bind a *tax / inc-VAT column unless the alias
+ * itself is a tax field.
  */
 const FIELD_ALIASES: Record<string, string[][]> = {
   type: [["type"]],
@@ -73,21 +77,43 @@ const FIELD_ALIASES: Record<string, string[][]> = {
   sku: [["sku"]],
   description: [["description"]],
   quantity: [["quantity"]],
-  product_sales: [["product sales"], ["product", "sales"]],
-  product_sales_tax: [["product sales tax"], ["product", "sales", "tax"]],
-  postage_credits: [["shipping credits"], ["postage credits"]],
+  // Exact "product sales" first so we never bind the VAT-inclusive or tax columns.
+  product_sales: [["product sales"]],
+  product_sales_tax: [["product sales tax"]],
+  postage_credits: [["postage credits"], ["shipping credits"]],
   shipping_credits_tax: [["shipping credits tax"], ["postage credits tax"]],
   giftwrap_credits_tax: [["gift wrap credits tax"], ["giftwrap credits tax"]],
-  promotional_rebates: [["promotional rebates"], ["promotional", "rebate"]],
+  promotional_rebates: [["promotional rebates"]],
   promotional_rebates_tax: [["promotional rebates tax"]],
   marketplace_withheld_tax: [["marketplace withheld tax"]],
   selling_fees: [["selling fees"]],
   fba_fees: [["fba fees"]],
   other_tx_fees: [["other transaction fees"]],
-  other: [["other"]], // matched last; resolveFieldIndex enforces "exact" preference
+  other: [["other"]],
   total: [["total"]],
   status: [["transaction status"], ["status"]],
 };
+
+/**
+ * Match a header to an alias group.
+ * 1. Exact equality wins (avoids "product sales" grabbing "product sales tax").
+ * 2. Substring match is allowed, but a non-tax alias must not bind a *tax /
+ *    inc-VAT column — Amazon exports name those as supersets of the net column.
+ */
+function headerMatchesAlias(header: string, aliasGroup: string[]): boolean {
+  if (!header) return false;
+  if (aliasGroup.length === 1 && header === aliasGroup[0]) return true;
+  if (!aliasGroup.every((sub) => header.includes(sub))) return false;
+  const aliasHasTax = aliasGroup.some((s) => s.includes("tax"));
+  if (!aliasHasTax && header.includes("tax")) return false;
+  if (
+    !aliasGroup.some((s) => s.includes("inc")) &&
+    (header.includes("inc vat") || header.includes("incl vat") || header.includes("including vat"))
+  ) {
+    return false;
+  }
+  return true;
+}
 
 type FieldIndex = Record<keyof typeof FIELD_ALIASES, number>;
 
@@ -108,7 +134,7 @@ function scoreHeaderRow(headerRow: unknown[]): number {
   let score = 0;
   for (const field of fields) {
     for (const aliasGroup of FIELD_ALIASES[field]) {
-      const hit = headers.some((h) => h && aliasGroup.every((sub) => h.includes(sub)));
+      const hit = headers.some((h) => headerMatchesAlias(h, aliasGroup));
       if (hit) {
         score += 1;
         break;
@@ -153,7 +179,7 @@ function buildFieldIndex(headerRow: unknown[]): FieldIndex {
         if (taken.has(j)) continue;
         const h = headers[j];
         if (!h) continue;
-        if (aliasGroup.every((sub) => h.includes(sub))) {
+        if (headerMatchesAlias(h, aliasGroup)) {
           found = j;
           break;
         }
@@ -383,9 +409,20 @@ export function computeAmazonPnl(rows: RawRow[]): PnL {
       p.fbaInventoryFeesGross += getNum(row, idx, "other");
     } else if (typeVal === "delivery services") {
       const orderId = String(getCell(row, idx, "order_id") ?? "").trim();
-      const amount = getNum(row, idx, "other");
+      // Label purchases sit in `other`; Easy Ship weight handling sits in
+      // `other transaction fees`. Both are VAT-inclusive delivery costs.
+      const amount = getNum(row, idx, "other") + getNum(row, idx, "other_tx_fees");
       p.deliveryServicesGross += amount;
       deferred.push({ kind: "delivery", orderId, amount });
+    } else if (
+      typeVal === "fulfilment by amazon (fba) transaction fees" ||
+      typeVal === "fba transaction fees"
+    ) {
+      p.fbaFeesGross += getNum(row, idx, "fba_fees");
+    } else if (typeVal === "fee adjustment") {
+      p.fbaFeesGross += getNum(row, idx, "fba_fees");
+      p.otherTxFeesGross += getNum(row, idx, "other_tx_fees");
+      p.sellingFeesGross += getNum(row, idx, "selling_fees");
     } else if (typeVal === "adjustment") {
       const amount = getNum(row, idx, "other");
       p.fbaReimbursements += amount;
