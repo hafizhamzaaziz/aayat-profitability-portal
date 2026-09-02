@@ -83,7 +83,7 @@ type Input = {
   /**
    * Performance-metric rows from the previous comparable period (typically the
    * month immediately preceding `periodStart`). When provided, the snapshot
-   * compares period averages instead of last-week-vs-week-before.
+   * compares period totals (and averaged BSR/rating) against that prior period.
    */
   performancePrevious?: PerformanceLine[];
   notes: string;
@@ -196,9 +196,10 @@ function addDaysIso(iso: string, days: number) {
 }
 
 /**
- * Aggregate raw weekly performance rows into a single per-product summary,
- * averaging numeric metrics across all rows in the period. Reviews are
- * monotonic so we use the latest value rather than the average.
+ * Aggregate raw weekly performance rows into a single per-product summary for
+ * the report period. PPC spend / sales / total sales are summed across weeks
+ * (matching the weekly Performance report). BSR and rating are averaged; reviews
+ * use the latest value in the period (monotonic).
  */
 type PerfAggregate = {
   product_name: string;
@@ -215,29 +216,46 @@ type PerfAggregate = {
 function aggregatePerformance(rows: PerformanceLine[] | undefined | null): Map<string, PerfAggregate> {
   const out = new Map<string, PerfAggregate>();
   if (!rows || rows.length === 0) return out;
-  const byProduct = new Map<string, PerformanceLine[]>();
+
+  const productKey = (row: PerformanceLine) => String(row.product_name || "").trim().toLowerCase();
+
+  // One row per product per week — if duplicates exist, keep the last entry.
+  const byProductWeek = new Map<string, PerformanceLine>();
   for (const row of rows) {
     const name = String(row.product_name || "").trim();
     if (!name) continue;
-    const key = name.toLowerCase();
+    const weekKey = `${productKey(row)}|${String(row.recorded_date || "").slice(0, 10)}`;
+    byProductWeek.set(weekKey, row);
+  }
+
+  const byProduct = new Map<string, PerformanceLine[]>();
+  for (const row of byProductWeek.values()) {
+    const key = productKey(row);
     const list = byProduct.get(key) || [];
     list.push(row);
     byProduct.set(key, list);
   }
+
   const avg = (values: Array<number | null | undefined>) => {
     const nums = values.filter((v): v is number => v != null && Number.isFinite(Number(v))).map((v) => Number(v));
     if (nums.length === 0) return null;
     return nums.reduce((a, b) => a + b, 0) / nums.length;
   };
+  const sum = (values: Array<number | null | undefined>) => {
+    const nums = values.filter((v): v is number => v != null && Number.isFinite(Number(v))).map((v) => Number(v));
+    if (nums.length === 0) return null;
+    return nums.reduce((a, b) => a + b, 0);
+  };
+
   byProduct.forEach((list, key) => {
     const sorted = [...list].sort((a, b) => String(a.recorded_date).localeCompare(String(b.recorded_date)));
     const product_name = sorted[sorted.length - 1].product_name;
     const bsr = avg(sorted.map((r) => r.bsr));
     const reviews = sorted[sorted.length - 1].review_count ?? null;
     const rating = avg(sorted.map((r) => r.rating));
-    const ppc_spend = avg(sorted.map((r) => r.ppc_spend ?? null));
-    const ppc_sales = avg(sorted.map((r) => r.ppc_sales ?? null));
-    const total_sales = avg(sorted.map((r) => r.total_sales ?? null));
+    const ppc_spend = sum(sorted.map((r) => r.ppc_spend ?? null));
+    const ppc_sales = sum(sorted.map((r) => r.ppc_sales ?? null));
+    const total_sales = sum(sorted.map((r) => r.total_sales ?? null));
     const acos =
       ppc_spend != null && ppc_sales && ppc_sales !== 0 ? (ppc_spend / ppc_sales) * 100 : null;
     const tacos =
@@ -518,7 +536,7 @@ function ReportPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDataUrl
             ) : (
               <>
                 <Text style={styles.sub}>
-                  {dateUk(data.periodStart)} to {dateUk(data.periodEnd)} averages, vs{" "}
+                  {dateUk(data.periodStart)} to {dateUk(data.periodEnd)} totals, vs{" "}
                   {dateUk(previousPeriodStart)} to {dateUk(previousPeriodEnd)}
                 </Text>
                 <View style={styles.tableHead}>
