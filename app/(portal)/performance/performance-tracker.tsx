@@ -709,8 +709,8 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
         <table className="min-w-[68rem] border-separate border-spacing-0 text-sm">
           <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
-              <th className="sticky left-0 z-30 w-[11rem] min-w-[11rem] whitespace-nowrap bg-slate-50 px-2 py-3">Week</th>
-              <th className="sticky left-[11rem] z-30 w-[9.5rem] min-w-[9.5rem] max-w-[9.5rem] bg-slate-50 px-2 py-3 shadow-[2px_0_6px_-2px_rgba(15,23,42,0.12)]">Product</th>
+              <th className="sticky left-0 z-30 w-[12.5rem] min-w-[12.5rem] whitespace-nowrap bg-slate-50 px-2 py-3">Week</th>
+              <th className="sticky left-[12.5rem] z-30 w-[9.5rem] min-w-[9.5rem] max-w-[9.5rem] bg-slate-50 px-2 py-3 shadow-[2px_0_6px_-2px_rgba(15,23,42,0.12)]">Product</th>
               <th className="whitespace-nowrap px-2 py-3">{activePlatform === "amazon" ? "ASIN" : "Goods ID"}</th>
               <th className="whitespace-nowrap px-2 py-3">PPC Spend</th>
               <th className="whitespace-nowrap px-2 py-3">PPC Sales</th>
@@ -720,7 +720,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
               {activePlatform === "amazon" ? <th className="whitespace-nowrap px-2 py-3">BSR</th> : null}
               <th className="whitespace-nowrap px-2 py-3">Reviews</th>
               <th className="whitespace-nowrap px-2 py-3">Rating</th>
-              {canEdit ? <th className="sticky right-0 z-30 whitespace-nowrap bg-slate-50 px-2 py-3 shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.18)]">Actions</th> : null}
+              {canEdit ? <th className="sticky right-0 z-30 min-w-[7rem] whitespace-nowrap border-l border-slate-200 bg-slate-50 px-2 py-3">Actions</th> : null}
             </tr>
           </thead>
           <tbody>
@@ -745,8 +745,8 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
                 const prevTacos = previous?.ppc_spend && previous?.total_sales ? (previous.ppc_spend / previous.total_sales) * 100 : null;
                 return (
                   <tr key={current.id} className="border-t border-slate-100">
-                    <td className="sticky left-0 z-10 w-[11rem] min-w-[11rem] whitespace-nowrap bg-white px-2 py-3">{weekRangeLabel(current.recorded_date)}</td>
-                    <td className="sticky left-[11rem] z-10 w-[9.5rem] min-w-[9.5rem] max-w-[9.5rem] truncate bg-white px-2 py-3 shadow-[2px_0_6px_-2px_rgba(15,23,42,0.12)]" title={current.product_name}>
+                    <td className="sticky left-0 z-10 w-[12.5rem] min-w-[12.5rem] whitespace-nowrap bg-white px-2 py-3">{weekRangeLabel(current.recorded_date)}</td>
+                    <td className="sticky left-[12.5rem] z-10 w-[9.5rem] min-w-[9.5rem] max-w-[9.5rem] truncate bg-white px-2 py-3 shadow-[2px_0_6px_-2px_rgba(15,23,42,0.12)]" title={current.product_name}>
                       {current.product_name}
                     </td>
                     <td className="whitespace-nowrap px-2 py-3">
@@ -814,7 +814,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
                       </div>
                     </td>
                     {canEdit ? (
-                      <td className="sticky right-0 z-10 whitespace-nowrap bg-white px-2 py-3 shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.18)]">
+                      <td className="sticky right-0 z-10 min-w-[7rem] whitespace-nowrap border-l border-slate-200 bg-white px-2 py-3">
                         <button
                           onClick={() => editMetric(current)}
                           className="mr-2 rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700"

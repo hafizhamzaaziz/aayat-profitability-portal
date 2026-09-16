@@ -337,13 +337,13 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-3 py-2 text-left">Detail</th>
-                <th className="w-[7.5rem] px-3 py-2 text-left">Date</th>
-                <th className="w-24 px-3 py-2 text-left">Amount</th>
-                <th className="w-20 px-3 py-2 text-left">Incl VAT</th>
-                <th className="w-28 px-3 py-2 text-left">Marketplace</th>
-                <th className="w-24 px-3 py-2 text-left">Type</th>
-                <th className="w-[7.5rem] px-3 py-2 text-left">End Date</th>
-                <th className="sticky right-0 z-10 w-36 bg-slate-50 px-3 py-2 text-right">Action</th>
+                <th className="w-[7.5rem] whitespace-nowrap px-3 py-2 text-left">Date</th>
+                <th className="w-24 whitespace-nowrap px-3 py-2 text-left">Amount</th>
+                <th className="w-24 whitespace-nowrap px-3 py-2 text-left">Incl VAT</th>
+                <th className="w-28 whitespace-nowrap px-3 py-2 text-left">Marketplace</th>
+                <th className="w-24 whitespace-nowrap px-3 py-2 text-left">Type</th>
+                <th className="w-[7.5rem] whitespace-nowrap px-3 py-2 text-left">End Date</th>
+                <th className="sticky right-0 z-10 w-36 whitespace-nowrap bg-slate-50 px-3 py-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody>

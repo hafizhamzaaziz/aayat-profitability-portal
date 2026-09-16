@@ -316,11 +316,11 @@ export default function AuditEventsPanel() {
         <table className="w-full table-fixed text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
-              <th className="w-[11rem] px-3 py-2">When</th>
-              <th className="w-[10rem] px-3 py-2">User</th>
-              <th className="w-[8.5rem] px-3 py-2">Account</th>
-              <th className="w-[10.5rem] px-3 py-2">Event</th>
-              <th className="w-[11rem] px-3 py-2">Entity</th>
+              <th className="w-[8.5rem] px-3 py-2">When</th>
+              <th className="w-[8rem] px-3 py-2">User</th>
+              <th className="w-[7.5rem] px-3 py-2">Account</th>
+              <th className="w-[8.5rem] px-3 py-2">Event</th>
+              <th className="w-[8.5rem] px-3 py-2">Entity</th>
               <th className="px-3 py-2">Summary of changes</th>
             </tr>
           </thead>
@@ -340,7 +340,7 @@ export default function AuditEventsPanel() {
             ) : (
               rows.map((row) => (
                 <tr key={row.id} className="border-t border-slate-100 align-top">
-                  <td className="whitespace-nowrap px-3 py-2">{new Date(row.created_at).toLocaleString("en-GB")}</td>
+                  <td className="whitespace-pre px-3 py-2">{new Date(row.created_at).toLocaleString("en-GB").replace(", ", "\n")}</td>
                   <td className="truncate px-3 py-2" title={row.actor_id ? actorMap[row.actor_id] || row.actor_id : "System"}>
                     {row.actor_id ? actorMap[row.actor_id] || row.actor_id : "System"}
                   </td>
