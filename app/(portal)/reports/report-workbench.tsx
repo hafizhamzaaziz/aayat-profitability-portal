@@ -25,6 +25,7 @@ import {
 } from "@/lib/reports/expense-ledger";
 import type { AdReport, SkuLine } from "@/lib/reports/types";
 import PerSkuTable, { type PerSkuRow } from "@/components/reports/per-sku-table";
+import { platformLabel } from "@/lib/email/format-helpers";
 
 type Platform = "amazon" | "temu" | "tiktok";
 
@@ -1964,7 +1965,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
           </a>
         </div>
         {appliedExpenses.length === 0 ? (
-          <p className="text-sm text-slate-500">No expenses fall in this period for {platform}.</p>
+          <p className="text-sm text-slate-500">No expenses fall in this period for {platformLabel(platform)}.</p>
         ) : (
           <div className="space-y-1">
             {appliedExpenses.slice(0, 6).map((expense) => (

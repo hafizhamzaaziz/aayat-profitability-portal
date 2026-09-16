@@ -1691,7 +1691,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
   const missingForSelectedPeriod = Boolean(filterStart && filterEnd && reports.length === 0);
 
   return (
-    <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4">
+    <div className="min-w-0 space-y-4 rounded-2xl border border-slate-200 bg-white p-4">
       {message || error ? (
         <div
           className={`fixed left-1/2 top-6 z-[120] w-[min(100%,28rem)] -translate-x-1/2 px-4 shadow-2xl transition-transform ${
@@ -1816,8 +1816,8 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
       ) : reports.length === 0 ? (
         <p className="text-sm text-slate-500">No saved reports found for this account/filter.</p>
       ) : (
-        <div className="grid gap-3 md:grid-cols-[260px_1fr]">
-          <div className="space-y-2">
+        <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,220px)_minmax(0,1fr)]">
+          <div className="min-w-0 space-y-2">
             {reports.map((report) => (
               <button
                 key={report.id}
@@ -1868,9 +1868,9 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
           </div>
 
           {selected ? (
-            <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
+            <div className="min-w-0 space-y-4 rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="flex min-w-0 flex-col gap-3">
+                <div className="min-w-0">
                   <h5 className="text-sm font-semibold text-slate-800">Report Detail</h5>
                   <p className="mt-1 text-xs text-slate-500">
                     {canEdit ? (
@@ -1883,7 +1883,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
                     )}
                   </p>
                 </div>
-                <div className="flex flex-shrink-0 flex-wrap gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     onClick={downloadPdf}
