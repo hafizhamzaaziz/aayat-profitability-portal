@@ -340,6 +340,10 @@ function shortenName(input: string, max = 28) {
   return `${value.slice(0, max - 3)}...`;
 }
 
+const INV_STICKY_SELECT = "sticky left-0 z-20 w-[4.25rem] min-w-[4.25rem] px-2 py-2";
+const INV_STICKY_SKU =
+  "sticky left-[4.25rem] z-20 w-32 min-w-32 max-w-32 truncate px-2 py-2 shadow-[2px_0_6px_-2px_rgba(15,23,42,0.12)]";
+
 function normalizeKey(input: string) {
   return input.trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -2799,7 +2803,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   if (loading) return <p className="text-sm text-slate-500">Loading inventory workspace...</p>;
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       {message ? <p className="rounded-xl bg-green-50 px-3 py-2 text-sm text-green-700">{message}</p> : null}
       {error ? <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
 
@@ -2854,7 +2858,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       </section>
 
       {activeTab === "overview" ? (
-        <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+        <section className="min-w-0 space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-slate-800">Overview & Velocity</h3>
             <div className="flex flex-wrap gap-2">
@@ -2959,33 +2963,36 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               <p className="text-xs text-slate-500">3PL stock is auto-updated from intake, transfers, returns and deductions.</p>
             </div>
           ) : null}
-          <div className="overflow-x-auto rounded-xl border border-slate-200">
-          <table className="min-w-full text-xs">
-            <thead className="sticky top-0 z-10 bg-slate-50 text-left uppercase tracking-wide text-slate-500">
+          <p className="text-[11px] text-slate-500">
+            Scroll sideways for 3PL days, stock value and profit. SKU stays pinned on the left.
+          </p>
+          <div className="min-w-0 overflow-x-auto rounded-xl border border-slate-200">
+          <table className="min-w-[78rem] border-separate border-spacing-0 text-xs">
+            <thead className="sticky top-0 z-30 bg-slate-50 text-left uppercase tracking-wide text-slate-500">
               <tr>
-                <th className="px-2 py-2">Select</th>
-                <th className="px-2 py-2">SKU</th>
+                <th className={`${INV_STICKY_SELECT} bg-slate-50`}>Select</th>
+                <th className={`${INV_STICKY_SKU} bg-slate-50`}>SKU</th>
                 <th className="px-2 py-2">
                   <button type="button" onClick={() => onSortClick("product")} className="inline-flex items-center gap-1">
                     Product
                     <span className="text-[10px]">{sortColumn === "product" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">
-                  <button type="button" onClick={() => onSortClick("selected_amazon")} className="inline-flex items-center gap-1">
-                    Selected Period Amazon
+                <th className="whitespace-nowrap px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("selected_amazon")} className="inline-flex items-center gap-1" title="Selected Period Amazon">
+                    Period Amazon
                     <span className="text-[10px]">{sortColumn === "selected_amazon" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">
-                  <button type="button" onClick={() => onSortClick("selected_temu")} className="inline-flex items-center gap-1">
-                    Selected Period Temu
+                <th className="whitespace-nowrap px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("selected_temu")} className="inline-flex items-center gap-1" title="Selected Period Temu">
+                    Period Temu
                     <span className="text-[10px]">{sortColumn === "selected_temu" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">
-                  <button type="button" onClick={() => onSortClick("selected_combined")} className="inline-flex items-center gap-1">
-                    Selected Period Combined
+                <th className="whitespace-nowrap px-2 py-2">
+                  <button type="button" onClick={() => onSortClick("selected_combined")} className="inline-flex items-center gap-1" title="Selected Period Combined">
+                    Period Combined
                     <span className="text-[10px]">{sortColumn === "selected_combined" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
@@ -3013,31 +3020,31 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     <span className="text-[10px]">{sortColumn === "warehouse_stock" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">
+                <th className="whitespace-nowrap px-2 py-2">
                   <button type="button" onClick={() => onSortClick("amazon_days")} className="inline-flex items-center gap-1">
                     Amazon Days Left
                     <span className="text-[10px]">{sortColumn === "amazon_days" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">
+                <th className="whitespace-nowrap px-2 py-2">
                   <button type="button" onClick={() => onSortClick("warehouse_days")} className="inline-flex items-center gap-1">
                     3PL Days Left
                     <span className="text-[10px]">{sortColumn === "warehouse_days" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">
+                <th className="whitespace-nowrap px-2 py-2">
                   <button type="button" onClick={() => onSortClick("stock_value")} className="inline-flex items-center gap-1">
                     Stock Value
                     <span className="text-[10px]">{sortColumn === "stock_value" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">
+                <th className="whitespace-nowrap px-2 py-2">
                   <button type="button" onClick={() => onSortClick("potential_sales")} className="inline-flex items-center gap-1">
                     Potential Sales
                     <span className="text-[10px]">{sortColumn === "potential_sales" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                   </button>
                 </th>
-                <th className="px-2 py-2">
+                <th className="whitespace-nowrap px-2 py-2">
                   <button type="button" onClick={() => onSortClick("potential_profit")} className="inline-flex items-center gap-1">
                     Potential Profit
                     <span className="text-[10px]">{sortColumn === "potential_profit" ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
@@ -3054,9 +3061,9 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                 </tr>
               ) : (
                 <>
-                <tr className="border-t border-slate-200 bg-slate-100/80 font-semibold text-slate-700">
-                  <td className="px-2 py-2"></td>
-                  <td className="px-2 py-2">Totals</td>
+                <tr className="border-t border-slate-200 bg-slate-100 font-semibold text-slate-700">
+                  <td className={`${INV_STICKY_SELECT} bg-slate-100`}></td>
+                  <td className={`${INV_STICKY_SKU} bg-slate-100`}>Totals</td>
                   <td className="px-2 py-2 text-[11px] font-normal text-slate-500">{overviewTotalCount} SKUs</td>
                   <td className="px-2 py-2">{overviewTotals.selectedAmazon}</td>
                   <td className="px-2 py-2">{overviewTotals.selectedTemu}</td>
@@ -3084,7 +3091,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   const ytdDelta = ytd - ytdPrevious;
                   return (
                   <tr key={row.mappingId} className="border-t border-slate-100">
-                    <td className="px-2 py-2">
+                    <td className={`${INV_STICKY_SELECT} bg-white`}>
                       <input
                         type="checkbox"
                         checked={selectedMappingIds.includes(row.mappingId)}
@@ -3095,14 +3102,17 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         }
                       />
                     </td>
-                    <td className="px-2 py-2 font-medium">
+                    <td
+                      className={`${INV_STICKY_SKU} bg-white font-medium`}
+                      title={[row.amazonSku, row.temuSkuId].filter(Boolean).join(" / ") || undefined}
+                    >
                       {row.amazonSku || row.temuSkuId || "-"}
                       {row.amazonSku && row.temuSkuId ? <span className="ml-1 text-[10px] text-slate-500">(A+T)</span> : null}
                     </td>
-                    <td className="px-2 py-2 text-slate-600" title={row.productName}>
+                    <td className="max-w-[12rem] truncate px-2 py-2 text-slate-600" title={row.productName}>
                       {shortenName(row.productName)}
                     </td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">
                       <div>
                         <p>{selectedAmazon}</p>
                         <p className={`text-[10px] ${selectedAmazon - previousAmazon > 0 ? "text-emerald-700" : selectedAmazon - previousAmazon < 0 ? "text-rose-700" : "text-slate-500"}`}>
@@ -3111,7 +3121,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         </p>
                       </div>
                     </td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">
                       <div>
                         <p>{selectedTemu}</p>
                         <p className={`text-[10px] ${selectedTemu - previousTemu > 0 ? "text-emerald-700" : selectedTemu - previousTemu < 0 ? "text-rose-700" : "text-slate-500"}`}>
@@ -3120,7 +3130,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         </p>
                       </div>
                     </td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">
                       <div>
                         <p>{selectedCombined}</p>
                         <p className={`text-[10px] ${selectedDelta > 0 ? "text-emerald-700" : selectedDelta < 0 ? "text-rose-700" : "text-slate-500"}`}>
@@ -3129,7 +3139,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         </p>
                       </div>
                     </td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">
                       <div>
                         <p>{ytd}</p>
                         <p className={`text-[10px] ${ytdDelta > 0 ? "text-emerald-700" : ytdDelta < 0 ? "text-rose-700" : "text-slate-500"}`}>
@@ -3138,8 +3148,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         </p>
                       </div>
                     </td>
-                    <td className="px-2 py-2">{row.yearAvgPerMonth}</td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">{row.yearAvgPerMonth}</td>
+                    <td className="whitespace-nowrap px-2 py-2">
                       {canEdit ? (
                         <input
                           type="number"
@@ -3159,20 +3169,20 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         row.amazonUnitsOnHand
                       )}
                     </td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">
                       {row.warehouseUnitsOnHand}
                     </td>
-                    <td className="px-2 py-2">{row.amazonDaysLeft == null ? "-" : row.amazonDaysLeft}</td>
-                    <td className="px-2 py-2">{row.warehouseDaysLeft == null ? "-" : row.warehouseDaysLeft}</td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">{row.amazonDaysLeft == null ? "-" : row.amazonDaysLeft}</td>
+                    <td className="whitespace-nowrap px-2 py-2">{row.warehouseDaysLeft == null ? "-" : row.warehouseDaysLeft}</td>
+                    <td className="whitespace-nowrap px-2 py-2">
                       {currency}
                       {row.stockValue.toFixed(2)}
                     </td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">
                       {currency}
                       {row.potentialSalesValue.toFixed(2)}
                     </td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">
                       {currency}
                       {row.potentialProfitValue.toFixed(2)}
                     </td>

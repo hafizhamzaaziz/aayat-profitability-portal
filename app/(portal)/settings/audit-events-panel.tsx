@@ -253,7 +253,7 @@ export default function AuditEventsPanel() {
   );
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-4">
+    <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
           <h4 className="text-lg font-semibold">Audit Trail</h4>
@@ -312,15 +312,15 @@ export default function AuditEventsPanel() {
         />
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-slate-200">
-        <table className="min-w-full text-sm">
+      <div className="min-w-0 overflow-x-auto rounded-xl border border-slate-200">
+        <table className="w-full table-fixed text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
-              <th className="px-3 py-2">When</th>
-              <th className="px-3 py-2">User</th>
-              <th className="px-3 py-2">Account</th>
-              <th className="px-3 py-2">Event</th>
-              <th className="px-3 py-2">Entity</th>
+              <th className="w-[8.5rem] px-3 py-2">When</th>
+              <th className="w-[8rem] px-3 py-2">User</th>
+              <th className="w-[7.5rem] px-3 py-2">Account</th>
+              <th className="w-[8.5rem] px-3 py-2">Event</th>
+              <th className="w-[8.5rem] px-3 py-2">Entity</th>
               <th className="px-3 py-2">Summary of changes</th>
             </tr>
           </thead>
@@ -340,10 +340,12 @@ export default function AuditEventsPanel() {
             ) : (
               rows.map((row) => (
                 <tr key={row.id} className="border-t border-slate-100 align-top">
-                  <td className="px-3 py-2 whitespace-nowrap">{new Date(row.created_at).toLocaleString("en-GB")}</td>
-                  <td className="px-3 py-2">{row.actor_id ? actorMap[row.actor_id] || row.actor_id : "System"}</td>
+                  <td className="whitespace-pre px-3 py-2">{new Date(row.created_at).toLocaleString("en-GB").replace(", ", "\n")}</td>
+                  <td className="truncate px-3 py-2" title={row.actor_id ? actorMap[row.actor_id] || row.actor_id : "System"}>
+                    {row.actor_id ? actorMap[row.actor_id] || row.actor_id : "System"}
+                  </td>
                   <td className="px-3 py-2">
-                    <span className="inline-flex items-center rounded-full border border-[var(--md-outline)] bg-[var(--md-primary)]/10 px-2 py-0.5 text-xs font-medium text-slate-700">
+                    <span className="inline-flex max-w-full items-center truncate rounded-full border border-[var(--md-outline)] bg-[var(--md-primary)]/10 px-2 py-0.5 text-xs font-medium text-slate-700" title={describeAccount(row)}>
                       {describeAccount(row)}
                     </span>
                   </td>
@@ -359,10 +361,12 @@ export default function AuditEventsPanel() {
                     >
                       {row.action === "insert" ? "Created" : row.action === "update" ? "Updated" : "Deleted"}
                     </span>
-                    <span className="ml-2 text-xs text-slate-500">{row.table_name}</span>
+                    <span className="ml-2 break-all text-xs text-slate-500">{row.table_name}</span>
                   </td>
-                  <td className="px-3 py-2">{describeEntity(row)}</td>
-                  <td className="px-3 py-2 text-xs text-slate-700">{summarizeChange(row)}</td>
+                  <td className="truncate px-3 py-2" title={describeEntity(row)}>
+                    {describeEntity(row)}
+                  </td>
+                  <td className="break-words px-3 py-2 text-xs text-slate-700">{summarizeChange(row)}</td>
                 </tr>
               ))
             )}

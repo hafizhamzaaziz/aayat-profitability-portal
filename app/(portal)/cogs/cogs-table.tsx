@@ -622,21 +622,21 @@ export default function CogsTable({ accountId, canEdit }: Props) {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       {canEdit ? (
         <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
-          <div className="grid gap-3 md:grid-cols-[1.2fr_1fr_160px_180px_180px_auto]">
+          <div className="flex flex-wrap items-end gap-3">
             <input
               value={newProductName}
               onChange={(event) => setNewProductName(event.target.value)}
               placeholder="Product name"
-              className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+              className="min-w-[12rem] flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm"
             />
             <input
               value={newSku}
               onChange={(event) => setNewSku(event.target.value)}
               placeholder="SKU"
-              className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+              className="min-w-[10rem] flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm"
             />
             <input
               value={newCost}
@@ -644,7 +644,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
               type="number"
               step="0.01"
               placeholder="Unit cost"
-              className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+              className="w-36 rounded-xl border border-slate-300 px-3 py-2 text-sm"
             />
             <label className="flex items-center gap-2 rounded-xl border border-slate-300 px-3 py-2 text-sm">
               <input
@@ -654,18 +654,18 @@ export default function CogsTable({ accountId, canEdit }: Props) {
               />
               Includes VAT
             </label>
-            <label className="rounded-xl border border-slate-300 px-3 py-2 text-sm">
+            <label className="min-w-[11rem] rounded-xl border border-slate-300 px-3 py-2 text-sm">
               <span className="mb-1 block text-xs uppercase tracking-wide text-slate-500">Effective From</span>
               <input
                 type="date"
                 value={newEffectiveFrom}
                 onChange={(event) => setNewEffectiveFrom(event.target.value)}
-                className="w-full bg-transparent text-sm outline-none"
+                className="w-full min-w-0 bg-transparent text-sm outline-none"
               />
             </label>
             <button
               onClick={addRow}
-              className="rounded-xl bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white"
+              className="shrink-0 rounded-xl bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white"
             >
               Add SKU
             </button>
@@ -684,7 +684,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
               Download template
             </a>
           </div>
-          <div className="grid gap-3 rounded-xl bg-slate-50 p-3 md:grid-cols-[1fr_220px_180px_auto]">
+          <div className="grid gap-3 rounded-xl bg-slate-50 p-3 sm:grid-cols-2 xl:grid-cols-[1fr_220px_180px_auto]">
             <FileDropzone
               accept=".csv,.xlsx,.xls,.xlsm,.xlxs"
               onFileSelect={(file) => void onImportFileChange(file)}
@@ -861,7 +861,7 @@ export default function CogsTable({ accountId, canEdit }: Props) {
         </div>
       ) : null}
 
-      <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white">
+      <div className="min-w-0 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
         <table className="min-w-full text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>

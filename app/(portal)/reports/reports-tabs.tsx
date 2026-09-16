@@ -23,7 +23,7 @@ export default function ReportsTabs({ generate, saved, initialTab = "saved", sho
     }`;
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       <div className="flex gap-2 rounded-2xl border border-slate-200 bg-white p-1.5">
         <button type="button" onClick={() => setTab("saved")} className={tabClass(tab === "saved")}>
           Saved Reports

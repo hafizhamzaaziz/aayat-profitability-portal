@@ -212,7 +212,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </aside>
 
-        <section className="min-w-0 space-y-4">
+        <section className="min-w-0 max-w-full space-y-4 overflow-x-hidden">
           <header className="md-card flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="text-xs uppercase tracking-wide text-slate-500">Workspace</p>
@@ -261,7 +261,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </header>
 
-          <main className="md-card max-w-full overflow-x-auto">{children}</main>
+          <main className="md-card min-w-0 max-w-full overflow-x-hidden">{children}</main>
         </section>
       </div>
     </div>

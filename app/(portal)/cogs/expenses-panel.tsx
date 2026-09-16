@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { migrateLegacyExpensesForAccount } from "@/lib/reports/expense-migration";
+import { formatUkDate } from "@/lib/utils/date";
 
 type ExpenseRow = {
   id: string;
@@ -228,10 +229,10 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
   };
 
   return (
-    <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
-      <div className="flex items-center justify-between">
+    <div className="min-w-0 space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-slate-800">Expenses</h3>
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
           <p className="text-xs text-slate-500">
             Total: {currency}{totals.all.toFixed(2)} (Amazon {currency}{totals.amazon.toFixed(2)} / Temu {currency}{totals.temu.toFixed(2)} / TikTok {currency}{totals.tiktok.toFixed(2)})
           </p>
@@ -248,19 +249,19 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
         </div>
       </div>
 
-      <div className="grid gap-2 md:grid-cols-[1.4fr_140px_140px_120px_120px_140px]">
+      <div className="flex flex-wrap items-end gap-2">
         <input
           value={draft.description}
           onChange={(e) => setDraft((p) => ({ ...p, description: e.target.value }))}
           placeholder="Expense Detail"
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          className="min-w-[14rem] flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm"
           disabled={!canEdit}
         />
         <input
           type="date"
           value={draft.expense_date}
           onChange={(e) => setDraft((p) => ({ ...p, expense_date: e.target.value }))}
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          className="w-[10.5rem] shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm"
           disabled={!canEdit}
         />
         <input
@@ -269,13 +270,13 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
           value={draft.amount}
           onChange={(e) => setDraft((p) => ({ ...p, amount: e.target.value }))}
           placeholder="Amount"
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          className="w-28 shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm"
           disabled={!canEdit}
         />
         <select
           value={draft.marketplace}
           onChange={(e) => setDraft((p) => ({ ...p, marketplace: e.target.value as ExpenseRow["marketplace"] }))}
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          className="w-32 shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm"
           disabled={!canEdit}
         >
           <option value="amazon">Amazon</option>
@@ -285,7 +286,7 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
         <select
           value={draft.expense_type}
           onChange={(e) => setDraft((p) => ({ ...p, expense_type: e.target.value as ExpenseRow["expense_type"] }))}
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          className="w-32 shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm"
           disabled={!canEdit}
         >
           <option value="one_time">One Time</option>
@@ -295,9 +296,10 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
           type="date"
           value={draft.recurring_end_date}
           onChange={(e) => setDraft((p) => ({ ...p, recurring_end_date: e.target.value }))}
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          className="w-[10.5rem] shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm"
           disabled={!canEdit || draft.expense_type !== "recurring"}
           placeholder="Recurring end (optional)"
+          title="Recurring end date (optional)"
         />
       </div>
       <div className="flex items-center justify-between">
@@ -330,18 +332,18 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
       ) : rows.length === 0 ? (
         <p className="text-sm text-slate-500">No expenses yet.</p>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-slate-200">
-          <table className="min-w-full text-sm">
+        <div className="min-w-0 overflow-x-auto rounded-xl border border-slate-200">
+          <table className="w-full min-w-[46rem] table-fixed text-sm">
             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-3 py-2 text-left">Detail</th>
-                <th className="px-3 py-2 text-left">Date</th>
-                <th className="px-3 py-2 text-left">Amount</th>
-                <th className="px-3 py-2 text-left">Incl VAT</th>
-                <th className="px-3 py-2 text-left">Marketplace</th>
-                <th className="px-3 py-2 text-left">Type</th>
-                <th className="px-3 py-2 text-left">End Date</th>
-                <th className="px-3 py-2 text-right">Action</th>
+                <th className="w-[7.5rem] whitespace-nowrap px-3 py-2 text-left">Date</th>
+                <th className="w-24 whitespace-nowrap px-3 py-2 text-left">Amount</th>
+                <th className="w-24 whitespace-nowrap px-3 py-2 text-left">Incl VAT</th>
+                <th className="w-28 whitespace-nowrap px-3 py-2 text-left">Marketplace</th>
+                <th className="w-24 whitespace-nowrap px-3 py-2 text-left">Type</th>
+                <th className="w-[7.5rem] whitespace-nowrap px-3 py-2 text-left">End Date</th>
+                <th className="sticky right-0 z-10 w-36 whitespace-nowrap bg-slate-50 px-3 py-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -349,30 +351,30 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
                 const isEditing = editingId === row.id;
                 return (
                   <tr key={row.id} className="border-t border-slate-100">
-                    <td className="px-3 py-2">
+                    <td className="truncate px-3 py-2" title={isEditing ? undefined : row.description}>
                       {isEditing ? (
                         <input
                           value={editingDraft.description}
                           onChange={(e) => setEditingDraft((p) => ({ ...p, description: e.target.value }))}
-                          className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                          className="w-full min-w-0 rounded border border-slate-300 px-2 py-1 text-sm"
                         />
                       ) : (
                         row.description
                       )}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="whitespace-nowrap px-3 py-2">
                       {isEditing ? (
                         <input
                           type="date"
                           value={editingDraft.expense_date}
                           onChange={(e) => setEditingDraft((p) => ({ ...p, expense_date: e.target.value }))}
-                          className="rounded border border-slate-300 px-2 py-1 text-sm"
+                          className="w-full min-w-0 rounded border border-slate-300 px-2 py-1 text-sm"
                         />
                       ) : (
-                        row.expense_date
+                        formatUkDate(row.expense_date)
                       )}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="whitespace-nowrap px-3 py-2">
                       {isEditing ? (
                         <input
                           type="number"
@@ -436,20 +438,20 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
                         "One Time"
                       )}
                     </td>
-                    <td className="px-3 py-2">
+                    <td className="whitespace-nowrap px-3 py-2">
                       {isEditing ? (
                         <input
                           type="date"
                           value={editingDraft.recurring_end_date}
                           onChange={(e) => setEditingDraft((p) => ({ ...p, recurring_end_date: e.target.value }))}
                           disabled={editingDraft.expense_type !== "recurring"}
-                          className="rounded border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100"
+                          className="w-full min-w-0 rounded border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-100"
                         />
                       ) : (
-                        row.recurring_end_date || "—"
+                        row.recurring_end_date ? formatUkDate(row.recurring_end_date) : "—"
                       )}
                     </td>
-                    <td className="px-3 py-2 text-right">
+                    <td className="sticky right-0 z-10 whitespace-nowrap bg-white px-3 py-2 text-right">
                       {canEdit ? (
                         <div className="inline-flex gap-2">
                           {isEditing ? (

@@ -7,6 +7,8 @@ import type { UserRole } from "@/lib/types/auth";
 
 type AccountOption = { id: string; name: string };
 
+const ACCOUNTS_CACHE_KEY = "portal-account-options";
+
 export default function AccountSwitcher() {
   const router = useRouter();
   const pathname = usePathname();
@@ -16,8 +18,16 @@ export default function AccountSwitcher() {
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const persistAccounts = (next: AccountOption[]) => {
+    setAccounts(next);
+    try {
+      sessionStorage.setItem(ACCOUNTS_CACHE_KEY, JSON.stringify(next));
+    } catch {
+      /* ignore quota / private-mode failures */
+    }
+  };
+
   const loadAccounts = async () => {
-    setLoading(true);
     const supabase = createClient();
 
     const {
@@ -55,7 +65,7 @@ export default function AccountSwitcher() {
       const merged = new Map<string, AccountOption>();
       (direct || []).forEach((row) => merged.set(String(row.id), row as AccountOption));
       (byAccountMapping || []).forEach((row) => merged.set(String(row.id), row as AccountOption));
-      setAccounts(Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name)));
+      persistAccounts(Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name)));
       setLoading(false);
       return;
     } else if (role === "client") {
@@ -78,18 +88,31 @@ export default function AccountSwitcher() {
       const mergedClient = new Map<string, AccountOption>();
       (directClient || []).forEach((row) => mergedClient.set(String(row.id), row as AccountOption));
       (byClientMapping || []).forEach((row) => mergedClient.set(String(row.id), row as AccountOption));
-      setAccounts(Array.from(mergedClient.values()).sort((a, b) => a.name.localeCompare(b.name)));
+      persistAccounts(Array.from(mergedClient.values()).sort((a, b) => a.name.localeCompare(b.name)));
       setLoading(false);
       return;
     }
 
     const { data } = await query;
-    setAccounts((data || []) as AccountOption[]);
+    persistAccounts((data || []) as AccountOption[]);
     setLoading(false);
   };
 
   useEffect(() => {
     let active = true;
+
+    try {
+      const raw = sessionStorage.getItem(ACCOUNTS_CACHE_KEY);
+      if (raw) {
+        const cached = JSON.parse(raw) as AccountOption[];
+        if (Array.isArray(cached) && cached.length > 0) {
+          setAccounts(cached);
+          setLoading(false);
+        }
+      }
+    } catch {
+      /* ignore invalid cache */
+    }
 
     void loadAccounts();
 
@@ -114,11 +137,12 @@ export default function AccountSwitcher() {
     router.replace(`${pathname}?${params.toString()}`);
   }, [accounts, loading, pathname, router, searchParams, selectedAccountId]);
 
+  const selectedAccount = accounts.find((account) => account.id === selectedAccountId);
   const label = useMemo(() => {
+    if (selectedAccountId || accounts.length > 0) return "Current account";
     if (loading) return "Loading accounts...";
-    if (accounts.length === 0) return "No accounts assigned";
-    return "Current account";
-  }, [accounts.length, loading]);
+    return "No accounts assigned";
+  }, [accounts.length, loading, selectedAccountId]);
 
   const onChange = (accountId: string) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -132,10 +156,13 @@ export default function AccountSwitcher() {
       <select
         value={selectedAccountId}
         onChange={(event) => onChange(event.target.value)}
-        disabled={loading || accounts.length === 0}
+        disabled={accounts.length === 0 && !selectedAccountId}
         className="rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-[var(--md-primary)] disabled:cursor-not-allowed disabled:bg-slate-100"
       >
-        {accounts.length === 0 ? <option value="">No account</option> : null}
+        {selectedAccountId && !selectedAccount ? (
+          <option value={selectedAccountId}>{loading ? "Current account" : "Selected account"}</option>
+        ) : null}
+        {accounts.length === 0 && !selectedAccountId ? <option value="">No account</option> : null}
         {accounts.map((account) => (
           <option key={account.id} value={account.id}>
             {account.name}

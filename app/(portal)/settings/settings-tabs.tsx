@@ -52,7 +52,7 @@ export default function SettingsTabs({
   };
 
   return (
-    <div className="space-y-3">
+    <div className="min-w-0 space-y-3">
       <section className="rounded-2xl border border-slate-200 bg-white p-2">
         <div className="flex flex-wrap gap-2">
           {visibleTabs.map((tab) => (

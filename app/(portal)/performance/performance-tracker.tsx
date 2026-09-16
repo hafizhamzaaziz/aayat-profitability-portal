@@ -449,7 +449,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const pagedWeekRows = selectedWeekRows.slice(pageOffset, pageOffset + PAGE_SIZE);
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       <div className="flex flex-wrap items-end gap-2 rounded-2xl border border-slate-200 bg-white p-4">
         <div className="flex items-center gap-2">
           <button
@@ -700,34 +700,39 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
         )}
       </div>
 
-      <div className="hidden overflow-x-auto rounded-2xl border border-slate-200 bg-white md:block">
-        <table className="min-w-full text-sm">
+      <div className="hidden min-w-0 md:block">
+        <p className="mb-1 text-[11px] text-slate-500">
+          Scroll sideways for Rating. Week and product stay pinned
+          {canEdit ? ", and actions stay on the right" : ""}.
+        </p>
+        <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white">
+        <table className="min-w-[68rem] border-separate border-spacing-0 text-sm">
           <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
             <tr>
-              <th className="px-4 py-3">Week</th>
-              <th className="px-4 py-3">Product</th>
-              <th className="px-4 py-3">{activePlatform === "amazon" ? "ASIN" : "Goods ID"}</th>
-              <th className="px-4 py-3">PPC Spend</th>
-              <th className="px-4 py-3">PPC Sales</th>
-              <th className="px-4 py-3">Total Sales</th>
-              <th className="px-4 py-3">ACOS</th>
-              <th className="px-4 py-3">TACOS</th>
-              {activePlatform === "amazon" ? <th className="px-4 py-3">BSR</th> : null}
-              <th className="px-4 py-3">Reviews</th>
-              <th className="px-4 py-3">Rating</th>
-              {canEdit ? <th className="px-4 py-3">Actions</th> : null}
+              <th className="sticky left-0 z-30 w-[12.5rem] min-w-[12.5rem] whitespace-nowrap bg-slate-50 px-2 py-3">Week</th>
+              <th className="sticky left-[12.5rem] z-30 w-[9.5rem] min-w-[9.5rem] max-w-[9.5rem] bg-slate-50 px-2 py-3 shadow-[2px_0_6px_-2px_rgba(15,23,42,0.12)]">Product</th>
+              <th className="whitespace-nowrap px-2 py-3">{activePlatform === "amazon" ? "ASIN" : "Goods ID"}</th>
+              <th className="whitespace-nowrap px-2 py-3">PPC Spend</th>
+              <th className="whitespace-nowrap px-2 py-3">PPC Sales</th>
+              <th className="whitespace-nowrap px-2 py-3">Total Sales</th>
+              <th className="whitespace-nowrap px-2 py-3">ACOS</th>
+              <th className="whitespace-nowrap px-2 py-3">TACOS</th>
+              {activePlatform === "amazon" ? <th className="whitespace-nowrap px-2 py-3">BSR</th> : null}
+              <th className="whitespace-nowrap px-2 py-3">Reviews</th>
+              <th className="whitespace-nowrap px-2 py-3">Rating</th>
+              {canEdit ? <th className="sticky right-0 z-30 min-w-[7rem] whitespace-nowrap border-l border-slate-200 bg-slate-50 px-2 py-3">Actions</th> : null}
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? (activePlatform === "amazon" ? 13 : 12) : activePlatform === "amazon" ? 12 : 11}>
+                <td className="px-2 py-4 text-slate-500" colSpan={canEdit ? (activePlatform === "amazon" ? 13 : 12) : activePlatform === "amazon" ? 12 : 11}>
                   Loading performance data...
                 </td>
               </tr>
             ) : pagedWeekRows.length === 0 ? (
               <tr>
-                <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? (activePlatform === "amazon" ? 13 : 12) : activePlatform === "amazon" ? 12 : 11}>
+                <td className="px-2 py-4 text-slate-500" colSpan={canEdit ? (activePlatform === "amazon" ? 13 : 12) : activePlatform === "amazon" ? 12 : 11}>
                   No performance metrics saved for this account.
                 </td>
               </tr>
@@ -740,9 +745,11 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
                 const prevTacos = previous?.ppc_spend && previous?.total_sales ? (previous.ppc_spend / previous.total_sales) * 100 : null;
                 return (
                   <tr key={current.id} className="border-t border-slate-100">
-                    <td className="px-4 py-3">{weekRangeLabel(current.recorded_date)}</td>
-                    <td className="px-4 py-3">{current.product_name}</td>
-                    <td className="px-4 py-3">
+                    <td className="sticky left-0 z-10 w-[12.5rem] min-w-[12.5rem] whitespace-nowrap bg-white px-2 py-3">{weekRangeLabel(current.recorded_date)}</td>
+                    <td className="sticky left-[12.5rem] z-10 w-[9.5rem] min-w-[9.5rem] max-w-[9.5rem] truncate bg-white px-2 py-3 shadow-[2px_0_6px_-2px_rgba(15,23,42,0.12)]" title={current.product_name}>
+                      {current.product_name}
+                    </td>
+                    <td className="whitespace-nowrap px-2 py-3">
                       {identifier ? (
                         <a
                           href={activePlatform === "amazon" ? `https://www.amazon.co.uk/dp/${identifier}` : `https://www.temu.com/goods.html?_bg_fs=1&goods_id=${identifier}`}
@@ -756,58 +763,58 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
                         "-"
                       )}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="whitespace-nowrap px-2 py-3">
                       <div>
                         <p className={metricValueClass("ppc_spend", current.ppc_spend, previous?.ppc_spend ?? null)}>{current.ppc_spend == null ? "-" : Number(current.ppc_spend).toFixed(2)}</p>
                         <p className="text-xs text-slate-500">{previousValueText(previous?.ppc_spend ?? null, (value) => value.toFixed(2))}</p>
                       </div>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="whitespace-nowrap px-2 py-3">
                       <div>
                         <p className={metricValueClass("ppc_sales", current.ppc_sales, previous?.ppc_sales ?? null)}>{current.ppc_sales == null ? "-" : Number(current.ppc_sales).toFixed(2)}</p>
                         <p className="text-xs text-slate-500">{previousValueText(previous?.ppc_sales ?? null, (value) => value.toFixed(2))}</p>
                       </div>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="whitespace-nowrap px-2 py-3">
                       <div>
                         <p className={metricValueClass("total_sales", current.total_sales, previous?.total_sales ?? null)}>{current.total_sales == null ? "-" : Number(current.total_sales).toFixed(2)}</p>
                         <p className="text-xs text-slate-500">{previousValueText(previous?.total_sales ?? null, (value) => value.toFixed(2))}</p>
                       </div>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="whitespace-nowrap px-2 py-3">
                       <div>
                         <p className={metricValueClass("acos", acos, prevAcos)}>{acos == null ? "-" : `${acos.toFixed(2)}%`}</p>
                         <p className="text-xs text-slate-500">{previousValueText(prevAcos, (value) => `${value.toFixed(2)}%`)}</p>
                       </div>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="whitespace-nowrap px-2 py-3">
                       <div>
                         <p className={metricValueClass("tacos", tacos, prevTacos)}>{tacos == null ? "-" : `${tacos.toFixed(2)}%`}</p>
                         <p className="text-xs text-slate-500">{previousValueText(prevTacos, (value) => `${value.toFixed(2)}%`)}</p>
                       </div>
                     </td>
                     {activePlatform === "amazon" ? (
-                      <td className="px-4 py-3">
+                      <td className="whitespace-nowrap px-2 py-3">
                         <div>
                           <p className={metricValueClass("bsr", current.bsr, previous?.bsr ?? null)}>{current.bsr ?? "-"}</p>
                           <p className="text-xs text-slate-500">{previousValueText(previous?.bsr ?? null)}</p>
                         </div>
                       </td>
                     ) : null}
-                    <td className="px-4 py-3">
+                    <td className="whitespace-nowrap px-2 py-3">
                       <div>
                         <p className={metricValueClass("reviews", current.review_count, previous?.review_count ?? null)}>{current.review_count ?? "-"}</p>
                         <p className="text-xs text-slate-500">{previousValueText(previous?.review_count ?? null)}</p>
                       </div>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="whitespace-nowrap px-2 py-3">
                       <div>
                         <p className={metricValueClass("rating", current.rating, previous?.rating ?? null)}>{current.rating ?? "-"}</p>
                         <p className="text-xs text-slate-500">{previousValueText(previous?.rating ?? null, (value) => value.toFixed(2))}</p>
                       </div>
                     </td>
                     {canEdit ? (
-                      <td className="px-4 py-3">
+                      <td className="sticky right-0 z-10 min-w-[7rem] whitespace-nowrap border-l border-slate-200 bg-white px-2 py-3">
                         <button
                           onClick={() => editMetric(current)}
                           className="mr-2 rounded-lg bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700"
@@ -828,6 +835,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             )}
           </tbody>
         </table>
+        </div>
       </div>
       {/* end of selected week table */}
 
