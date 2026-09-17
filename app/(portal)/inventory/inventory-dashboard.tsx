@@ -141,19 +141,26 @@ function sanitizeNonNegativeNumber(value: string): string {
   return cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, "");
 }
 
-function createDailyEntryRow(defaultPlatform: "amazon" | "temu" | "tiktok" = "temu"): DailyEntryRow {
+function createDailyEntryRow(
+  defaults?: { platform?: "amazon" | "temu" | "tiktok"; warehouseId?: string }
+): DailyEntryRow {
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     skuSearch: "",
     mappingId: "",
     saleDate: todayIsoUtc(),
-    platform: defaultPlatform,
-    warehouseId: "",
+    platform: defaults?.platform || "amazon",
+    warehouseId: defaults?.warehouseId || "",
     soldUnits: "",
     returnsUnits: "",
     collectedUnits: "",
     notes: "",
   };
+}
+
+function findDefaultWarehouseId(warehouses: Array<{ id: string; name: string }>): string {
+  const sportive = warehouses.find((w) => w.name.trim().toLowerCase() === "sportive");
+  return sportive?.id || warehouses[0]?.id || "";
 }
 
 type SavedShipmentPlan = {
@@ -571,7 +578,10 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     warehouseId: "all",
     mappingId: "all",
   });
-  const [dailyEntryRows, setDailyEntryRows] = useState<DailyEntryRow[]>([createDailyEntryRow("temu")]);
+  const [dailyEntryRows, setDailyEntryRows] = useState<DailyEntryRow[]>([createDailyEntryRow()]);
+  const [selectedDailySaleIds, setSelectedDailySaleIds] = useState<string[]>([]);
+  const [bulkWarehouseId, setBulkWarehouseId] = useState("");
+  const [bulkWarehouseSaving, setBulkWarehouseSaving] = useState(false);
   const [openEntrySkuDropdownId, setOpenEntrySkuDropdownId] = useState<string | null>(null);
   const [editingDailySaleId, setEditingDailySaleId] = useState<string | null>(null);
   const [dailySaleDraft, setDailySaleDraft] = useState<DailySaleEditDraft | null>(null);
@@ -925,12 +935,16 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
     setProfileIdsByMapping(links);
     setMovements(allMovements);
-    setWarehouses(
-      (warehousesRes.data || []).map((w) => ({
-        id: String((w as { id: string }).id),
-        name: String((w as { name: string }).name || ""),
-      }))
+    const nextWarehouses = (warehousesRes.data || []).map((w) => ({
+      id: String((w as { id: string }).id),
+      name: String((w as { name: string }).name || ""),
+    }));
+    setWarehouses(nextWarehouses);
+    const defaultWh = findDefaultWarehouseId(nextWarehouses);
+    setDailyEntryRows((prev) =>
+      prev.map((row) => (row.warehouseId ? row : { ...row, warehouseId: defaultWh }))
     );
+    if (defaultWh) setBulkWarehouseId((prev) => prev || defaultWh);
     setDailySales(
       (dailySalesRes.data || []).map((row) => {
         const rec = row as unknown as DailySale;
@@ -2310,12 +2324,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       setError("Some rows are incomplete. Fill SKU, date and platform or remove the row.");
       return;
     }
-    if (amazonSpApiConnected && rowsToSave.some((row) => row.platform === "amazon")) {
-      setError(
-        "Amazon unit sales come from SP-API (order date) into Overview. Use Daily Sales only for Temu / TikTok — or disconnect SP-API if you must enter Amazon manually."
-      );
-      return;
-    }
     const supabase = createClient();
     const { error: insertError } = await supabase
       .from("inventory_daily_sales")
@@ -2325,7 +2333,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           sku_mapping_id: row.mappingId,
           sale_date: row.saleDate,
           platform: row.platform,
-          warehouse_id: row.warehouseId || null,
+          warehouse_id: row.warehouseId || findDefaultWarehouseId(warehouses) || null,
           sold_units: Number(row.soldUnits || 0),
           returns_units: Number(row.returnsUnits || 0),
           collected_units: Number(row.collectedUnits || 0),
@@ -2337,7 +2345,9 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       return;
     }
     setMessage(`${rowsToSave.length} daily sales row${rowsToSave.length > 1 ? "s" : ""} saved.`);
-    setDailyEntryRows([createDailyEntryRow("temu")]);
+    setDailyEntryRows([
+      createDailyEntryRow({ platform: "amazon", warehouseId: findDefaultWarehouseId(warehouses) }),
+    ]);
     await loadAll();
   };
 
@@ -2367,7 +2377,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       mappingId: row.sku_mapping_id,
       skuSearch: m ? `${m.amazonSku || m.temuSkuId || ""}${m.productName ? ` — ${m.productName}` : ""}` : "",
       platform: (row.platform as DailySaleEditDraft["platform"]) || "amazon",
-      warehouseId: row.warehouse_id || "",
+      warehouseId: row.warehouse_id || findDefaultWarehouseId(warehouses),
       soldUnits: String(row.sold_units ?? 0),
       returnsUnits: String(row.returns_units ?? 0),
       collectedUnits: String(row.collected_units ?? 0),
@@ -2397,12 +2407,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       setError("Please select a SKU for this row.");
       return;
     }
-    if (amazonSpApiConnected && dailySaleDraft.platform === "amazon") {
-      setError(
-        "Amazon unit sales come from SP-API. Switch this row to Temu/TikTok, or delete it — do not keep Amazon manual sales for velocity."
-      );
-      return;
-    }
     const supabase = createClient();
     const { error: updateError } = await supabase
       .from("inventory_daily_sales")
@@ -2410,7 +2414,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         sale_date: dailySaleDraft.saleDate,
         sku_mapping_id: dailySaleDraft.mappingId,
         platform: dailySaleDraft.platform,
-        warehouse_id: dailySaleDraft.warehouseId || null,
+        warehouse_id: dailySaleDraft.warehouseId || findDefaultWarehouseId(warehouses) || null,
         sold_units: soldUnits,
         returns_units: returnsUnits,
         collected_units: collectedUnits,
@@ -2449,7 +2453,53 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   };
 
   const addDailyEntryFormRow = () => {
-    setDailyEntryRows((prev) => [...prev, createDailyEntryRow("temu")]);
+    setDailyEntryRows((prev) => [
+      ...prev,
+      createDailyEntryRow({ platform: "amazon", warehouseId: findDefaultWarehouseId(warehouses) }),
+    ]);
+  };
+
+  const toggleDailySaleSelected = (id: string) => {
+    setSelectedDailySaleIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const toggleSelectAllDailySalesOnPage = () => {
+    const pageIds = dailyRowsPaged.map((r) => r.id);
+    const allSelected = pageIds.length > 0 && pageIds.every((id) => selectedDailySaleIds.includes(id));
+    if (allSelected) {
+      setSelectedDailySaleIds((prev) => prev.filter((id) => !pageIds.includes(id)));
+    } else {
+      setSelectedDailySaleIds((prev) => Array.from(new Set([...prev, ...pageIds])));
+    }
+  };
+
+  const applyBulkWarehouseUpdate = async () => {
+    if (!canEdit) return;
+    if (selectedDailySaleIds.length === 0) {
+      setError("Select at least one daily sales row to update.");
+      return;
+    }
+    if (!bulkWarehouseId) {
+      setError("Choose a warehouse for the bulk update.");
+      return;
+    }
+    setBulkWarehouseSaving(true);
+    setError(null);
+    const supabase = createClient();
+    const { error: updateError } = await supabase
+      .from("inventory_daily_sales")
+      .update({ warehouse_id: bulkWarehouseId })
+      .eq("account_id", accountId)
+      .in("id", selectedDailySaleIds);
+    setBulkWarehouseSaving(false);
+    if (updateError) {
+      setError(updateError.message);
+      return;
+    }
+    const whName = warehouses.find((w) => w.id === bulkWarehouseId)?.name || "warehouse";
+    setMessage(`Updated warehouse to “${whName}” on ${selectedDailySaleIds.length} row(s).`);
+    setSelectedDailySaleIds([]);
+    await loadAll();
   };
 
   const removeDailyEntryFormRow = (rowId: string) => {
@@ -2880,7 +2930,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           {amazonSpApiConnected ? (
             <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
               <strong>Amazon sales source:</strong> SP-API Order rows by <em>customer purchase date</em>
-              (not settlement posted date, not Daily Sales manual entry). Temu stays manual / report upload until an API is available.
+              (not settlement posted date). Daily Sales Amazon rows are for warehouse dispatch tracking only and do not
+              feed Overview velocity. Temu stays manual / report upload until an API is available.
             </div>
           ) : null}
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -4406,8 +4457,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           </div>
           {amazonSpApiConnected ? (
             <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
-              Amazon unit sales for Overview &amp; velocity come from <strong>SP-API</strong> (customer order date), not this form.
-              Enter Temu / TikTok here only. Existing Amazon manual rows stay in history but are not used for velocity.
+              <strong>Overview velocity</strong> still uses SP-API Amazon order dates. Use Daily Sales (incl. Amazon) to
+              log <em>which warehouse dispatched</em> — default warehouse is Sportive; change per row or bulk-update below.
             </div>
           ) : null}
 
@@ -4506,13 +4557,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
                     disabled={!canEdit}
                   >
-                    {!amazonSpApiConnected ? <option value="amazon">Amazon</option> : null}
+                    <option value="amazon">Amazon</option>
                     <option value="temu">Temu</option>
                     <option value="tiktok">TikTok</option>
                   </select>
 
                   <select
-                    value={entryRow.warehouseId}
+                    value={entryRow.warehouseId || findDefaultWarehouseId(warehouses)}
                     onChange={(e) => {
                       const next = e.target.value;
                       if (next === "__add_new__") {
@@ -4528,6 +4579,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     className="w-full rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
                     disabled={!canEdit}
                   >
+                    {warehouses.length === 0 ? <option value="">No warehouse</option> : null}
                     {warehouses.map((w) => (
                       <option key={w.id} value={w.id}>
                         {w.name}
@@ -4679,10 +4731,73 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             </p>
           </div>
 
+          {canEdit ? (
+            <div className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-xs text-slate-600">
+                <span className="font-semibold text-slate-800">{selectedDailySaleIds.length}</span> selected
+              </p>
+              <label className="text-xs text-slate-600">
+                <span className="mb-1 block uppercase tracking-wide text-slate-500">Bulk warehouse</span>
+                <select
+                  value={bulkWarehouseId || findDefaultWarehouseId(warehouses)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    if (next === "__add_new__") {
+                      const name = window.prompt("Warehouse name");
+                      if (!name) return;
+                      void addWarehouse(name).then((id) => {
+                        if (id) setBulkWarehouseId(id);
+                      });
+                      return;
+                    }
+                    setBulkWarehouseId(next);
+                  }}
+                  className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                >
+                  {warehouses.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                  <option value="__add_new__">+ Add new warehouse...</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={() => void applyBulkWarehouseUpdate()}
+                disabled={bulkWarehouseSaving || selectedDailySaleIds.length === 0}
+                className="rounded-lg bg-[var(--md-primary)] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+              >
+                {bulkWarehouseSaving ? "Updating…" : "Apply warehouse to selected"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedDailySaleIds([])}
+                disabled={selectedDailySaleIds.length === 0}
+                className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50"
+              >
+                Clear selection
+              </button>
+            </div>
+          ) : null}
+
           <div className="overflow-x-auto rounded-xl border border-slate-200">
             <table className="min-w-full text-xs">
               <thead className="bg-slate-50 text-left uppercase tracking-wide text-slate-500">
                 <tr>
+                  {canEdit ? (
+                    <th className="px-2 py-2">
+                      <input
+                        type="checkbox"
+                        checked={
+                          dailyRowsPaged.length > 0 &&
+                          dailyRowsPaged.every((r) => selectedDailySaleIds.includes(r.id))
+                        }
+                        onChange={toggleSelectAllDailySalesOnPage}
+                        title="Select all on this page"
+                      />
+                    </th>
+                  ) : null}
                   <th className="px-2 py-2">Date</th>
                   <th className="px-2 py-2">SKU</th>
                   <th className="px-2 py-2">Product</th>
@@ -4700,7 +4815,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               <tbody>
                 {dailyRowsFiltered.length === 0 ? (
                   <tr>
-                    <td className="px-2 py-3 text-slate-500" colSpan={canEdit ? 12 : 11}>
+                    <td className="px-2 py-3 text-slate-500" colSpan={canEdit ? 13 : 11}>
                       No daily sales data in selected filters.
                     </td>
                   </tr>
@@ -4709,7 +4824,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     const isEditingRow = canEdit && editingDailySaleId === row.id && Boolean(dailySaleDraft);
                     const draftMapping = isEditingRow && dailySaleDraft ? mappingById.get(dailySaleDraft.mappingId) : undefined;
                     const m = draftMapping || mappingById.get(row.sku_mapping_id);
-                    const wh = warehouses.find((w) => w.id === row.warehouse_id);
+                    const wh = warehouses.find((w) => w.id === (isEditingRow ? dailySaleDraft?.warehouseId : row.warehouse_id));
                     const costMappingId = isEditingRow && dailySaleDraft ? dailySaleDraft.mappingId : row.sku_mapping_id;
                     const unitCost = cogsByMapping.get(costMappingId) || 0;
                     const units = Number(isEditingRow ? dailySaleDraft?.soldUnits || 0 : row.sold_units || 0);
@@ -4717,6 +4832,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     const incl = excl * (1 + Number(accountVatRate || 0) / 100);
                     return (
                       <tr key={row.id} className="border-t border-slate-100">
+                        {canEdit ? (
+                          <td className="px-2 py-2">
+                            <input
+                              type="checkbox"
+                              checked={selectedDailySaleIds.includes(row.id)}
+                              onChange={() => toggleDailySaleSelected(row.id)}
+                            />
+                          </td>
+                        ) : null}
                         <td className="px-2 py-2">
                           {isEditingRow ? (
                             <input
@@ -4754,13 +4878,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         <td className="px-2 py-2 capitalize">
                           {isEditingRow ? (
                             <select
-                              value={dailySaleDraft?.platform || "temu"}
+                              value={dailySaleDraft?.platform || "amazon"}
                               onChange={(e) =>
                                 setDailySaleDraft((prev) => (prev ? { ...prev, platform: e.target.value as DailySaleEditDraft["platform"] } : prev))
                               }
                               className="rounded border border-slate-300 px-2 py-1"
                             >
-                              {!amazonSpApiConnected ? <option value="amazon">Amazon</option> : null}
+                              <option value="amazon">Amazon</option>
                               <option value="temu">Temu</option>
                               <option value="tiktok">TikTok</option>
                             </select>
@@ -4771,11 +4895,10 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         <td className="px-2 py-2">
                           {isEditingRow ? (
                             <select
-                              value={dailySaleDraft?.warehouseId || ""}
+                              value={dailySaleDraft?.warehouseId || findDefaultWarehouseId(warehouses)}
                               onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, warehouseId: e.target.value } : prev))}
                               className="rounded border border-slate-300 px-2 py-1"
                             >
-                              <option value="">No warehouse</option>
                               {warehouses.map((w) => (
                                 <option key={w.id} value={w.id}>
                                   {w.name}
