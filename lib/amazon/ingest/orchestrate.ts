@@ -13,9 +13,9 @@
  *        d. Persist summary totals + breakdown + per-SKU rows
  *        e. refreshInventorySalesFacts(account, monthStart, monthEnd) so
  *           Overview/Daily Sales pick up the new txs even if a later month
- *           or the final full rebuild times out
- *   5. refreshInventorySalesFacts(account) full rebuild at the end of
- *      syncAmazonFinanceData (POST/GET /api/amazon/sync both go through here)
+ *           or the route's full rebuild times out
+ *   5. POST/GET /api/amazon/sync call refreshInventorySalesFacts(account)
+ *      again after syncAmazonFinanceData returns (full-account rebuild)
  *
  *   Coexistence: manual + sp_api reports for the same (account, period) live
  *   side-by-side thanks to the relaxed unique constraint
@@ -400,8 +400,8 @@ async function ingestMonth(input: {
   }
 
   // Same function that writes report_transactions must refresh the facts
-  // cache. POST/GET /api/amazon/sync only call syncAmazonFinanceData →
-  // ingestMonth; they do not refresh on their own.
+  // cache. POST/GET /api/amazon/sync also do a full-account refresh after
+  // syncAmazonFinanceData returns.
   const monthRefresh = await refreshInventorySalesFacts(supabase, accountId, {
     from: bucketStart,
     to: bucketEnd,
@@ -564,11 +564,6 @@ export async function syncAmazonFinanceData(input: {
     warnings.push(
       `Ingested ${mapStats.productAdsIngested} ad-payment event(s) as placeholder PPC spend — upload the Ads CSV to replace with per-SKU detail.`
     );
-  }
-
-  const factsRefresh = await refreshInventorySalesFacts(supabase, accountId);
-  if (!factsRefresh.ok) {
-    warnings.push(`Sales-facts cache refresh failed: ${factsRefresh.error}`);
   }
 
   await updateSyncStatus(accountId, { ok: true, financeSyncedThrough: options.to });

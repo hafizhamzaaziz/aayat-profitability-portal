@@ -14,8 +14,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  *   TikTok sold column. Manual Daily Sales may still record TikTok returns/notes.
  *
  * Call sites that write report_transactions:
- * - lib/amazon/ingest/orchestrate.ts ingestMonth (SP-API) + full rebuild at
- *   end of syncAmazonFinanceData (POST/GET /api/amazon/sync)
+ * - lib/amazon/ingest/orchestrate.ts ingestMonth (per ingested month)
+ * - app/api/amazon/sync/route.ts after syncAmazonFinanceData (full rebuild)
  * - app/(portal)/reports/report-workbench.tsx after manual upload insert
  * - app/(portal)/reports/saved-reports-panel.tsx after report delete
  * Recompute reads txs and rewrites report totals only — it does not insert

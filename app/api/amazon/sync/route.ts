@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { syncAmazonFinanceData } from "@/lib/amazon/ingest/orchestrate";
 import { expandToCoveredMonths, nextFinanceWindow } from "@/lib/amazon/ingest/sync-window";
+import { refreshInventorySalesFacts } from "@/lib/inventory/refresh-sales-facts";
 import { SpApiError } from "@/lib/amazon/spapi";
 import { todayIsoUtc } from "@/lib/utils/date";
 
@@ -74,6 +75,13 @@ async function runFinanceSync(input: {
       cogsVatReclaimPct,
       options: { from: input.from, to: input.to },
     });
+    // Full-account rebuild at the HTTP boundary so POST/GET /api/amazon/sync
+    // always refresh even if a future caller skips ingestMonth. Per-month
+    // refresh already ran inside ingestMonth after each tx insert.
+    const factsRefresh = await refreshInventorySalesFacts(admin, input.accountId);
+    if (!factsRefresh.ok) {
+      result.warnings.push(`Sales-facts cache refresh failed: ${factsRefresh.error}`);
+    }
     return { status: 200 as const, body: result };
   } catch (err) {
     const message =
@@ -96,9 +104,9 @@ async function runFinanceSync(input: {
  * touches sp_api rows. The requested range is expanded to covering calendar
  * months so a short window cannot blank out the rest of a month.
  *
- * Sales-facts cache: do not call refresh here. `syncAmazonFinanceData` →
- * `ingestMonth` refreshes after each month that inserts `report_transactions`,
- * then a full-account refresh at the end of the sync.
+ * Sales-facts cache: ingestMonth refreshes after each month that inserts
+ * report_transactions. This route then calls refreshInventorySalesFacts for
+ * a full-account rebuild after syncAmazonFinanceData returns.
  *
  * Admin/team only. Uses an admin Supabase client for writes so RLS policies
  * don't block the orchestrator's bulk insert/upsert traffic.

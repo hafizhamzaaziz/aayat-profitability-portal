@@ -3,6 +3,9 @@
 // Run with:
 //   node --experimental-strip-types --experimental-transform-types scripts/verify-inventory-unify.mts
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildUnifiedDailySales, displaySoldUnits, mapSalesFactsToTxFacts, sumReportedSoldUnits, sumTxFactsByPlatform } from "../lib/inventory/sales-facts.ts";
 import { clipReplaceRange, expandToCoveredMonths, nextFinanceWindow } from "../lib/amazon/ingest/sync-window.ts";
 
@@ -201,6 +204,30 @@ const full = clipReplaceRange({
   windowTo: "2026-06-30",
 });
 assert("full-month window replaces the report", full.replaceEntireReport === true);
+
+const here = dirname(fileURLToPath(import.meta.url));
+const syncRoute = readFileSync(join(here, "../app/api/amazon/sync/route.ts"), "utf8");
+const orchestrate = readFileSync(join(here, "../lib/amazon/ingest/orchestrate.ts"), "utf8");
+const workbench = readFileSync(join(here, "../app/(portal)/reports/report-workbench.tsx"), "utf8");
+const rpcSql = readFileSync(join(here, "../supabase/migrations/20260917120000_refresh_sales_facts_date_window.sql"), "utf8");
+assert(
+  "POST/GET amazon sync route calls refreshInventorySalesFacts",
+  syncRoute.includes("await refreshInventorySalesFacts(admin, input.accountId)"),
+);
+assert(
+  "ingestMonth refreshes facts after inserting report_transactions",
+  orchestrate.includes("from(\"report_transactions\").insert") &&
+    orchestrate.includes("refreshInventorySalesFacts(supabase, accountId"),
+);
+assert(
+  "manual report save refreshes facts after tx insert",
+  workbench.includes("from(\"report_transactions\").insert") && workbench.includes("refreshInventorySalesFacts"),
+);
+assert(
+  "Temu cache filter stays order payment (not widened to order)",
+  rpcSql.includes("like 'temu%' and lower(coalesce(rt.raw_row->>'Transaction type', '')) = 'order payment'"),
+);
+assert("TikTok is not a facts-cache platform in the RPC", !rpcSql.toLowerCase().includes("tiktok"));
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`);
