@@ -56,3 +56,23 @@ export function addDays(value: string, days: number) {
   dt.setUTCDate(dt.getUTCDate() + days);
   return utcDateToIso(dt);
 }
+
+export function monthStartIso(value: string) {
+  const dt = toUtcDateFromIso(value);
+  if (!dt) return value.slice(0, 7) + "-01";
+  return utcDateToIso(new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), 1)));
+}
+
+export function monthEndIso(value: string) {
+  const dt = toUtcDateFromIso(value);
+  if (!dt) return value;
+  return utcDateToIso(new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 0)));
+}
+
+export function minIsoDate(a: string, b: string) {
+  return a <= b ? a : b;
+}
+
+export function maxIsoDate(a: string, b: string) {
+  return a >= b ? a : b;
+}

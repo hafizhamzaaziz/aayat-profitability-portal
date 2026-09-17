@@ -5,6 +5,10 @@
       "schedule": "0 2 * * *"
     },
     {
+      "path": "/api/amazon/sync",
+      "schedule": "20 2 * * *"
+    },
+    {
       "path": "/api/amazon/keepalive",
       "schedule": "0 3 * * 1"
     }

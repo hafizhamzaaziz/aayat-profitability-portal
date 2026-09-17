@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { addDays, formatUkDate } from "@/lib/utils/date";
 import { pushClientNotification } from "@/lib/notifications/client";
+import { refreshInventorySalesFacts } from "@/lib/inventory/refresh-sales-facts";
 import PerSkuTable, { type PerSkuRow } from "@/components/reports/per-sku-table";
 import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
 import { computePerSku } from "@/lib/reports/per-sku";
@@ -498,6 +499,9 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
           "No raw transactions found for this report. Recompute requires the original transaction file to have been saved with the report."
         );
       }
+      // Recompute rewrites report totals from existing report_transactions; it
+      // does not insert/replace those rows. inventory_sales_facts_cache is
+      // unchanged, so we do not call refreshInventorySalesFacts here.
 
       // 2) Bridged COGS lookup (Amazon SKU ↔ Temu SKU ID via sku_mappings).
       const cogsLookup = await buildBridgedCogsLookup(supabase, target.account_id);
@@ -1485,11 +1489,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
       if (deleteError) throw deleteError;
       // Keep the inventory sales-facts cache in sync so removed transactions
       // disappear from Overview & Velocity immediately.
-      try {
-        await supabase.rpc("refresh_inventory_sales_facts", { p_account_id: accountIdForRefresh });
-      } catch {
-        /* non-fatal */
-      }
+      await refreshInventorySalesFacts(supabase, accountIdForRefresh);
       setMessage("Report deleted.");
       await loadReports(pageOffset);
     } catch (err) {

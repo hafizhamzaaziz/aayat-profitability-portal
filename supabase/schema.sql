@@ -96,6 +96,9 @@ alter table public.account_amazon_credentials add column if not exists ads_profi
 -- (sellers) across every marketplace. We pin a single advertiser by name so
 -- the per-country profile map only contains that advertiser's profiles.
 alter table public.account_amazon_credentials add column if not exists ads_advertiser_name text;
+alter table public.account_amazon_credentials add column if not exists last_keepalive_at timestamptz;
+alter table public.account_amazon_credentials add column if not exists last_keepalive_error text;
+alter table public.account_amazon_credentials add column if not exists finance_synced_through date;
 
 -- TikTok Shop Open Platform (Partner API v2) credentials, one row per account.
 -- Separate from Amazon: different OAuth app, signing scheme and token lifecycle.
@@ -1415,3 +1418,34 @@ BEGIN
       ADD COLUMN cogs_vat_reclaim_pct numeric(5,2);
   END IF;
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- 15) Inventory sales-facts cache
+--   Pre-aggregated sold units from report_transactions (manual + sp_api).
+--   Overview and Daily Sales both read this table. Refresh after any ingest
+--   that writes report_transactions via refresh_inventory_sales_facts().
+-- ---------------------------------------------------------------------------
+create table if not exists public.inventory_sales_facts_cache (
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  platform text not null,
+  sku text not null,
+  sale_date date not null,
+  qty numeric not null,
+  refreshed_at timestamptz not null default now(),
+  primary key (account_id, platform, sku, sale_date)
+);
+create index if not exists inv_sales_facts_account_date_idx
+  on public.inventory_sales_facts_cache (account_id, sale_date);
+create index if not exists inv_sales_facts_account_mapping_idx
+  on public.inventory_sales_facts_cache (account_id, platform, sku);
+
+alter table public.inventory_sales_facts_cache enable row level security;
+drop policy if exists "inventory_sales_facts_cache_select" on public.inventory_sales_facts_cache;
+create policy "inventory_sales_facts_cache_select"
+on public.inventory_sales_facts_cache
+for select
+using (true);
+drop policy if exists "inventory_sales_facts_cache_modify" on public.inventory_sales_facts_cache;
+create policy "inventory_sales_facts_cache_modify"
+on public.inventory_sales_facts_cache
+using (current_user_role() = any (array['admin'::user_role, 'team'::user_role]));

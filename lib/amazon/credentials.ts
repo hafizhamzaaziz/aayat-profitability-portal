@@ -42,10 +42,43 @@ export async function loadSpApiClient(accountId: string): Promise<{
 }
 
 /**
- * Updates the credential row's sync bookkeeping after a successful or failed
- * data pull. Idempotent and safe to call from any code path.
+ * Updates finance-ingest bookkeeping after a successful or failed SP-API
+ * Finance pull. Keep-alive / smoke tests must NOT call this — they used to,
+ * which made `last_synced_at` look like fresh ingest while report_transactions
+ * had not moved in months.
  */
 export async function updateSyncStatus(
+  accountId: string,
+  outcome: { ok: true; financeSyncedThrough?: string } | { ok: false; error: string }
+): Promise<void> {
+  const admin = createAdminClient();
+  if (outcome.ok) {
+    const patch: Record<string, unknown> = {
+      last_synced_at: new Date().toISOString(),
+      last_sync_error: null,
+    };
+    if (outcome.financeSyncedThrough) {
+      patch.finance_synced_through = outcome.financeSyncedThrough;
+    }
+    await admin
+      .from("account_amazon_credentials")
+      .update(patch)
+      .eq("account_id", accountId)
+      .eq("provider", "sp-api");
+  } else {
+    await admin
+      .from("account_amazon_credentials")
+      .update({ last_sync_error: outcome.error.slice(0, 1000) })
+      .eq("account_id", accountId)
+      .eq("provider", "sp-api");
+  }
+}
+
+/**
+ * Developer-account keep-alive ping. Writes `last_keepalive_at` only — never
+ * `last_synced_at` — so the Settings panel can tell heartbeat from ingest.
+ */
+export async function updateKeepaliveStatus(
   accountId: string,
   outcome: { ok: true } | { ok: false; error: string }
 ): Promise<void> {
@@ -53,13 +86,13 @@ export async function updateSyncStatus(
   if (outcome.ok) {
     await admin
       .from("account_amazon_credentials")
-      .update({ last_synced_at: new Date().toISOString(), last_sync_error: null })
+      .update({ last_keepalive_at: new Date().toISOString(), last_keepalive_error: null })
       .eq("account_id", accountId)
       .eq("provider", "sp-api");
   } else {
     await admin
       .from("account_amazon_credentials")
-      .update({ last_sync_error: outcome.error.slice(0, 1000) })
+      .update({ last_keepalive_error: outcome.error.slice(0, 1000) })
       .eq("account_id", accountId)
       .eq("provider", "sp-api");
   }

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { loadSpApiClient, updateMarketplaceIds, updateSyncStatus } from "@/lib/amazon/credentials";
+import { loadSpApiClient, updateMarketplaceIds } from "@/lib/amazon/credentials";
 import { SpApiError } from "@/lib/amazon/spapi";
 
 export const runtime = "nodejs";
@@ -19,8 +19,8 @@ export const dynamic = "force-dynamic";
  *   2. Calls listOrders (last 30 days, page size 1) just to count orders
  *      reachable via SP-API — proves we can actually read seller data, not
  *      just metadata.
- *   3. Writes last_synced_at / last_sync_error so the connection panel shows
- *      live sync health.
+ *   3. Does not write last_synced_at — that timestamp is reserved for Finance
+ *      ingest. A passing smoke test used to look like a successful data sync.
  *
  * Returns a JSON payload safe to display in the UI (no tokens included).
  */
@@ -89,7 +89,6 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    await updateSyncStatus(accountId, { ok: true });
     return Response.json({
       ok: true,
       region,
@@ -109,7 +108,6 @@ export async function GET(request: NextRequest) {
         : err instanceof Error
         ? err.message
         : String(err);
-    await updateSyncStatus(accountId, { ok: false, error: message }).catch(() => {});
     return Response.json({ ok: false, error: message }, { status: 502 });
   }
 }

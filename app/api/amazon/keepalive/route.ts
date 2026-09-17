@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { loadSpApiClient, updateMarketplaceIds, updateSyncStatus } from "@/lib/amazon/credentials";
+import { loadSpApiClient, updateMarketplaceIds, updateKeepaliveStatus } from "@/lib/amazon/credentials";
 import { SpApiError } from "@/lib/amazon/spapi";
 
 export const runtime = "nodejs";
@@ -13,9 +13,11 @@ export const maxDuration = 120;
  *
  * Amazon baselines Selling Partner API access keys every 90 days: any developer
  * account that makes no successful SP-API call in that window has its keys
- * deleted and must re-apply (see AUP §3.5). The portal's only cron hits the
- * *Ads* API, which is a different service and does NOT reset this clock, so the
- * developer account silently drifts toward deactivation.
+ * deleted and must re-apply (see AUP §3.5). Ads collect is a different Amazon
+ * service and does NOT reset this clock. Daily Finance ingest (`/api/amazon/sync`)
+ * does count, but keep-alive stays as a cheap weekly fallback so a stuck ingest
+ * job cannot deactivate the app. It writes `last_keepalive_at` only — never
+ * `last_synced_at`, which is reserved for real Finance ingest.
  *
  * This endpoint makes the cheapest possible real SP-API call
  * (getMarketplaceParticipations) for every connected account, which is enough
@@ -53,7 +55,7 @@ async function pingAllConnectedAccounts() {
       if (active.length > 0) {
         await updateMarketplaceIds(accountId, active).catch(() => {});
       }
-      await updateSyncStatus(accountId, { ok: true }).catch(() => {});
+      await updateKeepaliveStatus(accountId, { ok: true }).catch(() => {});
       results.push({ accountId, ok: true, marketplaces: active.length });
     } catch (err) {
       const message =
@@ -62,7 +64,7 @@ async function pingAllConnectedAccounts() {
           : err instanceof Error
           ? err.message
           : String(err);
-      await updateSyncStatus(accountId, { ok: false, error: message }).catch(() => {});
+      await updateKeepaliveStatus(accountId, { ok: false, error: message }).catch(() => {});
       results.push({ accountId, ok: false, error: message });
     }
   }
