@@ -565,20 +565,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     const supabase = createClient();
 
     const [mappingRes, defaultsRes, salesFactsRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, dailySalesRes, accountRes, skuDescRes] = await Promise.all([
-      fetchAllRows<{
-        id: string;
-        amazon_sku: string | null;
-        temu_sku_id: string | null;
-        lead_time_days: number | null;
-        sku_catalog?: { product_name?: string } | null;
-      }>((from, to) =>
-        supabase
-          .from("sku_mappings")
-          .select("id, amazon_sku, temu_sku_id, lead_time_days, sku_catalog:sku_catalog_id(product_name)")
-          .eq("account_id", accountId)
-          .order("created_at", { ascending: false })
-          .range(from, to),
-      ),
+      supabase
+        .from("sku_mappings")
+        .select("id, amazon_sku, temu_sku_id, lead_time_days, sku_catalog:sku_catalog_id(product_name)")
+        .eq("account_id", accountId)
+        .order("created_at", { ascending: false }),
       supabase.from("inventory_defaults").select("*").eq("account_id", accountId).maybeSingle(),
       // Pre-aggregated per-day units from `inventory_sales_facts_cache` (refreshed
       // whenever a report is uploaded / recomputed / deleted). Paged through in
