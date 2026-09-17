@@ -530,6 +530,15 @@ export async function syncAmazonFinanceData(input: {
       cogsLookup,
     });
     reportResults.push(result);
+    const monthRefresh = await refreshInventorySalesFacts(supabase, accountId, {
+      from: bucket.start,
+      to: bucket.end,
+    });
+    if (!monthRefresh.ok) {
+      warnings.push(
+        `Sales-facts cache refresh failed for ${bucket.start}–${bucket.end}: ${monthRefresh.error}`,
+      );
+    }
   }
 
   if (mapStats.unknownLists.length > 0) {
