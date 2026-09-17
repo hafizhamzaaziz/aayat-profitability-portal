@@ -423,17 +423,21 @@ async function ingestMonth(input: {
   }
 
   const txPayload = rows.map((r) => {
-    const { __amazon_event_id, __posted_date: _postedDate, __order_date: _orderDate, __sku, __quantity, ...rawRow } = r;
+    const rawRow: Record<string, string | number | null> = {};
+    for (const [key, value] of Object.entries(r)) {
+      if (key.startsWith("__")) continue;
+      rawRow[key] = value as string | number | null;
+    }
     return {
       report_id: reportId,
       account_id: accountId,
       platform: "amazon" as const,
       transaction_date: transactionDateForSalesFact(r),
-      sku: __sku,
-      quantity: __quantity,
+      sku: r.__sku,
+      quantity: r.__quantity,
       raw_row: rawRow,
       source: "sp_api" as const,
-      amazon_event_id: __amazon_event_id,
+      amazon_event_id: r.__amazon_event_id,
     };
   });
 
