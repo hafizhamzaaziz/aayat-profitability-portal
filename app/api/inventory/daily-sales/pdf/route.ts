@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { renderInventoryDailySalesPdfBuffer } from "@/lib/pdf/inventory-daily-sales-document";
 
 export const runtime = "nodejs";
@@ -29,19 +30,33 @@ export async function GET(request: NextRequest) {
       .maybeSingle();
     if (accountError || !account) return new Response("Account not found.", { status: 404 });
 
-    let salesQueryWithSoldUnits = supabase
-      .from("inventory_daily_sales")
-      .select("sku_mapping_id, sale_date, platform, warehouse_id, sold_units, returns_units, collected_units, notes")
-      .eq("account_id", accountId)
-      .gte("sale_date", from)
-      .lte("sale_date", to)
-      .order("sale_date", { ascending: true });
-    if (platform !== "all") salesQueryWithSoldUnits = salesQueryWithSoldUnits.eq("platform", platform);
-    if (warehouseId !== "all") salesQueryWithSoldUnits = salesQueryWithSoldUnits.eq("warehouse_id", warehouseId);
-    if (mappingId !== "all") salesQueryWithSoldUnits = salesQueryWithSoldUnits.eq("sku_mapping_id", mappingId);
+    type DailySalesPdfRow = {
+      sku_mapping_id: string;
+      sale_date: string;
+      platform: string;
+      warehouse_id: string | null;
+      sold_units?: number;
+      returns_units: number;
+      collected_units: number;
+      notes: string | null;
+    };
 
     const [{ data: rowsWithSoldUnits, error: rowsError }, { data: cogsRows }, { data: warehouseRows }, { data: mappingRows }] = await Promise.all([
-      salesQueryWithSoldUnits,
+      fetchAllRows<DailySalesPdfRow>((fromIdx, toIdx) => {
+        let query = supabase
+          .from("inventory_daily_sales")
+          .select("sku_mapping_id, sale_date, platform, warehouse_id, sold_units, returns_units, collected_units, notes")
+          .eq("account_id", accountId)
+          .gte("sale_date", from)
+          .lte("sale_date", to)
+          .order("sale_date", { ascending: true })
+          .order("id", { ascending: true })
+          .range(fromIdx, toIdx);
+        if (platform !== "all") query = query.eq("platform", platform);
+        if (warehouseId !== "all") query = query.eq("warehouse_id", warehouseId);
+        if (mappingId !== "all") query = query.eq("sku_mapping_id", mappingId);
+        return query;
+      }),
       supabase.from("cogs").select("sku, unit_cost, sku_mapping_id").eq("account_id", accountId),
       supabase.from("inventory_warehouses").select("id, name").eq("account_id", accountId),
       supabase
@@ -123,6 +138,7 @@ export async function GET(request: NextRequest) {
         };
       })
       .filter((row) => {
+        if (String(row.sale_date || "") < "2020-01-01") return false;
         if (!skuSearch) return true;
         return row.product_name.toLowerCase().includes(skuSearch) || row.sku.toLowerCase().includes(skuSearch);
       });

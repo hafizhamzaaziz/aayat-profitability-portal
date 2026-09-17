@@ -169,6 +169,13 @@ export async function syncAmazonInventorySalesFromOrders(input: {
     if (error) throw new Error(error.message);
   }
 
+  try {
+    const { syncAmazonDailySalesFromFacts } = await import("@/lib/inventory/sync-amazon-daily-sales");
+    await syncAmazonDailySalesFromFacts(supabase, accountId, { from, to });
+  } catch {
+    // Daily Sales warehouse log is best-effort; Overview facts already wrote.
+  }
+
   return {
     from,
     to,

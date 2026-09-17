@@ -163,6 +163,16 @@ export async function POST(request: NextRequest) {
       result.orders = ordersSync;
     }
 
+    try {
+      const { syncAmazonDailySalesFromFacts } = await import("@/lib/inventory/sync-amazon-daily-sales");
+      result.dailySalesSync = await syncAmazonDailySalesFromFacts(admin, accountId, {
+        from: from || undefined,
+        to: to || undefined,
+      });
+    } catch (err) {
+      result.dailySalesSyncError = err instanceof Error ? err.message : String(err);
+    }
+
     const checkDate = to || new Date().toISOString().slice(0, 10);
     const { data: dayFacts } = await admin
       .from("inventory_sales_facts_cache")

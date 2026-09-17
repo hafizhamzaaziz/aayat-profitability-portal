@@ -565,6 +565,17 @@ export async function syncAmazonFinanceData(input: {
     if (refreshError) {
       warnings.push(`Inventory sales facts refresh failed: ${refreshError.message}`);
     } else {
+      try {
+        const { syncAmazonDailySalesFromFacts } = await import("@/lib/inventory/sync-amazon-daily-sales");
+        await syncAmazonDailySalesFromFacts(supabase, accountId, {
+          from: options.from,
+          to: options.to,
+        });
+      } catch (err) {
+        warnings.push(
+          `Amazon Daily Sales sync skipped: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
       // Overlay recent Orders-API purchase-date units (Finance lags settlement).
       try {
         const { syncAmazonInventorySalesFromOrders } = await import("./orders-sales");

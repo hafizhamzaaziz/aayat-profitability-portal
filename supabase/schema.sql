@@ -1415,3 +1415,159 @@ BEGIN
       ADD COLUMN cogs_vat_reclaim_pct numeric(5,2);
   END IF;
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- 15) Amazon Daily Sales sync from SP-API facts cache
+--   Overview velocity reads inventory_sales_facts_cache. Daily Sales is the
+--   warehouse-dispatch log. This copies Amazon units into inventory_daily_sales
+--   (Sportive default warehouse) without overwriting warehouse edits.
+-- ---------------------------------------------------------------------------
+alter table public.inventory_daily_sales
+  add column if not exists source text not null default 'manual';
+
+create index if not exists inventory_daily_sales_account_key_idx
+  on public.inventory_daily_sales (account_id, sku_mapping_id, sale_date, platform);
+
+create or replace function public.sync_amazon_daily_sales_from_facts(
+  p_account_id uuid,
+  p_from date default null,
+  p_to date default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_warehouse_id uuid;
+  v_inserted integer := 0;
+  v_updated integer := 0;
+  v_filled integer := 0;
+begin
+  if p_account_id is null then
+    raise exception 'account id is required';
+  end if;
+
+  select w.id
+    into v_warehouse_id
+  from public.inventory_warehouses w
+  where w.account_id = p_account_id
+  order by case when lower(trim(w.name)) = 'sportive' then 0 else 1 end, w.name asc
+  limit 1;
+
+  create temporary table if not exists _amazon_daily_facts (
+    sku_mapping_id uuid not null,
+    sale_date date not null,
+    sold_units integer not null,
+    primary key (sku_mapping_id, sale_date)
+  ) on commit drop;
+  truncate _amazon_daily_facts;
+
+  insert into _amazon_daily_facts (sku_mapping_id, sale_date, sold_units)
+  select
+    m.id,
+    f.sale_date,
+    greatest(0, round(sum(f.qty))::integer)
+  from public.inventory_sales_facts_cache f
+  join (
+    select distinct on (upper(trim(replace(sm.amazon_sku, chr(160), ' '))))
+      sm.id,
+      upper(trim(replace(sm.amazon_sku, chr(160), ' '))) as sku_key
+    from public.sku_mappings sm
+    where sm.account_id = p_account_id
+      and sm.amazon_sku is not null
+      and trim(sm.amazon_sku) <> ''
+    order by upper(trim(replace(sm.amazon_sku, chr(160), ' '))), sm.created_at asc, sm.id asc
+  ) m on m.sku_key = upper(trim(replace(coalesce(f.sku, ''), chr(160), ' ')))
+  where f.account_id = p_account_id
+    and lower(coalesce(f.platform, '')) like 'amazon%'
+    and f.qty > 0
+    and f.sale_date >= date '2020-01-01'
+    and (p_from is null or f.sale_date >= p_from)
+    and (p_to is null or f.sale_date <= p_to)
+  group by m.id, f.sale_date
+  having round(sum(f.qty)) > 0;
+
+  insert into public.inventory_daily_sales (
+    account_id,
+    sku_mapping_id,
+    sale_date,
+    platform,
+    warehouse_id,
+    sold_units,
+    returns_units,
+    collected_units,
+    notes,
+    source
+  )
+  select
+    p_account_id,
+    f.sku_mapping_id,
+    f.sale_date,
+    'amazon',
+    v_warehouse_id,
+    f.sold_units,
+    0,
+    0,
+    null,
+    'sp_api'
+  from _amazon_daily_facts f
+  where not exists (
+    select 1
+    from public.inventory_daily_sales d
+    where d.account_id = p_account_id
+      and d.sku_mapping_id = f.sku_mapping_id
+      and d.sale_date = f.sale_date
+      and d.platform = 'amazon'
+  );
+  get diagnostics v_inserted = row_count;
+
+  update public.inventory_daily_sales d
+  set
+    sold_units = f.sold_units,
+    warehouse_id = coalesce(d.warehouse_id, v_warehouse_id),
+    source = case when d.source = 'manual' then d.source else 'sp_api' end,
+    updated_at = now()
+  from _amazon_daily_facts f
+  join (
+    select sku_mapping_id, sale_date
+    from public.inventory_daily_sales
+    where account_id = p_account_id
+      and platform = 'amazon'
+      and (p_from is null or sale_date >= p_from)
+      and (p_to is null or sale_date <= p_to)
+    group by sku_mapping_id, sale_date
+    having count(*) = 1
+  ) k on k.sku_mapping_id = f.sku_mapping_id and k.sale_date = f.sale_date
+  where d.account_id = p_account_id
+    and d.platform = 'amazon'
+    and d.sku_mapping_id = f.sku_mapping_id
+    and d.sale_date = f.sale_date
+    and (
+      d.sold_units is distinct from f.sold_units
+      or (d.warehouse_id is null and v_warehouse_id is not null)
+    );
+  get diagnostics v_updated = row_count;
+
+  update public.inventory_daily_sales d
+  set warehouse_id = v_warehouse_id, updated_at = now()
+  where d.account_id = p_account_id
+    and d.platform = 'amazon'
+    and d.warehouse_id is null
+    and v_warehouse_id is not null;
+  get diagnostics v_filled = row_count;
+
+  return jsonb_build_object(
+    'account_id', p_account_id,
+    'from', p_from,
+    'to', p_to,
+    'inserted', v_inserted,
+    'updated', v_updated,
+    'warehouses_filled', v_filled,
+    'default_warehouse_id', v_warehouse_id
+  );
+end;
+$$;
+
+revoke all on function public.sync_amazon_daily_sales_from_facts(uuid, date, date) from public, anon;
+grant execute on function public.sync_amazon_daily_sales_from_facts(uuid, date, date) to authenticated, service_role;

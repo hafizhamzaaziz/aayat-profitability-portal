@@ -12,6 +12,8 @@ import {
   type PackProfile,
   type SkuRef,
 } from "@/lib/inventory/engine";
+import { syncAmazonDailySalesFromFacts } from "@/lib/inventory/sync-amazon-daily-sales";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { addDays, formatUkDate, todayIsoUtc } from "@/lib/utils/date";
 import { resolveDescriptiveProductName } from "@/lib/utils/product-name";
 
@@ -106,6 +108,7 @@ type DailySale = {
   collected_units: number;
   notes: string | null;
   created_at: string;
+  source: "manual" | "sp_api";
 };
 
 type DailyEntryRow = {
@@ -305,33 +308,6 @@ function normalizeSkuToken(input: unknown) {
   if (!raw) return "";
   if (/^\d+\.0+$/.test(raw)) return raw.replace(/\.0+$/, "");
   return raw;
-}
-
-// PostgREST caps every response at the project's "Max rows" setting (1000 by
-// default) regardless of the requested `.range()`. Tables like
-// `inventory_sales_facts_cache` hold tens of thousands of rows per account, so
-// a single fetch silently returns an arbitrary slice and the dashboard badly
-// undercounts. This pages through the full result set so aggregates are exact.
-// `pageSize` must stay <= the server cap; 1000 matches the Supabase default.
-async function fetchAllRows<T>(
-  makeQuery: (
-    from: number,
-    to: number,
-  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
-  pageSize = 1000,
-): Promise<{ data: T[]; error: { message: string } | null }> {
-  const all: T[] = [];
-  let from = 0;
-  // Guard against an unexpected infinite loop (e.g. backend never shrinks page).
-  for (let guard = 0; guard < 5000; guard++) {
-    const { data, error } = await makeQuery(from, from + pageSize - 1);
-    if (error) return { data: all, error };
-    const batch = (data || []) as T[];
-    all.push(...batch);
-    if (batch.length < pageSize) break;
-    from += pageSize;
-  }
-  return { data: all, error: null };
 }
 
 function daysBetweenInclusive(startIso: string, endIso: string) {
@@ -607,7 +583,12 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     setError(null);
     const supabase = createClient();
 
-    const [mappingRes, defaultsRes, salesFactsRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, dailySalesRes, accountRes, skuDescRes, amazonCredRes] = await Promise.all([
+    const amazonSyncPromise = syncAmazonDailySalesFromFacts(supabase, accountId).catch((err) => {
+      console.warn("[inventory] Amazon daily-sales sync skipped:", err);
+      return null;
+    });
+
+    const [mappingRes, defaultsRes, salesFactsRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, accountRes, skuDescRes, amazonCredRes] = await Promise.all([
       supabase
         .from("sku_mappings")
         .select("id, amazon_sku, temu_sku_id, lead_time_days, sku_catalog:sku_catalog_id(product_name)")
@@ -650,12 +631,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         .order("created_at", { ascending: false })
         .limit(2000),
       supabase.from("inventory_warehouses").select("id, name").eq("account_id", accountId).order("name", { ascending: true }),
-      supabase
-        .from("inventory_daily_sales")
-        .select("id, account_id, sku_mapping_id, sale_date, platform, warehouse_id, sold_units, returns_units, collected_units, notes, created_at")
-        .eq("account_id", accountId)
-        .order("sale_date", { ascending: false })
-        .limit(3000),
       supabase.from("accounts").select("vat_rate").eq("id", accountId).maybeSingle(),
       // Paged: a busy account holds several thousand SKU description rows, more
       // than the PostgREST row cap, so a single fetch dropped product names.
@@ -677,6 +652,20 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         .not("refresh_token_encrypted", "is", null)
         .maybeSingle(),
     ]);
+
+    await amazonSyncPromise;
+    const dailySalesRes = await fetchAllRows<DailySale>(
+      (from, to) =>
+        supabase
+          .from("inventory_daily_sales")
+          .select(
+            "id, account_id, sku_mapping_id, sale_date, platform, warehouse_id, sold_units, returns_units, collected_units, notes, created_at, source"
+          )
+          .eq("account_id", accountId)
+          .order("sale_date", { ascending: false })
+          .order("id", { ascending: false })
+          .range(from, to),
+    );
 
     if (mappingRes.error) {
       setError(mappingRes.error.message);
@@ -941,8 +930,17 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     }));
     setWarehouses(nextWarehouses);
     const defaultWh = findDefaultWarehouseId(nextWarehouses);
+    const spApiConnected = Boolean(amazonCredRes.data?.account_id);
     setDailyEntryRows((prev) =>
-      prev.map((row) => (row.warehouseId ? row : { ...row, warehouseId: defaultWh }))
+      prev.map((row) => {
+        const isBlank =
+          !row.mappingId && !row.soldUnits && !row.returnsUnits && !row.collectedUnits && !row.notes;
+        return {
+          ...row,
+          warehouseId: row.warehouseId || defaultWh,
+          platform: spApiConnected && isBlank ? "temu" : row.platform,
+        };
+      })
     );
     if (defaultWh) setBulkWarehouseId((prev) => prev || defaultWh);
     setDailySales(
@@ -960,6 +958,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           collected_units: Number(rec.collected_units || 0),
           notes: rec.notes || null,
           created_at: String(rec.created_at || ""),
+          source: rec.source === "sp_api" ? "sp_api" : "manual",
         };
       })
     );
@@ -2338,6 +2337,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           returns_units: Number(row.returnsUnits || 0),
           collected_units: Number(row.collectedUnits || 0),
           notes: row.notes.trim() || null,
+          source: "manual",
         }))
       );
     if (insertError) {
@@ -2346,13 +2346,17 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     }
     setMessage(`${rowsToSave.length} daily sales row${rowsToSave.length > 1 ? "s" : ""} saved.`);
     setDailyEntryRows([
-      createDailyEntryRow({ platform: "amazon", warehouseId: findDefaultWarehouseId(warehouses) }),
+      createDailyEntryRow({
+        platform: amazonSpApiConnected ? "temu" : "amazon",
+        warehouseId: findDefaultWarehouseId(warehouses),
+      }),
     ]);
     await loadAll();
   };
 
   const deleteDailySaleRow = async (id: string) => {
     if (!canEdit) return;
+    if (id.startsWith("api-")) return;
     if (!window.confirm("Delete this daily sales row?")) return;
     const supabase = createClient();
     const { error: deleteError } = await supabase
@@ -2370,6 +2374,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
 
   const beginEditDailySaleRow = (row: DailySale) => {
     if (!canEdit) return;
+    if (row.id.startsWith("api-")) return;
     const m = mappingById.get(row.sku_mapping_id);
     setEditingDailySaleId(row.id);
     setDailySaleDraft({
@@ -2438,6 +2443,45 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     return map;
   }, [mappings]);
 
+  // If SP-API facts have Amazon units that are not yet in inventory_daily_sales
+  // (sync lag / fetch truncation), still show them so warehouse reports are complete.
+  const dailySalesForView = useMemo(() => {
+    const defaultWh = findDefaultWarehouseId(warehouses) || null;
+    const existing = new Set(
+      dailySales
+        .filter((row) => String(row.platform || "").toLowerCase() === "amazon")
+        .map((row) => `${row.sku_mapping_id}|${row.sale_date}`)
+    );
+    const qtyByKey = new Map<string, number>();
+    txFacts.forEach((tx) => {
+      if (tx.platform !== "amazon") return;
+      const key = `${tx.mappingId}|${tx.date}`;
+      qtyByKey.set(key, (qtyByKey.get(key) || 0) + Number(tx.quantity || 0));
+    });
+    const extras: DailySale[] = [];
+    qtyByKey.forEach((quantity, key) => {
+      if (existing.has(key) || quantity <= 0) return;
+      const sep = key.lastIndexOf("|");
+      const mappingId = key.slice(0, sep);
+      const date = key.slice(sep + 1);
+      extras.push({
+        id: `api-${key}`,
+        account_id: accountId,
+        sku_mapping_id: mappingId,
+        sale_date: date,
+        platform: "amazon",
+        warehouse_id: defaultWh,
+        sold_units: Math.round(quantity),
+        returns_units: 0,
+        collected_units: 0,
+        notes: null,
+        created_at: date,
+        source: "sp_api",
+      });
+    });
+    return extras.length === 0 ? dailySales : [...dailySales, ...extras];
+  }, [dailySales, txFacts, warehouses, accountId]);
+
   const getFilteredMappingsForRow = (row: DailyEntryRow) => {
     const q = row.skuSearch.trim().toLowerCase();
     if (!q) return mappings;
@@ -2455,7 +2499,10 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   const addDailyEntryFormRow = () => {
     setDailyEntryRows((prev) => [
       ...prev,
-      createDailyEntryRow({ platform: "amazon", warehouseId: findDefaultWarehouseId(warehouses) }),
+      createDailyEntryRow({
+        platform: amazonSpApiConnected ? "temu" : "amazon",
+        warehouseId: findDefaultWarehouseId(warehouses),
+      }),
     ]);
   };
 
@@ -2483,6 +2530,11 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       setError("Choose a warehouse for the bulk update.");
       return;
     }
+    const persistableIds = selectedDailySaleIds.filter((id) => !id.startsWith("api-"));
+    if (persistableIds.length === 0) {
+      setError("Select saved rows to update. Amazon API rows save on the next refresh.");
+      return;
+    }
     setBulkWarehouseSaving(true);
     setError(null);
     const supabase = createClient();
@@ -2490,14 +2542,14 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       .from("inventory_daily_sales")
       .update({ warehouse_id: bulkWarehouseId })
       .eq("account_id", accountId)
-      .in("id", selectedDailySaleIds);
+      .in("id", persistableIds);
     setBulkWarehouseSaving(false);
     if (updateError) {
       setError(updateError.message);
       return;
     }
     const whName = warehouses.find((w) => w.id === bulkWarehouseId)?.name || "warehouse";
-    setMessage(`Updated warehouse to “${whName}” on ${selectedDailySaleIds.length} row(s).`);
+    setMessage(`Updated warehouse to “${whName}” on ${persistableIds.length} row(s).`);
     setSelectedDailySaleIds([]);
     await loadAll();
   };
@@ -2511,7 +2563,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
 
   const dailyRowsFiltered = useMemo(() => {
     const q = dailyHistorySkuSearch.trim().toLowerCase();
-    return dailySales.filter((row) => {
+    return dailySalesForView.filter((row) => {
+      if (!row.sale_date || row.sale_date < "2020-01-01") return false;
       if (dailyFilters.from && row.sale_date < dailyFilters.from) return false;
       if (dailyFilters.to && row.sale_date > dailyFilters.to) return false;
       if (dailyFilters.platform !== "all" && row.platform !== dailyFilters.platform) return false;
@@ -2525,7 +2578,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       }
       return true;
     });
-  }, [dailySales, dailyFilters, dailyHistorySkuSearch, mappingById]);
+  }, [dailySalesForView, dailyFilters, dailyHistorySkuSearch, mappingById]);
 
   const dailyTotalCount = dailyRowsFiltered.length;
   const dailyTotalPages = Math.max(1, Math.ceil(dailyTotalCount / DAILY_PAGE_SIZE));
@@ -2696,7 +2749,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         notes: mv.notes,
       });
     });
-    dailySales.forEach((ds) => {
+    dailySalesForView.forEach((ds) => {
       const m = mappingById.get(ds.sku_mapping_id);
       const sku = m?.amazonSku || m?.temuSkuId || "—";
       const product = m?.productName || "—";
@@ -2731,12 +2784,17 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         });
       }
     });
-    // Uploaded transaction sales are only folded in when a single SKU is
-    // selected — otherwise the aggregate stream would be enormous and noisy.
+    // Uploaded / SP-API fact sales are only folded in when a single SKU is
+    // selected — and skipped when Daily Sales already has that SKU+date+platform
+    // (Amazon API rows now live there, so showing both would double-count).
     if (ledgerFilters.mappingId !== "all") {
+      const dailyKeys = new Set(
+        dailySalesForView.map((ds) => `${ds.sku_mapping_id}|${ds.sale_date}|${String(ds.platform || "").toLowerCase()}`)
+      );
       txFacts
         .filter((tx) => tx.mappingId === ledgerFilters.mappingId)
         .forEach((tx, idx) => {
+          if (dailyKeys.has(`${tx.mappingId}|${tx.date}|${tx.platform}`)) return;
           const m = mappingById.get(tx.mappingId);
           entries.push({
             id: `tx-${tx.mappingId}-${tx.date}-${tx.platform}-${idx}`,
@@ -2762,7 +2820,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         return true;
       })
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
-  }, [movements, dailySales, txFacts, mappingById, ledgerFilters]);
+  }, [movements, dailySalesForView, txFacts, mappingById, ledgerFilters]);
 
   const ledgerNetMovement = useMemo(
     () => ledgerEntries.filter((e) => e.isMovement).reduce((acc, e) => acc + e.delta, 0),
@@ -4457,14 +4515,21 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           </div>
           {amazonSpApiConnected ? (
             <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
-              <strong>Overview velocity</strong> still uses SP-API Amazon order dates. Use Daily Sales (incl. Amazon) to
-              log <em>which warehouse dispatched</em> — default warehouse is Sportive; change per row or bulk-update below.
+              Amazon units are pulled automatically from SP-API (order date) and default to the Sportive warehouse.
+              Change warehouse per row or bulk-update selected rows. Use the entry form for Temu / TikTok (and Amazon
+              returns). Overview velocity stays API-only and is not affected by warehouse edits here.
             </div>
-          ) : null}
+          ) : (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              Log sold units by date, platform and warehouse. CSV/PDF use the filters below.
+            </div>
+          )}
 
           <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Daily Entry Rows</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                {amazonSpApiConnected ? "Add Temu / TikTok rows" : "Daily Entry Rows"}
+              </p>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -4689,18 +4754,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             </label>
             <label className="text-xs text-slate-600">
               <span className="mb-1 block uppercase tracking-wide text-slate-500">SKU</span>
-              <select
+              <SkuCombobox
                 value={dailyFilters.mappingId}
-                onChange={(e) => setDailyFilters((prev) => ({ ...prev, mappingId: e.target.value }))}
-                className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
-              >
-                <option value="all">All</option>
-                {mappings.map((m) => (
-                  <option key={m.mappingId} value={m.mappingId}>
-                    {(m.amazonSku || m.temuSkuId || "—") + " — " + m.productName}
-                  </option>
-                ))}
-              </select>
+                onChange={(mappingId) => setDailyFilters((prev) => ({ ...prev, mappingId }))}
+                mappings={mappings}
+                mappingById={mappingById}
+                allowAll
+                placeholder="All SKUs"
+                className="w-full"
+              />
             </label>
             <label className="text-xs text-slate-600">
               <span className="mb-1 block uppercase tracking-wide text-slate-500">Search SKU/Product</span>
@@ -4889,7 +4951,14 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                               <option value="tiktok">TikTok</option>
                             </select>
                           ) : (
-                            row.platform
+                            <span className="inline-flex items-center gap-1 capitalize">
+                              {row.platform}
+                              {row.platform === "amazon" && row.source === "sp_api" ? (
+                                <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-sky-800">
+                                  API
+                                </span>
+                              ) : null}
+                            </span>
                           )}
                         </td>
                         <td className="px-2 py-2">
@@ -4981,6 +5050,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                                   Cancel
                                 </button>
                               </div>
+                            ) : row.id.startsWith("api-") ? (
+                              <span className="text-[10px] text-slate-400">API</span>
                             ) : (
                               <div className="flex justify-end gap-1">
                                 <button
@@ -5050,9 +5121,10 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h3 className="text-sm font-semibold text-slate-800">Replenishment</h3>
-              <p className="text-xs text-slate-500">
-                Reorder point = daily velocity × lead time. Suggested order tops you back up to your cover targets.
-              </p>
+            <p className="text-xs text-slate-500">
+              Reorder point = trailing daily velocity × lead time. Suggested order tops you back up to your cover targets.
+              Velocity uses YTD average units / 30; Amazon units come from SP-API order dates, not Daily Sales.
+            </p>
             </div>
             <div className="flex flex-wrap gap-2">
               <input
@@ -5224,7 +5296,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             <h3 className="text-sm font-semibold text-slate-800">Stock Ledger</h3>
             <p className="text-xs text-slate-500">
               One chronological stream of every stock event. Intakes/transfers/adjustments are real stock movements; sales and
-              returns are shown for context. Select a single SKU to fold in uploaded transaction sales and a net movement total.
+              returns from Daily Sales are shown for context. Select a single SKU to also fold in report/SP-API days that are
+              not already logged in Daily Sales.
             </p>
           </div>
 
