@@ -26,6 +26,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadSpApiClient, updateSyncStatus } from "../credentials";
 import { mapFinancialEvents, CSV_HEADER_ORDER, type CsvRow, type MapStats } from "./finance-mapper";
+import { stampPurchaseDatesOnRows } from "./purchase-dates";
 import { buildBridgedCogsLookup } from "@/lib/reports/cogs-lookup";
 import { computeAmazonPnl, deriveTotals } from "@/lib/reports/amazon-pnl";
 import { AMAZON_METHODOLOGY_ID } from "@/lib/reports/methodology";
@@ -474,6 +475,32 @@ export async function syncAmazonFinanceData(input: {
     };
   }
 
+  // Stamp customer PurchaseDate onto Order rows so inventory velocity can use
+  // order date instead of Finance PostedDate (settlement). Failures here are
+  // non-fatal — P&L still works; inventory falls back to settlement date.
+  try {
+    const { client, marketplaceIds } = await loadSpApiClient(accountId);
+    const stamp = await stampPurchaseDatesOnRows({
+      client,
+      marketplaceIds,
+      rows,
+    });
+    if (stamp.stamped > 0) {
+      warnings.push(
+        `Stamped purchase date on ${stamp.stamped}/${stamp.orderRows} Order row(s) (${stamp.uniqueOrders} unique orders) for inventory.`
+      );
+    }
+    if (stamp.missing > 0) {
+      warnings.push(
+        `${stamp.missing} Order row(s) could not be matched to an Orders-API PurchaseDate — inventory will use settlement date for those.`
+      );
+    }
+  } catch (err) {
+    warnings.push(
+      `Purchase-date enrichment skipped: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
   // Bucket rows by calendar month based on PostedDate. Some events (e.g.
   // order-level fee adjustments without a posted date, certain service-fee
   // events) come back with no PostedDate at all; we attribute those to the
@@ -528,6 +555,47 @@ export async function syncAmazonFinanceData(input: {
   }
 
   await updateSyncStatus(accountId, { ok: true });
+
+  // Rebuild inventory velocity cache from order dates (purchase date when
+  // stamped). Manual report uploads already refresh this; SP-API sync must too.
+  try {
+    const { error: refreshError } = await supabase.rpc("refresh_inventory_sales_facts", {
+      p_account_id: accountId,
+    });
+    if (refreshError) {
+      warnings.push(`Inventory sales facts refresh failed: ${refreshError.message}`);
+    } else {
+      // Overlay recent Orders-API purchase-date units (Finance lags settlement).
+      try {
+        const { syncAmazonInventorySalesFromOrders } = await import("./orders-sales");
+        const today = new Date().toISOString().slice(0, 10);
+        const overlayTo = options.to < today ? options.to : today;
+        const overlayFromDate = new Date(`${overlayTo}T00:00:00Z`);
+        overlayFromDate.setUTCDate(overlayFromDate.getUTCDate() - 6);
+        let overlayFrom = overlayFromDate.toISOString().slice(0, 10);
+        if (overlayFrom < options.from) overlayFrom = options.from;
+        if (overlayFrom <= overlayTo) {
+          const ordersResult = await syncAmazonInventorySalesFromOrders({
+            supabase,
+            accountId,
+            from: overlayFrom,
+            to: overlayTo,
+          });
+          warnings.push(
+            `Orders API inventory overlay ${overlayFrom}→${overlayTo}: ${ordersResult.orders} orders, ${ordersResult.factRows} fact rows.`
+          );
+        }
+      } catch (err) {
+        warnings.push(
+          `Orders API inventory overlay skipped: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+  } catch (err) {
+    warnings.push(
+      `Inventory sales facts refresh failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 
   return {
     ok: true,

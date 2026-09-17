@@ -206,6 +206,49 @@ export class SpApiClient {
   }
 
   /**
+   * GET /orders/v0/orders/{orderId}/orderItems
+   * Per-SKU quantities for inventory velocity by PurchaseDate.
+   */
+  async getOrderItems(orderId: string, nextToken?: string): Promise<{
+    payload: {
+      OrderItems: Array<{
+        SellerSKU?: string;
+        QuantityOrdered?: number;
+        QuantityShipped?: number;
+        Title?: string;
+      }>;
+      NextToken?: string;
+      AmazonOrderId?: string;
+    };
+  }> {
+    return this.request(`/orders/v0/orders/${encodeURIComponent(orderId)}/orderItems`, {
+      query: { NextToken: nextToken },
+    });
+  }
+
+  /**
+   * GET /orders/v0/orders?AmazonOrderIds=...
+   * Batch lookup (max 50 IDs) used to stamp PurchaseDate onto Finance Order
+   * rows for inventory velocity (order date ≠ settlement PostedDate).
+   */
+  async getOrdersByIds(params: {
+    marketplaceIds: string[];
+    amazonOrderIds: string[];
+  }): Promise<{
+    payload: {
+      Orders: Array<{ AmazonOrderId: string; PurchaseDate: string; OrderStatus: string }>;
+    };
+  }> {
+    const ids = params.amazonOrderIds.map((id) => id.trim()).filter(Boolean).slice(0, 50);
+    return this.request("/orders/v0/orders", {
+      query: {
+        MarketplaceIds: params.marketplaceIds,
+        AmazonOrderIds: ids,
+      },
+    });
+  }
+
+  /**
    * GET /finances/v0/financialEventGroups
    * Lists settlement-period groups. Use this to discover the IDs of
    * financial-event groups that ended within a date range, then call

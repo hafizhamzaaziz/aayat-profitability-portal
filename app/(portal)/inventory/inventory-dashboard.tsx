@@ -141,13 +141,13 @@ function sanitizeNonNegativeNumber(value: string): string {
   return cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, "");
 }
 
-function createDailyEntryRow(): DailyEntryRow {
+function createDailyEntryRow(defaultPlatform: "amazon" | "temu" | "tiktok" = "temu"): DailyEntryRow {
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     skuSearch: "",
     mappingId: "",
     saleDate: todayIsoUtc(),
-    platform: "amazon",
+    platform: defaultPlatform,
     warehouseId: "",
     soldUnits: "",
     returnsUnits: "",
@@ -496,6 +496,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   const [dailySales, setDailySales] = useState<DailySale[]>([]);
   const [defaults, setDefaults] = useState<InventoryDefaults>(DEFAULTS);
   const [accountVatRate, setAccountVatRate] = useState(20);
+  /** When true, Overview Amazon units come from SP-API (order date); Daily Sales Amazon entry is blocked. */
+  const [amazonSpApiConnected, setAmazonSpApiConnected] = useState(false);
 
   const [stockDate, setStockDate] = useState(todayIsoUtc());
   const [stockDraft, setStockDraft] = useState<Record<string, { amazonUnits: number; warehouseUnits: number }>>({});
@@ -569,7 +571,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     warehouseId: "all",
     mappingId: "all",
   });
-  const [dailyEntryRows, setDailyEntryRows] = useState<DailyEntryRow[]>([createDailyEntryRow()]);
+  const [dailyEntryRows, setDailyEntryRows] = useState<DailyEntryRow[]>([createDailyEntryRow("temu")]);
   const [openEntrySkuDropdownId, setOpenEntrySkuDropdownId] = useState<string | null>(null);
   const [editingDailySaleId, setEditingDailySaleId] = useState<string | null>(null);
   const [dailySaleDraft, setDailySaleDraft] = useState<DailySaleEditDraft | null>(null);
@@ -595,7 +597,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     setError(null);
     const supabase = createClient();
 
-    const [mappingRes, defaultsRes, salesFactsRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, dailySalesRes, accountRes, skuDescRes] = await Promise.all([
+    const [mappingRes, defaultsRes, salesFactsRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, dailySalesRes, accountRes, skuDescRes, amazonCredRes] = await Promise.all([
       supabase
         .from("sku_mappings")
         .select("id, amazon_sku, temu_sku_id, lead_time_days, sku_catalog:sku_catalog_id(product_name)")
@@ -657,6 +659,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             .order("sku", { ascending: true })
             .range(from, to),
       ),
+      supabase
+        .from("account_amazon_credentials")
+        .select("account_id")
+        .eq("account_id", accountId)
+        .eq("provider", "sp-api")
+        .not("refresh_token_encrypted", "is", null)
+        .maybeSingle(),
     ]);
 
     if (mappingRes.error) {
@@ -941,6 +950,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       })
     );
     setAccountVatRate(Number((accountRes.data as { vat_rate?: number } | null)?.vat_rate ?? 20));
+    setAmazonSpApiConnected(Boolean(amazonCredRes.data?.account_id));
 
     void loadSavedPlans();
 
@@ -2300,6 +2310,12 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       setError("Some rows are incomplete. Fill SKU, date and platform or remove the row.");
       return;
     }
+    if (amazonSpApiConnected && rowsToSave.some((row) => row.platform === "amazon")) {
+      setError(
+        "Amazon unit sales come from SP-API (order date) into Overview. Use Daily Sales only for Temu / TikTok — or disconnect SP-API if you must enter Amazon manually."
+      );
+      return;
+    }
     const supabase = createClient();
     const { error: insertError } = await supabase
       .from("inventory_daily_sales")
@@ -2321,7 +2337,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       return;
     }
     setMessage(`${rowsToSave.length} daily sales row${rowsToSave.length > 1 ? "s" : ""} saved.`);
-    setDailyEntryRows([createDailyEntryRow()]);
+    setDailyEntryRows([createDailyEntryRow("temu")]);
     await loadAll();
   };
 
@@ -2381,6 +2397,12 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       setError("Please select a SKU for this row.");
       return;
     }
+    if (amazonSpApiConnected && dailySaleDraft.platform === "amazon") {
+      setError(
+        "Amazon unit sales come from SP-API. Switch this row to Temu/TikTok, or delete it — do not keep Amazon manual sales for velocity."
+      );
+      return;
+    }
     const supabase = createClient();
     const { error: updateError } = await supabase
       .from("inventory_daily_sales")
@@ -2427,7 +2449,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
   };
 
   const addDailyEntryFormRow = () => {
-    setDailyEntryRows((prev) => [...prev, createDailyEntryRow()]);
+    setDailyEntryRows((prev) => [...prev, createDailyEntryRow("temu")]);
   };
 
   const removeDailyEntryFormRow = (rowId: string) => {
@@ -2855,6 +2877,12 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
 
       {activeTab === "overview" ? (
         <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+          {amazonSpApiConnected ? (
+            <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+              <strong>Amazon sales source:</strong> SP-API Order rows by <em>customer purchase date</em>
+              (not settlement posted date, not Daily Sales manual entry). Temu stays manual / report upload until an API is available.
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-slate-800">Overview & Velocity</h3>
             <div className="flex flex-wrap gap-2">
@@ -4376,6 +4404,12 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               </button>
             </div>
           </div>
+          {amazonSpApiConnected ? (
+            <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+              Amazon unit sales for Overview &amp; velocity come from <strong>SP-API</strong> (customer order date), not this form.
+              Enter Temu / TikTok here only. Existing Amazon manual rows stay in history but are not used for velocity.
+            </div>
+          ) : null}
 
           <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -4472,7 +4506,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     className="rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
                     disabled={!canEdit}
                   >
-                    <option value="amazon">Amazon</option>
+                    {!amazonSpApiConnected ? <option value="amazon">Amazon</option> : null}
                     <option value="temu">Temu</option>
                     <option value="tiktok">TikTok</option>
                   </select>
@@ -4720,13 +4754,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                         <td className="px-2 py-2 capitalize">
                           {isEditingRow ? (
                             <select
-                              value={dailySaleDraft?.platform || "amazon"}
+                              value={dailySaleDraft?.platform || "temu"}
                               onChange={(e) =>
                                 setDailySaleDraft((prev) => (prev ? { ...prev, platform: e.target.value as DailySaleEditDraft["platform"] } : prev))
                               }
                               className="rounded border border-slate-300 px-2 py-1"
                             >
-                              <option value="amazon">Amazon</option>
+                              {!amazonSpApiConnected ? <option value="amazon">Amazon</option> : null}
                               <option value="temu">Temu</option>
                               <option value="tiktok">TikTok</option>
                             </select>
