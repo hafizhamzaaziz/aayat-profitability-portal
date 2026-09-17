@@ -12,6 +12,15 @@ import {
   type PackProfile,
   type SkuRef,
 } from "@/lib/inventory/engine";
+import {
+  buildUnifiedDailySales,
+  mapSalesFactsToTxFacts,
+  normalizeSkuToken,
+  sumReportedSoldUnits,
+  type TxFact,
+  type UnifiedDailySale,
+} from "@/lib/inventory/sales-facts";
+import { fetchAllRows } from "@/lib/supabase/fetch-all-rows";
 import { addDays, formatUkDate, todayIsoUtc } from "@/lib/utils/date";
 import { resolveDescriptiveProductName } from "@/lib/utils/product-name";
 
@@ -61,7 +70,6 @@ type SortColumn =
   | "potential_sales"
   | "potential_profit";
 type SortDirection = "asc" | "desc";
-type TxFact = { mappingId: string; date: string; platform: "amazon" | "temu"; quantity: number };
 type Warehouse = { id: string; name: string };
 
 type InventoryMovement = {
@@ -285,47 +293,6 @@ const DEFAULTS: InventoryDefaults = {
   storageCostPerPallet: 0,
   storageCostPeriod: "month",
 };
-
-function monthStartFromDateIso(input: string) {
-  return `${input.slice(0, 7)}-01`;
-}
-
-function normalizeSkuToken(input: unknown) {
-  const raw = String(input ?? "")
-    .replace(/\u00a0/g, " ")
-    .trim()
-    .toUpperCase();
-  if (!raw) return "";
-  if (/^\d+\.0+$/.test(raw)) return raw.replace(/\.0+$/, "");
-  return raw;
-}
-
-// PostgREST caps every response at the project's "Max rows" setting (1000 by
-// default) regardless of the requested `.range()`. Tables like
-// `inventory_sales_facts_cache` hold tens of thousands of rows per account, so
-// a single fetch silently returns an arbitrary slice and the dashboard badly
-// undercounts. This pages through the full result set so aggregates are exact.
-// `pageSize` must stay <= the server cap; 1000 matches the Supabase default.
-async function fetchAllRows<T>(
-  makeQuery: (
-    from: number,
-    to: number,
-  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
-  pageSize = 1000,
-): Promise<{ data: T[]; error: { message: string } | null }> {
-  const all: T[] = [];
-  let from = 0;
-  // Guard against an unexpected infinite loop (e.g. backend never shrinks page).
-  for (let guard = 0; guard < 5000; guard++) {
-    const { data, error } = await makeQuery(from, from + pageSize - 1);
-    if (error) return { data: all, error };
-    const batch = (data || []) as T[];
-    all.push(...batch);
-    if (batch.length < pageSize) break;
-    from += pageSize;
-  }
-  return { data: all, error: null };
-}
 
 function daysBetweenInclusive(startIso: string, endIso: string) {
   const start = new Date(`${startIso}T00:00:00Z`);
@@ -767,61 +734,20 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       storageCostPeriod: defaultsRow?.storage_cost_period || DEFAULTS.storageCostPeriod,
     });
 
-      const mappingByAmazonSku = new Map(
-      nextMappings
-        .filter((m) => m.amazonSku)
-        .map((m) => [String(m.amazonSku).trim().toUpperCase(), m.mappingId])
-    );
-    const mappingByTemuSku = new Map(
-      nextMappings
-        .filter((m) => m.temuSkuId)
-        .map((m) => [String(m.temuSkuId).trim().toUpperCase(), m.mappingId])
-    );
-    const monthlyAccumulator = new Map<string, MonthlySalesRow>();
-    const factRows: TxFact[] = [];
-    (salesFactsRes.data || []).forEach((row) => {
-      const rec = row as unknown as {
+    const { txFacts: factRows, monthlySales } = mapSalesFactsToTxFacts({
+      facts: (salesFactsRes.data || []) as Array<{
         platform: string | null;
         sku: string | null;
         sale_date: string;
         qty: number | string | null;
-      };
-      const platform = String(rec.platform || "").trim().toLowerCase();
-      const sku = normalizeSkuToken(rec.sku || "");
-      if (!sku || !rec.sale_date) return;
-      const quantity = Number(rec.qty || 0);
-      if (!Number.isFinite(quantity) || quantity <= 0) return;
-
-      const mappingId =
-        platform.startsWith("amazon")
-          ? mappingByAmazonSku.get(sku)
-          : platform.startsWith("temu")
-            ? mappingByTemuSku.get(sku)
-            : mappingByAmazonSku.get(sku) || mappingByTemuSku.get(sku);
-      if (!mappingId) return;
-      const txDate = String(rec.sale_date || "").slice(0, 10);
-      if (txDate) {
-        factRows.push({
-          mappingId,
-          date: txDate,
-          platform: platform.startsWith("temu") ? "temu" : "amazon",
-          quantity,
-        });
-      }
-
-      const monthStart = monthStartFromDateIso(rec.sale_date);
-      const key = `${mappingId}|${monthStart}`;
-      const existing = monthlyAccumulator.get(key) || {
-        mappingId,
-        monthStart,
-        amazonUnits: 0,
-        temuUnits: 0,
-      };
-      if (platform.startsWith("temu")) existing.temuUnits += quantity;
-      else existing.amazonUnits += quantity;
-      monthlyAccumulator.set(key, existing);
+      }>,
+      mappings: nextMappings.map((m) => ({
+        mappingId: m.mappingId,
+        amazonSku: m.amazonSku,
+        temuSkuId: m.temuSkuId,
+      })),
     });
-    setSalesRows(Array.from(monthlyAccumulator.values()));
+    setSalesRows(monthlySales);
     setTxFacts(factRows);
 
     setLevels(
@@ -2342,8 +2268,9 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     await loadAll();
   };
 
-  const beginEditDailySaleRow = (row: DailySale) => {
+  const beginEditDailySaleRow = (row: DailySale | UnifiedDailySale) => {
     if (!canEdit) return;
+    if ("editable" in row && !row.editable) return;
     const m = mappingById.get(row.sku_mapping_id);
     setEditingDailySaleId(row.id);
     setDailySaleDraft({
@@ -2437,13 +2364,21 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
   };
 
+  const unifiedDailySales = useMemo(
+    () => buildUnifiedDailySales({ txFacts, manual: dailySales }),
+    [txFacts, dailySales],
+  );
+
   const dailyRowsFiltered = useMemo(() => {
     const q = dailyHistorySkuSearch.trim().toLowerCase();
-    return dailySales.filter((row) => {
+    return unifiedDailySales.filter((row) => {
       if (dailyFilters.from && row.sale_date < dailyFilters.from) return false;
       if (dailyFilters.to && row.sale_date > dailyFilters.to) return false;
       if (dailyFilters.platform !== "all" && row.platform !== dailyFilters.platform) return false;
-      if (dailyFilters.warehouseId !== "all" && (row.warehouse_id || "") !== dailyFilters.warehouseId) return false;
+      if (dailyFilters.warehouseId !== "all") {
+        if (row.source === "reports") return false;
+        if ((row.warehouse_id || "") !== dailyFilters.warehouseId) return false;
+      }
       if (dailyFilters.mappingId !== "all" && row.sku_mapping_id !== dailyFilters.mappingId) return false;
       if (q) {
         const m = mappingById.get(row.sku_mapping_id);
@@ -2453,7 +2388,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       }
       return true;
     });
-  }, [dailySales, dailyFilters, dailyHistorySkuSearch, mappingById]);
+  }, [unifiedDailySales, dailyFilters, dailyHistorySkuSearch, mappingById]);
 
   const dailyTotalCount = dailyRowsFiltered.length;
   const dailyTotalPages = Math.max(1, Math.ceil(dailyTotalCount / DAILY_PAGE_SIZE));
@@ -2484,7 +2419,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
 
   const dailyTotals = useMemo(() => {
     const vatRate = Number(accountVatRate || 0) / 100;
-    const excl = dailyRowsFiltered.reduce((acc, row) => {
+    const reported = dailyRowsFiltered.filter((row) => row.source === "reports");
+    const excl = reported.reduce((acc, row) => {
       const unitCost = cogsByMapping.get(row.sku_mapping_id) || 0;
       const units = Number(row.sold_units || 0);
       return acc + units * unitCost;
@@ -2493,7 +2429,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     return {
       excl: Number(excl.toFixed(2)),
       incl: Number(incl.toFixed(2)),
-      sold: dailyRowsFiltered.reduce((acc, row) => acc + Number(row.sold_units || 0), 0),
+      sold: sumReportedSoldUnits(dailyRowsFiltered),
       returns: dailyRowsFiltered.reduce((acc, row) => acc + Number(row.returns_units || 0), 0),
       collected: dailyRowsFiltered.reduce((acc, row) => acc + Number(row.collected_units || 0), 0),
     };
@@ -2628,21 +2564,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       const m = mappingById.get(ds.sku_mapping_id);
       const sku = m?.amazonSku || m?.temuSkuId || "—";
       const product = m?.productName || "—";
-      if (Number(ds.sold_units || 0) > 0) {
-        entries.push({
-          id: `ds-sale-${ds.id}`,
-          date: ds.sale_date,
-          mappingId: ds.sku_mapping_id,
-          product,
-          sku,
-          event: "Sale",
-          eventKey: "sale",
-          source: `Daily sales (${ds.platform})`,
-          delta: -Number(ds.sold_units || 0),
-          isMovement: false,
-          notes: ds.notes,
-        });
-      }
       if (Number(ds.returns_units || 0) > 0) {
         entries.push({
           id: `ds-ret-${ds.id}`,
@@ -2727,6 +2648,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       "Product",
       "Platform",
       "Warehouse",
+      "Source",
       "Units Sold",
       "Returns",
       "Collected",
@@ -2750,6 +2672,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           m?.productName || "",
           row.platform,
           wh?.name || "",
+          row.source === "reports" ? "Reports" : "Manual",
           sold,
           row.returns_units,
           row.collected_units,
@@ -4358,7 +4281,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       {activeTab === "daily-sales" ? (
         <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold text-slate-800">Daily Sales</h3>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-800">Daily Sales</h3>
+              <p className="mt-0.5 text-xs text-slate-500">
+                Units sold come from Amazon/Temu reports — the same source as Overview. Manual rows still record
+                returns, collected units, warehouse notes, and platforms the reports cache does not cover.
+              </p>
+            </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -4630,6 +4559,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           <div className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-5">
             <p className="text-sm text-slate-700">
               Units sold: <span className="font-semibold">{dailyTotals.sold}</span>
+              <span className="ml-1 text-xs text-slate-500">(reports, matches Overview)</span>
             </p>
             <p className="text-sm text-slate-700">
               Returns: <span className="font-semibold">{dailyTotals.returns}</span>
@@ -4653,6 +4583,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   <th className="px-2 py-2">SKU</th>
                   <th className="px-2 py-2">Product</th>
                   <th className="px-2 py-2">Platform</th>
+                  <th className="px-2 py-2">Source</th>
                   <th className="px-2 py-2">Warehouse</th>
                   <th className="px-2 py-2">Units Sold</th>
                   <th className="px-2 py-2">Returns</th>
@@ -4666,13 +4597,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               <tbody>
                 {dailyRowsFiltered.length === 0 ? (
                   <tr>
-                    <td className="px-2 py-3 text-slate-500" colSpan={canEdit ? 12 : 11}>
+                    <td className="px-2 py-3 text-slate-500" colSpan={canEdit ? 13 : 12}>
                       No daily sales data in selected filters.
                     </td>
                   </tr>
                 ) : (
                   dailyRowsPaged.map((row) => {
-                    const isEditingRow = canEdit && editingDailySaleId === row.id && Boolean(dailySaleDraft);
+                    const isEditingRow = canEdit && row.editable && editingDailySaleId === row.id && Boolean(dailySaleDraft);
                     const draftMapping = isEditingRow && dailySaleDraft ? mappingById.get(dailySaleDraft.mappingId) : undefined;
                     const m = draftMapping || mappingById.get(row.sku_mapping_id);
                     const wh = warehouses.find((w) => w.id === row.warehouse_id);
@@ -4733,6 +4664,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                           ) : (
                             row.platform
                           )}
+                        </td>
+                        <td className="px-2 py-2">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                              row.source === "reports" ? "bg-emerald-50 text-emerald-800" : "bg-slate-100 text-slate-600"
+                            }`}
+                          >
+                            {row.source === "reports" ? "Reports" : "Manual"}
+                          </span>
                         </td>
                         <td className="px-2 py-2">
                           {isEditingRow ? (
@@ -4824,7 +4764,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                                   Cancel
                                 </button>
                               </div>
-                            ) : (
+                            ) : row.editable ? (
                               <div className="flex justify-end gap-1">
                                 <button
                                   type="button"
@@ -4841,6 +4781,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                                   Delete
                                 </button>
                               </div>
+                            ) : (
+                              <span className="text-[10px] uppercase tracking-wide text-slate-400">Auto</span>
                             )}
                           </td>
                         ) : null}

@@ -25,6 +25,7 @@ import {
 } from "@/lib/reports/expense-ledger";
 import type { AdReport, SkuLine } from "@/lib/reports/types";
 import PerSkuTable, { type PerSkuRow } from "@/components/reports/per-sku-table";
+import { refreshInventorySalesFacts } from "@/lib/inventory/refresh-sales-facts";
 
 type Platform = "amazon" | "temu" | "tiktok";
 
@@ -1698,11 +1699,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       // Refresh the inventory sales-facts cache so the Inventory dashboard
       // (Overview & Velocity, monthly accumulator) reflects the just-uploaded
       // transactions on its very next load — without re-scanning JSONB.
-      try {
-        await supabase.rpc("refresh_inventory_sales_facts", { p_account_id: account.id });
-      } catch {
-        /* non-fatal: cache will refresh on next report save */
-      }
+      await refreshInventorySalesFacts(supabase, account.id);
 
       const adsSavedThisRun = (platform === "amazon" && Boolean(adReport)) || (platform === "temu" && Boolean(temuAdReport));
       setMessage(

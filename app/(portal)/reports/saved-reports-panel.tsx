@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { addDays, formatUkDate } from "@/lib/utils/date";
 import { pushClientNotification } from "@/lib/notifications/client";
+import { refreshInventorySalesFacts } from "@/lib/inventory/refresh-sales-facts";
 import PerSkuTable, { type PerSkuRow } from "@/components/reports/per-sku-table";
 import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
 import { computePerSku } from "@/lib/reports/per-sku";
@@ -1485,11 +1486,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
       if (deleteError) throw deleteError;
       // Keep the inventory sales-facts cache in sync so removed transactions
       // disappear from Overview & Velocity immediately.
-      try {
-        await supabase.rpc("refresh_inventory_sales_facts", { p_account_id: accountIdForRefresh });
-      } catch {
-        /* non-fatal */
-      }
+      await refreshInventorySalesFacts(supabase, accountIdForRefresh);
       setMessage("Report deleted.");
       await loadReports(pageOffset);
     } catch (err) {
