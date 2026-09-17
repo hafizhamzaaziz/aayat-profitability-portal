@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { syncAmazonFinanceData } from "@/lib/amazon/ingest/orchestrate";
 import { expandToCoveredMonths, nextFinanceWindow } from "@/lib/amazon/ingest/sync-window";
 import { refreshInventorySalesFacts } from "@/lib/inventory/refresh-sales-facts";
+import { backfillAmazonOrderDates } from "@/lib/amazon/ingest/order-dates";
 import { SpApiError } from "@/lib/amazon/spapi";
 import { todayIsoUtc } from "@/lib/utils/date";
 
@@ -150,6 +151,10 @@ export async function POST(request: NextRequest) {
  * Walks one calendar month per account per tick (oldest cursor first) so a
  * 300s budget can catch accounts up from a stuck May/June watermark without
  * timing out. Authenticated via CRON_SECRET, same as ads collect / keepalive.
+ *
+ * Before the finance walk, stamps Orders API PurchaseDate onto current-month
+ * Amazon Order txs. That is how Daily Sales matches Seller Central "Units
+ * ordered" even while the finance cursor is still catching up (Rexo Sep).
  */
 export async function GET(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
@@ -190,6 +195,25 @@ export async function GET(request: NextRequest) {
     totalRows?: number;
     error?: string;
   }> = [];
+
+  const orderDateBackfills: Array<Record<string, unknown>> = [];
+  for (const account of accounts) {
+    try {
+      const backfill = await backfillAmazonOrderDates({
+        supabase: admin,
+        accountId: account.accountId,
+        from: currentMonthStart,
+        to: today,
+      });
+      orderDateBackfills.push(backfill);
+    } catch (err) {
+      orderDateBackfills.push({
+        ok: false,
+        accountId: account.accountId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   const resolved: Array<{
     accountId: string;
@@ -246,10 +270,11 @@ export async function GET(request: NextRequest) {
   }
 
   return Response.json({
-    ok: results.length === 0 || results.some((r) => r.ok),
+    ok: results.length === 0 || results.some((r) => r.ok) || orderDateBackfills.some((r) => r.ok === true),
     today,
     checked: accounts.length,
     processed,
+    orderDateBackfills,
     results,
   });
 }

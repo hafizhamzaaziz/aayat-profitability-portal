@@ -23,6 +23,7 @@
  * dedupe idempotently when the same date window is synced multiple times.
  */
 
+import { extractPurchaseDateFromEvent, PURCHASE_DATE_RAW_KEY } from "./order-date-utils";
 import type {
   AdjustmentEvent,
   AdjustmentItem,
@@ -42,6 +43,8 @@ import type {
 export type CsvRow = Record<string, string | number | null> & {
   __amazon_event_id: string;
   __posted_date: string | null;
+  /** Seller Central order/purchase calendar day when known. */
+  __order_date: string | null;
   __sku: string | null;
   __quantity: number | null;
 };
@@ -183,7 +186,7 @@ function sumPromotionAmounts(list: PromotionComponent[] | undefined | null): num
   return sum;
 }
 
-function rowTotal(row: Omit<CsvRow, "__amazon_event_id" | "__posted_date" | "__sku" | "__quantity" | typeof COL.total>): number {
+function rowTotal(row: Omit<CsvRow, "__amazon_event_id" | "__posted_date" | "__order_date" | "__sku" | "__quantity" | typeof COL.total>): number {
   // Sum every numeric value other than 'quantity' / 'total' itself.
   const skip = new Set<string>([COL.quantity, COL.total]);
   let sum = 0;
@@ -284,6 +287,7 @@ function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[]
   const orderId = decodeHtmlEntities(ev.AmazonOrderId);
   const marketplace = decodeHtmlEntities(ev.MarketplaceName);
   const posted = postedDateOnly(ev.PostedDate);
+  const orderDate = kind === "Order" ? extractPurchaseDateFromEvent(ev) : null;
   const eventIdBase = `${kind}:${orderId}:${ev.PostedDate || ""}`;
   const out: CsvRow[] = [];
 
@@ -303,6 +307,7 @@ function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[]
     row[COL.type] = kind;
     row[COL.orderId] = orderId;
     row[COL.sku] = sku;
+    if (orderDate) row[PURCHASE_DATE_RAW_KEY] = orderDate;
     row[COL.quantity] = Number(item.QuantityShipped || 0);
     row[COL.marketplace] = marketplace;
     row[COL.productSales] = tally.productSalesExvat;
@@ -322,6 +327,7 @@ function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[]
       ...row,
       __amazon_event_id: `${eventIdBase}:item:${item.OrderItemId || i}`,
       __posted_date: posted,
+      __order_date: orderDate,
       __sku: sku || null,
       __quantity: Number(item.QuantityShipped || 0) || null,
     });
@@ -342,6 +348,7 @@ function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[]
     row[COL.date] = ev.PostedDate || "";
     row[COL.type] = kind;
     row[COL.orderId] = orderId;
+    if (orderDate) row[PURCHASE_DATE_RAW_KEY] = orderDate;
     row[COL.marketplace] = marketplace;
     row[COL.productSales] = sumCharges(orderCharges, (t) => t === "Principal");
     row[COL.productSalesTax] = sumCharges(orderCharges, (t) => t === "Tax");
@@ -357,6 +364,7 @@ function mapShipmentEvent(ev: ShipmentEvent, kind: "Order" | "Refund"): CsvRow[]
       ...row,
       __amazon_event_id: `${eventIdBase}:order-level`,
       __posted_date: posted,
+      __order_date: orderDate,
       __sku: null,
       __quantity: null,
     });
@@ -420,6 +428,7 @@ function mapServiceFeeEvent(ev: ServiceFeeEvent): CsvRow | null {
     ...row,
     __amazon_event_id: `ServiceFee:${ev.PostedDate || ""}:${ev.FeeReason || ""}:${sku}:${orderIdDecoded}:${totalFees.toFixed(4)}`,
     __posted_date: postedDateOnly(ev.PostedDate),
+    __order_date: null,
     __sku: sku || null,
     __quantity: null,
   };
@@ -486,6 +495,7 @@ function mapAdjustmentEvent(ev: AdjustmentEvent): CsvRow[] {
       ...row,
       __amazon_event_id: `${eventIdBase}:summary`,
       __posted_date: postedDateOnly(ev.PostedDate),
+    __order_date: null,
       __sku: null,
       __quantity: null,
     });
@@ -510,6 +520,7 @@ function mapAdjustmentEvent(ev: AdjustmentEvent): CsvRow[] {
       ...row,
       __amazon_event_id: `${eventIdBase}:item:${sku || i}:${itemAmount.toFixed(4)}`,
       __posted_date: postedDateOnly(ev.PostedDate),
+    __order_date: null,
       __sku: sku || null,
       __quantity: Number.isFinite(qty) && qty !== 0 ? qty : null,
     });
@@ -544,6 +555,7 @@ function mapProductAdsPaymentEvent(ev: ProductAdsPaymentEvent): CsvRow | null {
     ...row,
     __amazon_event_id: `ProductAds:${ev.PostedDate || ""}:${ev.InvoiceId || ""}:${(baseValue + taxValue).toFixed(4)}`,
     __posted_date: postedDateOnly(ev.PostedDate),
+    __order_date: null,
     __sku: null,
     __quantity: null,
   };
@@ -570,6 +582,7 @@ function mapRetrochargeEvent(ev: RetrochargeEvent): CsvRow | null {
     ...row,
     __amazon_event_id: `Retrocharge:${orderIdDecoded}:${ev.PostedDate || ""}:${isRefund ? "rev" : "fwd"}`,
     __posted_date: postedDateOnly(ev.PostedDate),
+    __order_date: null,
     __sku: null,
     __quantity: null,
   };

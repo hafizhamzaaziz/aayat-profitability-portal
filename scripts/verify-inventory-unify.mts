@@ -8,6 +8,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildUnifiedDailySales, displaySoldUnits, mapSalesFactsToTxFacts, sumReportedSoldUnits, sumTxFactsByPlatform } from "../lib/inventory/sales-facts.ts";
 import { clipReplaceRange, expandToCoveredMonths, nextFinanceWindow } from "../lib/amazon/ingest/sync-window.ts";
+import { mapFinancialEvents } from "../lib/amazon/ingest/finance-mapper.ts";
+import {
+  applyOrderDateMap,
+  calendarDateFromIso,
+  postedDateFromRaw,
+  purchaseDateFromRaw,
+  transactionDateForSalesFact,
+} from "../lib/amazon/ingest/order-date-utils.ts";
 
 let failed = 0;
 
@@ -228,6 +236,75 @@ assert(
   rpcSql.includes("like 'temu%' and lower(coalesce(rt.raw_row->>'Transaction type', '')) = 'order payment'"),
 );
 assert("TikTok is not a facts-cache platform in the RPC", !rpcSql.toLowerCase().includes("tiktok"));
+assert(
+  "ingest stamps transaction_date from order date helper",
+  orchestrate.includes("transactionDateForSalesFact") && orchestrate.includes("stampFinanceRowsWithOrderDates"),
+);
+assert(
+  "daily cron backfills current-month Amazon order dates",
+  syncRoute.includes("backfillAmazonOrderDates"),
+);
+
+// Posted date ≠ order date: cache sale_date (transaction_date) must use order date.
+const postedIso = "2026-09-16T14:46:28Z";
+const purchaseIso = "2026-09-14T09:11:00Z";
+const { rows: mappedOrderRows } = mapFinancialEvents({
+  ShipmentEventList: [
+    {
+      AmazonOrderId: "026-4086312-1872331",
+      MarketplaceName: "Amazon.co.uk",
+      PostedDate: postedIso,
+      PurchaseDate: purchaseIso,
+      ShipmentItemList: [{ SellerSKU: "4feet_topper", QuantityShipped: 1, OrderItemId: "oi-1" }],
+    },
+  ],
+});
+const mappedOrder = mappedOrderRows[0];
+assert("mapper keeps date/time as PostedDate", mappedOrder?.["date/time"] === postedIso);
+assert("mapper __posted_date is posted calendar day", mappedOrder?.__posted_date === "2026-09-16");
+assert("mapper __order_date is purchase calendar day when payload has PurchaseDate", mappedOrder?.__order_date === "2026-09-14");
+assert("mapper raw purchase date is order date", mappedOrder?.["purchase date"] === "2026-09-14");
+assert(
+  "sales-fact transaction_date uses order date, not posted",
+  transactionDateForSalesFact(mappedOrder) === "2026-09-14",
+);
+
+const { rows: postedOnlyRows } = mapFinancialEvents({
+  ShipmentEventList: [
+    {
+      AmazonOrderId: "203-9240286-8225157",
+      MarketplaceName: "Amazon.co.uk",
+      PostedDate: postedIso,
+      ShipmentItemList: [{ SellerSKU: "4feet_topper", QuantityShipped: 2, OrderItemId: "oi-2" }],
+    },
+  ],
+});
+const postedOnly = postedOnlyRows[0];
+assert("ShipmentEvent without PurchaseDate has no __order_date", postedOnly?.__order_date == null);
+assert(
+  "Orders API map stamps purchase date while leaving posted date/time",
+  (() => {
+    applyOrderDateMap(postedOnlyRows, new Map([["203-9240286-8225157", "2026-09-12"]]));
+    return (
+      postedOnly["date/time"] === postedIso &&
+      postedOnly.__posted_date === "2026-09-16" &&
+      postedOnly.__order_date === "2026-09-12" &&
+      postedOnly["purchase date"] === "2026-09-12" &&
+      transactionDateForSalesFact(postedOnly) === "2026-09-12" &&
+      postedDateFromRaw(postedOnly) === "2026-09-16" &&
+      purchaseDateFromRaw(postedOnly) === "2026-09-12"
+    );
+  })(),
+);
+
+assert(
+  "UK marketplace converts late-UTC purchase instant to next local day",
+  calendarDateFromIso("2026-09-16T23:30:00Z", "Amazon.co.uk") === "2026-09-17",
+);
+assert(
+  "posted date stays UTC even for UK marketplace timestamps",
+  calendarDateFromIso("2026-09-16T23:30:00Z", null) === "2026-09-16",
+);
 
 if (failed > 0) {
   console.error(`\n${failed} assertion(s) failed`);

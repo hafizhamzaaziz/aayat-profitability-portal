@@ -8,7 +8,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * ingested month so a later timeout cannot leave new txs out of the cache).
  *
  * Platform filters (do not silently widen):
- * - Amazon: raw_row.type = 'order'
+ * - Amazon: raw_row.type = 'order'. sale_date is report_transactions.transaction_date,
+ *   which SP-API ingest sets from Orders API PurchaseDate (Seller Central
+ *   "Units ordered"), not Finances PostedDate. raw_row["date/time"] stays posted.
  * - Temu: raw_row "Transaction type" = 'order payment' (stricter than temu-pnl,
  *   which also accepts 'order'). TikTok is not in this cache; Overview has no
  *   TikTok sold column. Manual Daily Sales may still record TikTok returns/notes.

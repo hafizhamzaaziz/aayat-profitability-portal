@@ -176,20 +176,26 @@ export class SpApiClient {
 
   /**
    * GET /orders/v0/orders
-   * Lists orders within a time window. We use it for a "data smoke test"
-   * (counting orders in the last 30 days proves we can pull real data).
-   * Rate: 0.0167 req/sec, burst 20.
+   * Lists orders within a time window, or looks up up to 50 AmazonOrderIds.
+   * PurchaseDate is the Seller Central "Units ordered" calendar instant.
+   * Rate: documented 0.0167 req/sec, burst 20 — we honour 429 backoff.
    */
   async listOrders(params: {
     marketplaceIds: string[];
     createdAfter?: string;
     createdBefore?: string;
     lastUpdatedAfter?: string;
+    amazonOrderIds?: string[];
     maxResultsPerPage?: number;
     nextToken?: string;
   }): Promise<{
     payload: {
-      Orders: Array<{ AmazonOrderId: string; PurchaseDate: string; OrderStatus: string }>;
+      Orders: Array<{
+        AmazonOrderId: string;
+        PurchaseDate: string;
+        OrderStatus: string;
+        MarketplaceId?: string;
+      }>;
       NextToken?: string;
     };
   }> {
@@ -199,10 +205,26 @@ export class SpApiClient {
         CreatedAfter: params.createdAfter,
         CreatedBefore: params.createdBefore,
         LastUpdatedAfter: params.lastUpdatedAfter,
+        AmazonOrderIds: params.amazonOrderIds,
         MaxResultsPerPage: params.maxResultsPerPage,
         NextToken: params.nextToken,
       },
     });
+  }
+
+  /**
+   * GET /orders/v0/orders/{orderId}
+   * Fallback when a batch AmazonOrderIds lookup misses a single order.
+   */
+  async getOrder(orderId: string): Promise<{
+    payload: {
+      AmazonOrderId: string;
+      PurchaseDate: string;
+      OrderStatus?: string;
+      MarketplaceId?: string;
+    };
+  }> {
+    return this.request(`/orders/v0/orders/${encodeURIComponent(orderId)}`);
   }
 
   /**

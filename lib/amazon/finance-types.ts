@@ -55,6 +55,8 @@ export type ShipmentEvent = {
   SellerOrderId?: string;
   MarketplaceName?: string;
   PostedDate?: string;
+  /** Not in the Finances v0 spec; read if a payload ever includes it. */
+  PurchaseDate?: string;
   ShipmentItemList?: ShipmentItem[];
   ShipmentItemAdjustmentList?: ShipmentItem[];
   OrderChargeList?: ChargeComponent[];

@@ -4,17 +4,20 @@
  * Flow:
  *   1. Pull every FinancialEvent posted between `from` and `to` via SP-API.
  *   2. Map each event into Amazon-CSV-shaped row objects (`finance-mapper`).
- *   3. Group rows by the calendar month their PostedDate falls in.
- *   4. For each month with data:
+ *   3. For Order lines, resolve PurchaseDate via the event payload or Orders
+ *      API (getOrders AmazonOrderIds / getOrder). Keep raw_row["date/time"]
+ *      as PostedDate for P&L; set transaction_date to the order date so
+ *      refresh_inventory_sales_facts matches Seller Central "Units ordered".
+ *   4. Group rows by the calendar month their PostedDate falls in.
+ *   5. For each month with data:
  *        a. UPSERT a `reports` row tagged source='sp_api'
- *        b. Replace its transactions (idempotent re-sync)
+ *        b. Replace its transactions (idempotent; window clipped by posted date)
  *        c. Run the same pure-function P&L pipeline the manual upload uses
  *           (computeAmazonPnl → deriveTotals → computePerSku)
  *        d. Persist summary totals + breakdown + per-SKU rows
- *        e. refreshInventorySalesFacts(account, monthStart, monthEnd) so
- *           Overview/Daily Sales pick up the new txs even if a later month
- *           or the route's full rebuild times out
- *   5. POST/GET /api/amazon/sync call refreshInventorySalesFacts(account)
+ *        e. refreshInventorySalesFacts covering posted month AND any order
+ *           dates that landed outside it
+ *   6. POST/GET /api/amazon/sync call refreshInventorySalesFacts(account)
  *      again after syncAmazonFinanceData returns (full-account rebuild)
  *
  *   Coexistence: manual + sp_api reports for the same (account, period) live
@@ -32,6 +35,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadSpApiClient, updateSyncStatus } from "../credentials";
 import { mapFinancialEvents, CSV_HEADER_ORDER, type CsvRow, type MapStats } from "./finance-mapper";
 import { clipReplaceRange } from "./sync-window";
+import {
+  factsRefreshRangeForRows,
+  postedDateFromRaw,
+  transactionDateForSalesFact,
+} from "./order-date-utils";
+import { stampFinanceRowsWithOrderDates } from "./order-dates";
+import { fetchAllRows } from "@/lib/supabase/fetch-all-rows";
 import { buildBridgedCogsLookup } from "@/lib/reports/cogs-lookup";
 import { computeAmazonPnl, deriveTotals } from "@/lib/reports/amazon-pnl";
 import { AMAZON_METHODOLOGY_ID } from "@/lib/reports/methodology";
@@ -120,8 +130,8 @@ async function sleep(ms: number) {
 async function pullAllEvents(
   accountId: string,
   opts: SyncOptions
-): Promise<{ rows: CsvRow[]; stats: MapStats; totalApiCalls: number }> {
-  const { client } = await loadSpApiClient(accountId);
+): Promise<{ rows: CsvRow[]; stats: MapStats; totalApiCalls: number; orderDatesMissing: number; orderDatesLookedUp: number }> {
+  const { client, marketplaceIds } = await loadSpApiClient(accountId);
   const allRows: CsvRow[] = [];
   const aggStats: MapStats = {
     shipment: 0,
@@ -173,7 +183,15 @@ async function pullAllEvents(
     } while (nextToken);
   }
 
-  return { rows: allRows, stats: aggStats, totalApiCalls };
+  const stamped = await stampFinanceRowsWithOrderDates({ client, marketplaceIds, rows: allRows });
+
+  return {
+    rows: stamped.rows,
+    stats: aggStats,
+    totalApiCalls,
+    orderDatesLookedUp: stamped.lookedUp,
+    orderDatesMissing: stamped.missing,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -371,20 +389,46 @@ async function ingestMonth(input: {
     windowFrom,
     windowTo,
   });
-  let clearQuery = supabase.from("report_transactions").delete().eq("report_id", reportId);
-  if (!replaceEntireReport) {
-    clearQuery = clearQuery.gte("transaction_date", replaceFrom).lte("transaction_date", replaceTo);
+  // Clip by finance PostedDate (raw_row date/time), not transaction_date.
+  // Order lines now store PurchaseDate on transaction_date, which can fall
+  // outside this posted window — deleting by transaction_date would leave
+  // stale posted-window rows and duplicate them on the next sync.
+  if (replaceEntireReport) {
+    const { error: clearTxError } = await supabase.from("report_transactions").delete().eq("report_id", reportId);
+    if (clearTxError) throw clearTxError;
+  } else {
+    const existing = await fetchAllRows<{
+      id: string;
+      transaction_date: string | null;
+      raw_row: Record<string, unknown>;
+    }>((fromIdx, toIdx) =>
+      supabase
+        .from("report_transactions")
+        .select("id, transaction_date, raw_row")
+        .eq("report_id", reportId)
+        .range(fromIdx, toIdx),
+    );
+    if (existing.error) throw existing.error;
+    const ids = existing.data
+      .filter((tx) => {
+        const posted = postedDateFromRaw(tx.raw_row) || String(tx.transaction_date || "").slice(0, 10);
+        return posted >= replaceFrom && posted <= replaceTo;
+      })
+      .map((tx) => tx.id);
+    for (let i = 0; i < ids.length; i += 200) {
+      const chunk = ids.slice(i, i + 200);
+      const { error: clearTxError } = await supabase.from("report_transactions").delete().in("id", chunk);
+      if (clearTxError) throw clearTxError;
+    }
   }
-  const { error: clearTxError } = await clearQuery;
-  if (clearTxError) throw clearTxError;
 
   const txPayload = rows.map((r) => {
-    const { __amazon_event_id, __posted_date, __sku, __quantity, ...rawRow } = r;
+    const { __amazon_event_id, __posted_date: _postedDate, __order_date: _orderDate, __sku, __quantity, ...rawRow } = r;
     return {
       report_id: reportId,
       account_id: accountId,
       platform: "amazon" as const,
-      transaction_date: __posted_date,
+      transaction_date: transactionDateForSalesFact(r),
       sku: __sku,
       quantity: __quantity,
       raw_row: rawRow,
@@ -402,10 +446,7 @@ async function ingestMonth(input: {
   // Same function that writes report_transactions must refresh the facts
   // cache. POST/GET /api/amazon/sync also do a full-account refresh after
   // syncAmazonFinanceData returns.
-  const monthRefresh = await refreshInventorySalesFacts(supabase, accountId, {
-    from: bucketStart,
-    to: bucketEnd,
-  });
+  const monthRefresh = await refreshInventorySalesFacts(supabase, accountId, factsRefreshRangeForRows(rows, bucketStart, bucketEnd));
   if (!monthRefresh.ok) {
     console.warn(
       `[amazon-ingest] sales-facts cache refresh failed for ${accountId} ${bucketStart}–${bucketEnd}: ${monthRefresh.error}`,
@@ -481,10 +522,14 @@ export async function syncAmazonFinanceData(input: {
 
   let rows: CsvRow[] = [];
   let mapStats: MapStats;
+  let orderDatesLookedUp = 0;
+  let orderDatesMissing = 0;
   try {
     const pulled = await pullAllEvents(accountId, options);
     rows = pulled.rows;
     mapStats = pulled.stats;
+    orderDatesLookedUp = pulled.orderDatesLookedUp;
+    orderDatesMissing = pulled.orderDatesMissing;
   } catch (err) {
     await updateSyncStatus(accountId, {
       ok: false,
@@ -530,6 +575,16 @@ export async function syncAmazonFinanceData(input: {
   if (undated > 0) {
     warnings.push(
       `${undated} event(s) had no PostedDate from Amazon — attributed to ${fallbackDate} (end of requested window).`
+    );
+  }
+  if (orderDatesLookedUp > 0) {
+    warnings.push(
+      `Resolved PurchaseDate via Orders API for ${orderDatesLookedUp} Amazon order(s); inventory sold qty uses order date, not settlement posted date.`,
+    );
+  }
+  if (orderDatesMissing > 0) {
+    warnings.push(
+      `${orderDatesMissing} Amazon Order line(s) had no PurchaseDate (payload or Orders API) — those units stay on posted date.`,
     );
   }
 
