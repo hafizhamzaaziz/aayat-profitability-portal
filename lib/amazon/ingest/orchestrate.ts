@@ -11,6 +11,11 @@
  *        c. Run the same pure-function P&L pipeline the manual upload uses
  *           (computeAmazonPnl → deriveTotals → computePerSku)
  *        d. Persist summary totals + breakdown + per-SKU rows
+ *        e. refreshInventorySalesFacts(account, monthStart, monthEnd) so
+ *           Overview/Daily Sales pick up the new txs even if a later month
+ *           or the route's full rebuild times out
+ *   5. POST/GET /api/amazon/sync call refreshInventorySalesFacts(account)
+ *      again after syncAmazonFinanceData returns (full-account rebuild)
  *
  *   Coexistence: manual + sp_api reports for the same (account, period) live
  *   side-by-side thanks to the relaxed unique constraint
@@ -26,6 +31,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadSpApiClient, updateSyncStatus } from "../credentials";
 import { mapFinancialEvents, CSV_HEADER_ORDER, type CsvRow, type MapStats } from "./finance-mapper";
+import { clipReplaceRange } from "./sync-window";
 import { buildBridgedCogsLookup } from "@/lib/reports/cogs-lookup";
 import { computeAmazonPnl, deriveTotals } from "@/lib/reports/amazon-pnl";
 import { AMAZON_METHODOLOGY_ID } from "@/lib/reports/methodology";
@@ -36,6 +42,7 @@ import {
   type ExpenseLedgerRow,
 } from "@/lib/reports/expense-ledger";
 import type { SkuLine } from "@/lib/reports/types";
+import { refreshInventorySalesFacts } from "@/lib/inventory/refresh-sales-facts";
 
 const TX_INSERT_CHUNK = 400;
 
@@ -53,6 +60,7 @@ export type SyncReportResult = {
   netProfit: number;
   outputVat: number;
   inputVat: number;
+  factsRefreshError?: string | null;
 };
 
 export type SyncResult = {
@@ -192,10 +200,12 @@ async function ingestMonth(input: {
   cogsVatReclaimPct: number;
   bucketStart: string;
   bucketEnd: string;
+  windowFrom: string;
+  windowTo: string;
   rows: CsvRow[];
   cogsLookup: Awaited<ReturnType<typeof buildBridgedCogsLookup>>;
 }): Promise<SyncReportResult> {
-  const { supabase, accountId, vatRatePct, cogsVatReclaimPct, bucketStart, bucketEnd, rows, cogsLookup } = input;
+  const { supabase, accountId, vatRatePct, cogsVatReclaimPct, bucketStart, bucketEnd, windowFrom, windowTo, rows, cogsLookup } = input;
 
   // ---- Run the P&L pipeline against the freshly-mapped rows --------------
   const aoa = buildAoaForMonth(rows);
@@ -350,14 +360,22 @@ async function ingestMonth(input: {
   if (upsertResult.error) throw upsertResult.error;
   const reportId = upsertResult.data.id as string;
 
-  // ---- Replace transactions (idempotent re-sync) -------------------------
-  // Wipe everything for this report, then insert fresh. Keeping the old rows
-  // and merging on amazon_event_id would be marginally faster but adds a lot
-  // of edge cases — clean replace is much easier to reason about.
-  const { error: clearTxError } = await supabase
-    .from("report_transactions")
-    .delete()
-    .eq("report_id", reportId);
+  // ---- Replace transactions (idempotent, window-scoped) ------------------
+  // A short pull must not wipe the rest of the month: that is how Rexo's
+  // June 2026 sp_api report ended up with 0 txs after a 1–4 June window.
+  // Full-month (or month-start → today) windows still replace the report.
+  // Manual txs live on a different report_id and are never touched.
+  const { replaceFrom, replaceTo, replaceEntireReport } = clipReplaceRange({
+    bucketStart,
+    bucketEnd,
+    windowFrom,
+    windowTo,
+  });
+  let clearQuery = supabase.from("report_transactions").delete().eq("report_id", reportId);
+  if (!replaceEntireReport) {
+    clearQuery = clearQuery.gte("transaction_date", replaceFrom).lte("transaction_date", replaceTo);
+  }
+  const { error: clearTxError } = await clearQuery;
   if (clearTxError) throw clearTxError;
 
   const txPayload = rows.map((r) => {
@@ -379,6 +397,19 @@ async function ingestMonth(input: {
     const chunk = txPayload.slice(i, i + TX_INSERT_CHUNK);
     const { error: txError } = await supabase.from("report_transactions").insert(chunk);
     if (txError) throw txError;
+  }
+
+  // Same function that writes report_transactions must refresh the facts
+  // cache. POST/GET /api/amazon/sync also do a full-account refresh after
+  // syncAmazonFinanceData returns.
+  const monthRefresh = await refreshInventorySalesFacts(supabase, accountId, {
+    from: bucketStart,
+    to: bucketEnd,
+  });
+  if (!monthRefresh.ok) {
+    console.warn(
+      `[amazon-ingest] sales-facts cache refresh failed for ${accountId} ${bucketStart}–${bucketEnd}: ${monthRefresh.error}`,
+    );
   }
 
   // ---- Replace per-SKU breakdown ------------------------------------------
@@ -430,6 +461,7 @@ async function ingestMonth(input: {
     netProfit: Number(netProfit.toFixed(2)),
     outputVat: Number(outputVat.toFixed(2)),
     inputVat: Number(inputVat.toFixed(2)),
+    factsRefreshError: monthRefresh.ok ? null : monthRefresh.error,
   };
 }
 
@@ -462,7 +494,7 @@ export async function syncAmazonFinanceData(input: {
   }
 
   if (rows.length === 0) {
-    await updateSyncStatus(accountId, { ok: true });
+    await updateSyncStatus(accountId, { ok: true, financeSyncedThrough: options.to });
     return {
       ok: true,
       range: { from: options.from, to: options.to },
@@ -512,10 +544,17 @@ export async function syncAmazonFinanceData(input: {
       cogsVatReclaimPct,
       bucketStart: bucket.start,
       bucketEnd: bucket.end,
+      windowFrom: options.from,
+      windowTo: options.to,
       rows: bucket.rows,
       cogsLookup,
     });
     reportResults.push(result);
+    if (result.factsRefreshError) {
+      warnings.push(
+        `Sales-facts cache refresh failed for ${bucket.start}–${bucket.end}: ${result.factsRefreshError}`,
+      );
+    }
   }
 
   if (mapStats.unknownLists.length > 0) {
@@ -527,7 +566,7 @@ export async function syncAmazonFinanceData(input: {
     );
   }
 
-  await updateSyncStatus(accountId, { ok: true });
+  await updateSyncStatus(accountId, { ok: true, financeSyncedThrough: options.to });
 
   return {
     ok: true,

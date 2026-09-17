@@ -1,5 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { fetchAllRows } from "@/lib/supabase/fetch-all-rows";
+import { buildUnifiedDailySales, displaySoldUnits, mapSalesFactsToTxFacts } from "@/lib/inventory/sales-facts";
 import { renderInventoryDailySalesPdfBuffer } from "@/lib/pdf/inventory-daily-sales-document";
 
 export const runtime = "nodejs";
@@ -29,69 +31,68 @@ export async function GET(request: NextRequest) {
       .maybeSingle();
     if (accountError || !account) return new Response("Account not found.", { status: 404 });
 
-    let salesQueryWithSoldUnits = supabase
+    let manualQuery = supabase
       .from("inventory_daily_sales")
-      .select("sku_mapping_id, sale_date, platform, warehouse_id, sold_units, returns_units, collected_units, notes")
+      .select("id, sku_mapping_id, sale_date, platform, warehouse_id, sold_units, returns_units, collected_units, notes, created_at")
       .eq("account_id", accountId)
       .gte("sale_date", from)
       .lte("sale_date", to)
       .order("sale_date", { ascending: true });
-    if (platform !== "all") salesQueryWithSoldUnits = salesQueryWithSoldUnits.eq("platform", platform);
-    if (warehouseId !== "all") salesQueryWithSoldUnits = salesQueryWithSoldUnits.eq("warehouse_id", warehouseId);
-    if (mappingId !== "all") salesQueryWithSoldUnits = salesQueryWithSoldUnits.eq("sku_mapping_id", mappingId);
+    if (platform !== "all") manualQuery = manualQuery.eq("platform", platform);
+    if (warehouseId !== "all") manualQuery = manualQuery.eq("warehouse_id", warehouseId);
+    if (mappingId !== "all") manualQuery = manualQuery.eq("sku_mapping_id", mappingId);
 
-    const [{ data: rowsWithSoldUnits, error: rowsError }, { data: cogsRows }, { data: warehouseRows }, { data: mappingRows }] = await Promise.all([
-      salesQueryWithSoldUnits,
+    const [
+      { data: accountFacts, error: factsError },
+      { data: cogsRows },
+      { data: warehouseRows },
+      { data: mappingRows },
+      manualRes,
+    ] = await Promise.all([
+      fetchAllRows<{ platform: string | null; sku: string | null; sale_date: string; qty: number | string | null }>(
+        (rangeFrom, rangeTo) =>
+          supabase
+            .from("inventory_sales_facts_cache")
+            .select("platform, sku, sale_date, qty")
+            .eq("account_id", accountId)
+            .gte("sale_date", from)
+            .lte("sale_date", to)
+            .order("sale_date", { ascending: true })
+            .order("sku", { ascending: true })
+            .range(rangeFrom, rangeTo),
+      ),
       supabase.from("cogs").select("sku, unit_cost, sku_mapping_id").eq("account_id", accountId),
       supabase.from("inventory_warehouses").select("id, name").eq("account_id", accountId),
       supabase
         .from("sku_mappings")
         .select("id, amazon_sku, temu_sku_id, sku_catalog:sku_catalog_id(product_name)")
         .eq("account_id", accountId),
+      manualQuery,
     ]);
 
-    let rows = rowsWithSoldUnits;
-    if (rowsError) {
-      const message = String(rowsError.message || "").toLowerCase();
-      const soldUnitsMissing = message.includes("sold_units") && (message.includes("column") || message.includes("does not exist"));
-      if (!soldUnitsMissing) return new Response(rowsError.message, { status: 500 });
+    if (factsError) return new Response(factsError.message, { status: 500 });
+    if (manualRes.error) return new Response(manualRes.error.message, { status: 500 });
 
-      let fallback = supabase
-        .from("inventory_daily_sales")
-        .select("sku_mapping_id, sale_date, platform, warehouse_id, returns_units, collected_units, notes")
-        .eq("account_id", accountId)
-        .gte("sale_date", from)
-        .lte("sale_date", to)
-        .order("sale_date", { ascending: true });
-      if (platform !== "all") fallback = fallback.eq("platform", platform);
-      if (warehouseId !== "all") fallback = fallback.eq("warehouse_id", warehouseId);
-      if (mappingId !== "all") fallback = fallback.eq("sku_mapping_id", mappingId);
-      const fallbackRes = await fallback;
-      if (fallbackRes.error) return new Response(fallbackRes.error.message, { status: 500 });
-      rows = (fallbackRes.data || []).map((row) => ({ ...row, sold_units: 0 }));
-    }
+    const mappings = (mappingRows || []).map((m) => ({
+      mappingId: String((m as { id: string }).id),
+      amazonSku: String((m as { amazon_sku?: string | null }).amazon_sku || "") || null,
+      temuSkuId: String((m as { temu_sku_id?: string | null }).temu_sku_id || "") || null,
+      productName: String(
+        ((m as { sku_catalog?: { product_name?: string } | null }).sku_catalog as { product_name?: string } | null)
+          ?.product_name || "Unnamed product",
+      ),
+    }));
 
-    const warehouseById = new Map((warehouseRows || []).map((w) => [String((w as { id: string }).id), String((w as { name: string }).name || "")]));
-    const cogsByMapping = new Map(
-      (cogsRows || []).map((c) => [String((c as { sku_mapping_id?: string | null }).sku_mapping_id || ""), Number((c as { unit_cost: number }).unit_cost || 0)])
-    );
-    const mappingById = new Map(
-      (mappingRows || []).map((m) => [
-        String((m as { id: string }).id),
-        {
-          amazonSku: String((m as { amazon_sku?: string | null }).amazon_sku || ""),
-          temuSkuId: String((m as { temu_sku_id?: string | null }).temu_sku_id || ""),
-          productName: String(
-            ((m as { sku_catalog?: { product_name?: string } | null }).sku_catalog as { product_name?: string } | null)?.product_name || "Unnamed product"
-          ),
-        },
-      ])
-    );
+    const { txFacts } = mapSalesFactsToTxFacts({
+      facts: accountFacts || [],
+      mappings,
+    });
 
-    const vatRate = Number(account.vat_rate || 20) / 100;
-    const normalizedRows = (rows || [])
-      .map((row) => {
-        const rec = row as unknown as {
+    const unified = buildUnifiedDailySales({
+      txFacts,
+      manual: (manualRes.data || []).map((row) => {
+        const rec = row as {
+          id: string;
           sku_mapping_id: string;
           sale_date: string;
           platform: string;
@@ -100,26 +101,64 @@ export async function GET(request: NextRequest) {
           returns_units: number;
           collected_units: number;
           notes: string | null;
+          created_at: string;
         };
-        const mapping = mappingById.get(String(rec.sku_mapping_id || ""));
+        return {
+          id: String(rec.id),
+          sku_mapping_id: String(rec.sku_mapping_id),
+          sale_date: String(rec.sale_date),
+          platform: String(rec.platform || "amazon"),
+          warehouse_id: rec.warehouse_id ? String(rec.warehouse_id) : null,
+          sold_units: Number(rec.sold_units || 0),
+          returns_units: Number(rec.returns_units || 0),
+          collected_units: Number(rec.collected_units || 0),
+          notes: rec.notes || null,
+          created_at: String(rec.created_at || ""),
+        };
+      }),
+    }).filter((row) => {
+      if (platform !== "all" && row.platform !== platform) return false;
+      if (warehouseId !== "all") {
+        if (row.source === "reports") return false;
+        if ((row.warehouse_id || "") !== warehouseId) return false;
+      }
+      if (mappingId !== "all" && row.sku_mapping_id !== mappingId) return false;
+      return true;
+    });
+
+    const warehouseById = new Map(
+      (warehouseRows || []).map((w) => [String((w as { id: string }).id), String((w as { name: string }).name || "")]),
+    );
+    const cogsByMapping = new Map(
+      (cogsRows || []).map((c) => [
+        String((c as { sku_mapping_id?: string | null }).sku_mapping_id || ""),
+        Number((c as { unit_cost: number }).unit_cost || 0),
+      ]),
+    );
+    const mappingById = new Map(mappings.map((m) => [m.mappingId, m]));
+
+    const vatRate = Number(account.vat_rate || 20) / 100;
+    const normalizedRows = unified
+      .map((row) => {
+        const mapping = mappingById.get(row.sku_mapping_id);
         const sku = mapping?.amazonSku || mapping?.temuSkuId || "-";
         const productName = mapping?.productName || "Unnamed product";
-        const cost = cogsByMapping.get(String(rec.sku_mapping_id || "")) || 0;
-        const soldUnits = Number(rec.sold_units || 0);
+        const cost = cogsByMapping.get(row.sku_mapping_id) || 0;
+        const soldUnits = displaySoldUnits(row);
         const excl = Number((soldUnits * cost).toFixed(2));
         const incl = Number((excl * (1 + vatRate)).toFixed(2));
         return {
-          sale_date: rec.sale_date,
+          sale_date: row.sale_date,
           product_name: productName,
           sku,
-          platform: rec.platform,
-          warehouse: rec.warehouse_id ? warehouseById.get(String(rec.warehouse_id)) || "-" : "-",
+          platform: row.platform,
+          warehouse: row.warehouse_id ? warehouseById.get(String(row.warehouse_id)) || "-" : "-",
           sold_units: soldUnits,
-          returns_units: Number(rec.returns_units || 0),
-          collected_units: Number(rec.collected_units || 0),
+          returns_units: Number(row.returns_units || 0),
+          collected_units: Number(row.collected_units || 0),
           excl_vat: excl,
           incl_vat: incl,
-          notes: rec.notes || "",
+          notes: row.notes || "",
         };
       })
       .filter((row) => {

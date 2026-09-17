@@ -12,6 +12,17 @@ import {
   type PackProfile,
   type SkuRef,
 } from "@/lib/inventory/engine";
+import {
+  buildUnifiedDailySales,
+  displaySoldUnits,
+  mapSalesFactsToTxFacts,
+  normalizeSkuToken,
+  sumReportedSoldUnits,
+  sumTxFactsByPlatform,
+  type TxFact,
+  type UnifiedDailySale,
+} from "@/lib/inventory/sales-facts";
+import { fetchAllRows } from "@/lib/supabase/fetch-all-rows";
 import { addDays, formatUkDate, todayIsoUtc } from "@/lib/utils/date";
 import { resolveDescriptiveProductName } from "@/lib/utils/product-name";
 
@@ -61,7 +72,6 @@ type SortColumn =
   | "potential_sales"
   | "potential_profit";
 type SortDirection = "asc" | "desc";
-type TxFact = { mappingId: string; date: string; platform: "amazon" | "temu"; quantity: number };
 type Warehouse = { id: string; name: string };
 
 type InventoryMovement = {
@@ -285,47 +295,6 @@ const DEFAULTS: InventoryDefaults = {
   storageCostPerPallet: 0,
   storageCostPeriod: "month",
 };
-
-function monthStartFromDateIso(input: string) {
-  return `${input.slice(0, 7)}-01`;
-}
-
-function normalizeSkuToken(input: unknown) {
-  const raw = String(input ?? "")
-    .replace(/\u00a0/g, " ")
-    .trim()
-    .toUpperCase();
-  if (!raw) return "";
-  if (/^\d+\.0+$/.test(raw)) return raw.replace(/\.0+$/, "");
-  return raw;
-}
-
-// PostgREST caps every response at the project's "Max rows" setting (1000 by
-// default) regardless of the requested `.range()`. Tables like
-// `inventory_sales_facts_cache` hold tens of thousands of rows per account, so
-// a single fetch silently returns an arbitrary slice and the dashboard badly
-// undercounts. This pages through the full result set so aggregates are exact.
-// `pageSize` must stay <= the server cap; 1000 matches the Supabase default.
-async function fetchAllRows<T>(
-  makeQuery: (
-    from: number,
-    to: number,
-  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
-  pageSize = 1000,
-): Promise<{ data: T[]; error: { message: string } | null }> {
-  const all: T[] = [];
-  let from = 0;
-  // Guard against an unexpected infinite loop (e.g. backend never shrinks page).
-  for (let guard = 0; guard < 5000; guard++) {
-    const { data, error } = await makeQuery(from, from + pageSize - 1);
-    if (error) return { data: all, error };
-    const batch = (data || []) as T[];
-    all.push(...batch);
-    if (batch.length < pageSize) break;
-    from += pageSize;
-  }
-  return { data: all, error: null };
-}
 
 function daysBetweenInclusive(startIso: string, endIso: string) {
   const start = new Date(`${startIso}T00:00:00Z`);
@@ -767,61 +736,20 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       storageCostPeriod: defaultsRow?.storage_cost_period || DEFAULTS.storageCostPeriod,
     });
 
-      const mappingByAmazonSku = new Map(
-      nextMappings
-        .filter((m) => m.amazonSku)
-        .map((m) => [String(m.amazonSku).trim().toUpperCase(), m.mappingId])
-    );
-    const mappingByTemuSku = new Map(
-      nextMappings
-        .filter((m) => m.temuSkuId)
-        .map((m) => [String(m.temuSkuId).trim().toUpperCase(), m.mappingId])
-    );
-    const monthlyAccumulator = new Map<string, MonthlySalesRow>();
-    const factRows: TxFact[] = [];
-    (salesFactsRes.data || []).forEach((row) => {
-      const rec = row as unknown as {
+    const { txFacts: factRows, monthlySales } = mapSalesFactsToTxFacts({
+      facts: (salesFactsRes.data || []) as Array<{
         platform: string | null;
         sku: string | null;
         sale_date: string;
         qty: number | string | null;
-      };
-      const platform = String(rec.platform || "").trim().toLowerCase();
-      const sku = normalizeSkuToken(rec.sku || "");
-      if (!sku || !rec.sale_date) return;
-      const quantity = Number(rec.qty || 0);
-      if (!Number.isFinite(quantity) || quantity <= 0) return;
-
-      const mappingId =
-        platform.startsWith("amazon")
-          ? mappingByAmazonSku.get(sku)
-          : platform.startsWith("temu")
-            ? mappingByTemuSku.get(sku)
-            : mappingByAmazonSku.get(sku) || mappingByTemuSku.get(sku);
-      if (!mappingId) return;
-      const txDate = String(rec.sale_date || "").slice(0, 10);
-      if (txDate) {
-        factRows.push({
-          mappingId,
-          date: txDate,
-          platform: platform.startsWith("temu") ? "temu" : "amazon",
-          quantity,
-        });
-      }
-
-      const monthStart = monthStartFromDateIso(rec.sale_date);
-      const key = `${mappingId}|${monthStart}`;
-      const existing = monthlyAccumulator.get(key) || {
-        mappingId,
-        monthStart,
-        amazonUnits: 0,
-        temuUnits: 0,
-      };
-      if (platform.startsWith("temu")) existing.temuUnits += quantity;
-      else existing.amazonUnits += quantity;
-      monthlyAccumulator.set(key, existing);
+      }>,
+      mappings: nextMappings.map((m) => ({
+        mappingId: m.mappingId,
+        amazonSku: m.amazonSku,
+        temuSkuId: m.temuSkuId,
+      })),
     });
-    setSalesRows(Array.from(monthlyAccumulator.values()));
+    setSalesRows(monthlySales);
     setTxFacts(factRows);
 
     setLevels(
@@ -979,8 +907,9 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               sessionStorage.setItem(cacheKey, String(Date.now()));
               if (created > 0 || repaired > 0) {
                 setMessage(
-                  `${created + repaired} SKU mapping${created + repaired === 1 ? "" : "s"} auto-updated in the background. Refresh to see the latest numbers.`
+                  `${created + repaired} SKU mapping${created + repaired === 1 ? "" : "s"} auto-updated. Reloading sold units.`
                 );
+                await loadAll();
               }
             } catch {
               // Background repair is best-effort; surface nothing if it fails.
@@ -1179,14 +1108,20 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     return map;
   }, [txFacts, nowIso]);
 
-  // Column totals for the Overview & Velocity table, computed across the whole
-  // filtered set (not just the current page) so the figures reflect the
-  // selected period as a whole.
+  // Sold units for the selected dates come from facts cache (all mapped SKUs),
+  // not from whichever Overview rows are currently visible. Search still
+  // filters the table; Amazon/Temu/Combined stay aligned with Daily Sales.
+  const periodSoldTotals = useMemo(
+    () => sumTxFactsByPlatform(txFacts, { from: periodStartDate, to: periodEndDate }),
+    [txFacts, periodStartDate, periodEndDate],
+  );
+
+  // Stock/YTD totals stay on the filtered SKU set (not just the current page).
   const overviewTotals = useMemo(() => {
     const totals = {
-      selectedAmazon: 0,
-      selectedTemu: 0,
-      selectedCombined: 0,
+      selectedAmazon: periodSoldTotals.amazon,
+      selectedTemu: periodSoldTotals.temu,
+      selectedCombined: periodSoldTotals.combined,
       ytd: 0,
       avgPerMonth: 0,
       amazonStock: 0,
@@ -1196,11 +1131,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       potentialProfit: 0,
     };
     visibleRows.forEach((row) => {
-      const selAmz = periodUnitsByMapping.get(row.mappingId)?.amazon || 0;
-      const selTemu = periodUnitsByMapping.get(row.mappingId)?.temu || 0;
-      totals.selectedAmazon += selAmz;
-      totals.selectedTemu += selTemu;
-      totals.selectedCombined += selAmz + selTemu;
       totals.ytd += ytdComparisonByMapping.get(row.mappingId)?.current || 0;
       totals.avgPerMonth += Number(row.yearAvgPerMonth || 0);
       totals.amazonStock += Number(row.amazonUnitsOnHand || 0);
@@ -1210,7 +1140,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       totals.potentialProfit += Number(row.potentialProfitValue || 0);
     });
     return totals;
-  }, [visibleRows, periodUnitsByMapping, ytdComparisonByMapping]);
+  }, [visibleRows, periodSoldTotals, ytdComparisonByMapping]);
 
   useEffect(() => {
     setOverviewOffset(0);
@@ -2342,8 +2272,9 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     await loadAll();
   };
 
-  const beginEditDailySaleRow = (row: DailySale) => {
+  const beginEditDailySaleRow = (row: DailySale | UnifiedDailySale) => {
     if (!canEdit) return;
+    if ("editable" in row && !row.editable) return;
     const m = mappingById.get(row.sku_mapping_id);
     setEditingDailySaleId(row.id);
     setDailySaleDraft({
@@ -2366,11 +2297,10 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
 
   const saveEditDailySaleRow = async (rowId: string) => {
     if (!canEdit || !dailySaleDraft) return;
-    const soldUnits = Number(dailySaleDraft.soldUnits || 0);
     const returnsUnits = Number(dailySaleDraft.returnsUnits || 0);
     const collectedUnits = Number(dailySaleDraft.collectedUnits || 0);
-    if (soldUnits < 0 || returnsUnits < 0 || collectedUnits < 0) {
-      setError("Units sold, returns and collected must be non-negative.");
+    if (returnsUnits < 0 || collectedUnits < 0) {
+      setError("Returns and collected must be non-negative.");
       return;
     }
     if (!dailySaleDraft.saleDate) {
@@ -2389,7 +2319,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         sku_mapping_id: dailySaleDraft.mappingId,
         platform: dailySaleDraft.platform,
         warehouse_id: dailySaleDraft.warehouseId || null,
-        sold_units: soldUnits,
         returns_units: returnsUnits,
         collected_units: collectedUnits,
         notes: dailySaleDraft.notes.trim() || null,
@@ -2437,13 +2366,21 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
   };
 
+  const unifiedDailySales = useMemo(
+    () => buildUnifiedDailySales({ txFacts, manual: dailySales }),
+    [txFacts, dailySales],
+  );
+
   const dailyRowsFiltered = useMemo(() => {
     const q = dailyHistorySkuSearch.trim().toLowerCase();
-    return dailySales.filter((row) => {
+    return unifiedDailySales.filter((row) => {
       if (dailyFilters.from && row.sale_date < dailyFilters.from) return false;
       if (dailyFilters.to && row.sale_date > dailyFilters.to) return false;
       if (dailyFilters.platform !== "all" && row.platform !== dailyFilters.platform) return false;
-      if (dailyFilters.warehouseId !== "all" && (row.warehouse_id || "") !== dailyFilters.warehouseId) return false;
+      if (dailyFilters.warehouseId !== "all") {
+        if (row.source === "reports") return false;
+        if ((row.warehouse_id || "") !== dailyFilters.warehouseId) return false;
+      }
       if (dailyFilters.mappingId !== "all" && row.sku_mapping_id !== dailyFilters.mappingId) return false;
       if (q) {
         const m = mappingById.get(row.sku_mapping_id);
@@ -2453,7 +2390,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       }
       return true;
     });
-  }, [dailySales, dailyFilters, dailyHistorySkuSearch, mappingById]);
+  }, [unifiedDailySales, dailyFilters, dailyHistorySkuSearch, mappingById]);
 
   const dailyTotalCount = dailyRowsFiltered.length;
   const dailyTotalPages = Math.max(1, Math.ceil(dailyTotalCount / DAILY_PAGE_SIZE));
@@ -2484,16 +2421,17 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
 
   const dailyTotals = useMemo(() => {
     const vatRate = Number(accountVatRate || 0) / 100;
-    const excl = dailyRowsFiltered.reduce((acc, row) => {
+    const reported = dailyRowsFiltered.filter((row) => row.source === "reports");
+    const excl = reported.reduce((acc, row) => {
       const unitCost = cogsByMapping.get(row.sku_mapping_id) || 0;
-      const units = Number(row.sold_units || 0);
+      const units = displaySoldUnits(row);
       return acc + units * unitCost;
     }, 0);
     const incl = excl * (1 + vatRate);
     return {
       excl: Number(excl.toFixed(2)),
       incl: Number(incl.toFixed(2)),
-      sold: dailyRowsFiltered.reduce((acc, row) => acc + Number(row.sold_units || 0), 0),
+      sold: sumReportedSoldUnits(dailyRowsFiltered),
       returns: dailyRowsFiltered.reduce((acc, row) => acc + Number(row.returns_units || 0), 0),
       collected: dailyRowsFiltered.reduce((acc, row) => acc + Number(row.collected_units || 0), 0),
     };
@@ -2628,21 +2566,6 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       const m = mappingById.get(ds.sku_mapping_id);
       const sku = m?.amazonSku || m?.temuSkuId || "—";
       const product = m?.productName || "—";
-      if (Number(ds.sold_units || 0) > 0) {
-        entries.push({
-          id: `ds-sale-${ds.id}`,
-          date: ds.sale_date,
-          mappingId: ds.sku_mapping_id,
-          product,
-          sku,
-          event: "Sale",
-          eventKey: "sale",
-          source: `Daily sales (${ds.platform})`,
-          delta: -Number(ds.sold_units || 0),
-          isMovement: false,
-          notes: ds.notes,
-        });
-      }
       if (Number(ds.returns_units || 0) > 0) {
         entries.push({
           id: `ds-ret-${ds.id}`,
@@ -2727,6 +2650,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       "Product",
       "Platform",
       "Warehouse",
+      "Source",
       "Units Sold",
       "Returns",
       "Collected",
@@ -2740,7 +2664,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       const m = mappingById.get(row.sku_mapping_id);
       const wh = warehouses.find((w) => w.id === row.warehouse_id);
       const unitCost = cogsByMapping.get(row.sku_mapping_id) || 0;
-      const sold = Number(row.sold_units || 0);
+      const sold = displaySoldUnits(row);
       const excl = sold * unitCost;
       const incl = excl * (1 + vatRate);
       lines.push(
@@ -2750,6 +2674,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           m?.productName || "",
           row.platform,
           wh?.name || "",
+          row.source === "reports" ? "Reports" : "Manual",
           sold,
           row.returns_units,
           row.collected_units,
@@ -2885,7 +2810,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             </div>
           </div>
           <p className="text-xs text-slate-500">
-            Selected period metrics and YTD show inline comparison against the immediately previous matching period.
+            Selected period Amazon/Temu/Combined sold units come from inventory reports (facts cache) for every mapped SKU — the same source as Daily Sales. Search filters the table only.
           </p>
 
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -4358,7 +4283,13 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
       {activeTab === "daily-sales" ? (
         <section className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold text-slate-800">Daily Sales</h3>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-800">Daily Sales</h3>
+              <p className="mt-0.5 text-xs text-slate-500">
+                Units sold come from Amazon/Temu reports (`inventory_sales_facts_cache`) — the same source as Overview.
+                Manual rows overlay returns, collected units, and warehouse notes only; unmatched manual sold is 0.
+              </p>
+            </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -4507,7 +4438,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                     inputMode="numeric"
                     value={entryRow.soldUnits}
                     onChange={(e) => updateDailyEntryRow(entryRow.id, { soldUnits: sanitizeNonNegativeNumber(e.target.value) })}
-                    placeholder="Units sold"
+                    placeholder="Sold (not totaled)"
                     className="no-spinner rounded-lg border border-slate-300 px-2 py-1.5 text-xs"
                     disabled={!canEdit}
                   />
@@ -4630,6 +4561,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
           <div className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 md:grid-cols-5">
             <p className="text-sm text-slate-700">
               Units sold: <span className="font-semibold">{dailyTotals.sold}</span>
+              <span className="ml-1 text-xs text-slate-500">(facts cache, matches Overview)</span>
             </p>
             <p className="text-sm text-slate-700">
               Returns: <span className="font-semibold">{dailyTotals.returns}</span>
@@ -4653,6 +4585,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                   <th className="px-2 py-2">SKU</th>
                   <th className="px-2 py-2">Product</th>
                   <th className="px-2 py-2">Platform</th>
+                  <th className="px-2 py-2">Source</th>
                   <th className="px-2 py-2">Warehouse</th>
                   <th className="px-2 py-2">Units Sold</th>
                   <th className="px-2 py-2">Returns</th>
@@ -4666,19 +4599,21 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
               <tbody>
                 {dailyRowsFiltered.length === 0 ? (
                   <tr>
-                    <td className="px-2 py-3 text-slate-500" colSpan={canEdit ? 12 : 11}>
+                    <td className="px-2 py-3 text-slate-500" colSpan={canEdit ? 13 : 12}>
                       No daily sales data in selected filters.
                     </td>
                   </tr>
                 ) : (
                   dailyRowsPaged.map((row) => {
-                    const isEditingRow = canEdit && editingDailySaleId === row.id && Boolean(dailySaleDraft);
+                    const isEditingRow = canEdit && row.editable && editingDailySaleId === row.id && Boolean(dailySaleDraft);
                     const draftMapping = isEditingRow && dailySaleDraft ? mappingById.get(dailySaleDraft.mappingId) : undefined;
                     const m = draftMapping || mappingById.get(row.sku_mapping_id);
                     const wh = warehouses.find((w) => w.id === row.warehouse_id);
                     const costMappingId = isEditingRow && dailySaleDraft ? dailySaleDraft.mappingId : row.sku_mapping_id;
                     const unitCost = cogsByMapping.get(costMappingId) || 0;
-                    const units = Number(isEditingRow ? dailySaleDraft?.soldUnits || 0 : row.sold_units || 0);
+                    const units = isEditingRow
+                      ? 0
+                      : displaySoldUnits(row);
                     const excl = units * unitCost;
                     const incl = excl * (1 + Number(accountVatRate || 0) / 100);
                     return (
@@ -4735,6 +4670,15 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                           )}
                         </td>
                         <td className="px-2 py-2">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                              row.source === "reports" ? "bg-emerald-50 text-emerald-800" : "bg-slate-100 text-slate-600"
+                            }`}
+                          >
+                            {row.source === "reports" ? "Reports" : "Manual"}
+                          </span>
+                        </td>
+                        <td className="px-2 py-2">
                           {isEditingRow ? (
                             <select
                               value={dailySaleDraft?.warehouseId || ""}
@@ -4752,19 +4696,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                             wh?.name || "-"
                           )}
                         </td>
-                        <td className="px-2 py-2">
-                          {isEditingRow ? (
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              value={dailySaleDraft?.soldUnits || ""}
-                              onChange={(e) => setDailySaleDraft((prev) => (prev ? { ...prev, soldUnits: sanitizeNonNegativeNumber(e.target.value) } : prev))}
-                              className="no-spinner w-20 rounded border border-slate-300 px-2 py-1"
-                            />
-                          ) : (
-                            row.sold_units
-                          )}
-                        </td>
+                        <td className="px-2 py-2">{displaySoldUnits(row)}</td>
                         <td className="px-2 py-2">
                           {isEditingRow ? (
                             <input
@@ -4824,7 +4756,7 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                                   Cancel
                                 </button>
                               </div>
-                            ) : (
+                            ) : row.editable ? (
                               <div className="flex justify-end gap-1">
                                 <button
                                   type="button"
@@ -4841,6 +4773,8 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
                                   Delete
                                 </button>
                               </div>
+                            ) : (
+                              <span className="text-[10px] uppercase tracking-wide text-slate-400">Auto</span>
                             )}
                           </td>
                         ) : null}
