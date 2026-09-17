@@ -38,6 +38,9 @@ type AmazonCredential = {
   connected_at: string;
   last_synced_at: string | null;
   last_sync_error: string | null;
+  finance_synced_through: string | null;
+  last_keepalive_at: string | null;
+  last_keepalive_error: string | null;
 };
 type AmazonAdsCredential = {
   account_id: string;
@@ -122,7 +125,7 @@ export default function AdminSettingsPanelV2({
         supabase.from("account_client_members").select("account_id, client_id"),
         supabase
           .from("account_amazon_credentials")
-          .select("account_id, provider, selling_partner_id, connected_at, last_synced_at, last_sync_error, ads_profile_ids, ads_advertiser_name")
+          .select("account_id, provider, selling_partner_id, connected_at, last_synced_at, last_sync_error, finance_synced_through, last_keepalive_at, last_keepalive_error, ads_profile_ids, ads_advertiser_name")
           .in("provider", ["sp-api", "ads-api"]),
         supabase
           .from("inventory_defaults")
@@ -1017,12 +1020,25 @@ function AmazonConnectionPanel({
             {new Date(credential.connected_at).toLocaleString()}
           </div>
           <div>
-            <span className="text-slate-500">Last sync: </span>
+            <span className="text-slate-500">Last finance ingest: </span>
             {credential.last_synced_at ? new Date(credential.last_synced_at).toLocaleString() : "—"}
           </div>
+          <div>
+            <span className="text-slate-500">Finance data through: </span>
+            {credential.finance_synced_through || "—"}
+          </div>
+          <div>
+            <span className="text-slate-500">Last keep-alive: </span>
+            {credential.last_keepalive_at ? new Date(credential.last_keepalive_at).toLocaleString() : "—"}
+          </div>
+          {credential.last_keepalive_error ? (
+            <div className="mt-1 rounded bg-amber-50 px-2 py-1 text-amber-800">
+              Last keep-alive error: {credential.last_keepalive_error}
+            </div>
+          ) : null}
           {credential.last_sync_error ? (
             <div className="mt-1 rounded bg-red-50 px-2 py-1 text-red-700">
-              Last sync error: {credential.last_sync_error}
+              Last finance ingest error: {credential.last_sync_error}
             </div>
           ) : null}
         </div>
@@ -1163,7 +1179,8 @@ function AmazonConnectionPanel({
               <p className="text-xs text-slate-500">
                 Pulls Finance events (orders, refunds, fees, adjustments) from SP-API and creates one
                 report per calendar month. Tagged <code className="rounded bg-slate-100 px-1">sp_api</code>{" "}
-                so manual uploads aren&apos;t overwritten.
+                so manual uploads aren&apos;t overwritten. The chosen dates expand to full calendar months.
+                A daily cron also walks connected accounts forward one month at a time.
               </p>
             </div>
           </div>
