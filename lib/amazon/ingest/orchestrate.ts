@@ -11,6 +11,11 @@
  *        c. Run the same pure-function P&L pipeline the manual upload uses
  *           (computeAmazonPnl → deriveTotals → computePerSku)
  *        d. Persist summary totals + breakdown + per-SKU rows
+ *        e. refreshInventorySalesFacts(account, monthStart, monthEnd) so
+ *           Overview/Daily Sales pick up the new txs even if a later month
+ *           or the final full rebuild times out
+ *   5. refreshInventorySalesFacts(account) full rebuild at the end of
+ *      syncAmazonFinanceData (POST/GET /api/amazon/sync both go through here)
  *
  *   Coexistence: manual + sp_api reports for the same (account, period) live
  *   side-by-side thanks to the relaxed unique constraint
@@ -55,6 +60,7 @@ export type SyncReportResult = {
   netProfit: number;
   outputVat: number;
   inputVat: number;
+  factsRefreshError?: string | null;
 };
 
 export type SyncResult = {
@@ -393,6 +399,19 @@ async function ingestMonth(input: {
     if (txError) throw txError;
   }
 
+  // Same function that writes report_transactions must refresh the facts
+  // cache. POST/GET /api/amazon/sync only call syncAmazonFinanceData →
+  // ingestMonth; they do not refresh on their own.
+  const monthRefresh = await refreshInventorySalesFacts(supabase, accountId, {
+    from: bucketStart,
+    to: bucketEnd,
+  });
+  if (!monthRefresh.ok) {
+    console.warn(
+      `[amazon-ingest] sales-facts cache refresh failed for ${accountId} ${bucketStart}–${bucketEnd}: ${monthRefresh.error}`,
+    );
+  }
+
   // ---- Replace per-SKU breakdown ------------------------------------------
   await supabase.from("report_sku_breakdowns").delete().eq("report_id", reportId);
 
@@ -442,6 +461,7 @@ async function ingestMonth(input: {
     netProfit: Number(netProfit.toFixed(2)),
     outputVat: Number(outputVat.toFixed(2)),
     inputVat: Number(inputVat.toFixed(2)),
+    factsRefreshError: monthRefresh.ok ? null : monthRefresh.error,
   };
 }
 
@@ -530,13 +550,9 @@ export async function syncAmazonFinanceData(input: {
       cogsLookup,
     });
     reportResults.push(result);
-    const monthRefresh = await refreshInventorySalesFacts(supabase, accountId, {
-      from: bucket.start,
-      to: bucket.end,
-    });
-    if (!monthRefresh.ok) {
+    if (result.factsRefreshError) {
       warnings.push(
-        `Sales-facts cache refresh failed for ${bucket.start}–${bucket.end}: ${monthRefresh.error}`,
+        `Sales-facts cache refresh failed for ${bucket.start}–${bucket.end}: ${result.factsRefreshError}`,
       );
     }
   }

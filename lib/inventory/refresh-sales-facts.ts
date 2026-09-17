@@ -7,6 +7,20 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * Pass `from`/`to` to rebuild one inclusive date window (used after each
  * ingested month so a later timeout cannot leave new txs out of the cache).
  *
+ * Platform filters (do not silently widen):
+ * - Amazon: raw_row.type = 'order'
+ * - Temu: raw_row "Transaction type" = 'order payment' (stricter than temu-pnl,
+ *   which also accepts 'order'). TikTok is not in this cache; Overview has no
+ *   TikTok sold column. Manual Daily Sales may still record TikTok returns/notes.
+ *
+ * Call sites that write report_transactions:
+ * - lib/amazon/ingest/orchestrate.ts ingestMonth (SP-API) + full rebuild at
+ *   end of syncAmazonFinanceData (POST/GET /api/amazon/sync)
+ * - app/(portal)/reports/report-workbench.tsx after manual upload insert
+ * - app/(portal)/reports/saved-reports-panel.tsx after report delete
+ * Recompute reads txs and rewrites report totals only — it does not insert
+ * report_transactions, so it does not refresh this cache.
+ *
  * Non-throwing: a cache miss is recoverable on the next successful refresh.
  */
 export async function refreshInventorySalesFacts(

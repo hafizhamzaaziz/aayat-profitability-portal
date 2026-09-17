@@ -96,6 +96,10 @@ async function runFinanceSync(input: {
  * touches sp_api rows. The requested range is expanded to covering calendar
  * months so a short window cannot blank out the rest of a month.
  *
+ * Sales-facts cache: do not call refresh here. `syncAmazonFinanceData` →
+ * `ingestMonth` refreshes after each month that inserts `report_transactions`,
+ * then a full-account refresh at the end of the sync.
+ *
  * Admin/team only. Uses an admin Supabase client for writes so RLS policies
  * don't block the orchestrator's bulk insert/upsert traffic.
  */

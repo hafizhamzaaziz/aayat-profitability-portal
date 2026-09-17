@@ -499,6 +499,9 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
           "No raw transactions found for this report. Recompute requires the original transaction file to have been saved with the report."
         );
       }
+      // Recompute rewrites report totals from existing report_transactions; it
+      // does not insert/replace those rows. inventory_sales_facts_cache is
+      // unchanged, so we do not call refreshInventorySalesFacts here.
 
       // 2) Bridged COGS lookup (Amazon SKU ↔ Temu SKU ID via sku_mappings).
       const cogsLookup = await buildBridgedCogsLookup(supabase, target.account_id);
