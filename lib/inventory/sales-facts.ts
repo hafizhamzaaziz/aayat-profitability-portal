@@ -106,12 +106,34 @@ function factKey(mappingId: string, date: string, platform: string) {
   return `${mappingId}|${date}|${String(platform || "").trim().toLowerCase()}`;
 }
 
+export function sumTxFactsByPlatform(
+  txFacts: TxFact[],
+  range?: { from?: string | null; to?: string | null },
+): { amazon: number; temu: number; combined: number } {
+  const totals = { amazon: 0, temu: 0, combined: 0 };
+  txFacts.forEach((tx) => {
+    if (range?.from && tx.date < range.from) return;
+    if (range?.to && tx.date > range.to) return;
+    const quantity = Number(tx.quantity || 0);
+    if (!Number.isFinite(quantity) || quantity <= 0) return;
+    if (tx.platform === "temu") totals.temu += quantity;
+    else totals.amazon += quantity;
+    totals.combined += quantity;
+  });
+  return totals;
+}
+
+/** Sold units shown/totaled in Daily Sales — reports cache only. */
+export function displaySoldUnits(row: Pick<UnifiedDailySale, "source" | "sold_units">) {
+  return row.source === "reports" ? Number(row.sold_units || 0) : 0;
+}
+
 /**
  * Daily Sales history: sold units come from `inventory_sales_facts_cache`
  * (same source as Overview). Manual `inventory_daily_sales` rows stay visible
  * for returns/collected/warehouse notes and for platforms the cache does not
- * cover (e.g. TikTok). Manual sold units are not added on top of a matching
- * reports row, so Overview and Daily Sales totals agree for the same range.
+ * cover (e.g. TikTok). Unmatched manual sold is forced to 0 so the Units Sold
+ * column cannot mix `inventory_daily_sales` into Overview-matching totals.
  */
 export function buildUnifiedDailySales(input: {
   txFacts: TxFact[];
@@ -159,6 +181,7 @@ export function buildUnifiedDailySales(input: {
     if (usedManualIds.has(row.id)) return;
     rows.push({
       ...row,
+      sold_units: 0,
       source: "manual",
       editable: true,
     });
@@ -172,7 +195,5 @@ export function buildUnifiedDailySales(input: {
 }
 
 export function sumReportedSoldUnits(rows: UnifiedDailySale[]) {
-  return rows
-    .filter((row) => row.source === "reports")
-    .reduce((acc, row) => acc + Number(row.sold_units || 0), 0);
+  return rows.reduce((acc, row) => acc + displaySoldUnits(row), 0);
 }

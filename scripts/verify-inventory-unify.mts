@@ -3,7 +3,7 @@
 // Run with:
 //   node --experimental-strip-types --experimental-transform-types scripts/verify-inventory-unify.mts
 
-import { buildUnifiedDailySales, mapSalesFactsToTxFacts, sumReportedSoldUnits } from "../lib/inventory/sales-facts.ts";
+import { buildUnifiedDailySales, displaySoldUnits, mapSalesFactsToTxFacts, sumReportedSoldUnits, sumTxFactsByPlatform } from "../lib/inventory/sales-facts.ts";
 import { clipReplaceRange, expandToCoveredMonths, nextFinanceWindow } from "../lib/amazon/ingest/sync-window.ts";
 
 let failed = 0;
@@ -70,16 +70,99 @@ const unified = buildUnifiedDailySales({
       notes: null,
       created_at: "2026-09-15T00:00:00.000Z",
     },
+    {
+      id: "manual-temu",
+      sku_mapping_id: "m-temu",
+      sale_date: "2026-09-12",
+      platform: "temu",
+      warehouse_id: null,
+      sold_units: 225,
+      returns_units: 0,
+      collected_units: 0,
+      notes: null,
+      created_at: "2026-09-12T00:00:00.000Z",
+    },
+    {
+      id: "manual-tiktok",
+      sku_mapping_id: "m-amz",
+      sale_date: "2026-09-13",
+      platform: "tiktok",
+      warehouse_id: null,
+      sold_units: 1,
+      returns_units: 0,
+      collected_units: 0,
+      notes: "tiktok",
+      created_at: "2026-09-13T00:00:00.000Z",
+    },
   ],
 });
 
 const reportRow = unified.find((row) => row.source === "reports" && row.sku_mapping_id === "m-amz" && row.sale_date === "2026-09-10");
 const manualOnly = unified.find((row) => row.source === "manual" && row.id === "manual-2");
+const manualTemu = unified.find((row) => row.id === "manual-temu");
+const manualTiktok = unified.find((row) => row.id === "manual-tiktok");
+const columnSold = unified.reduce((acc, row) => acc + Number(row.sold_units || 0), 0);
+const periodSold = sumTxFactsByPlatform(txFacts, { from: "2026-09-10", to: "2026-09-17" });
+
 assert("reports row uses facts sold, not manual 313", reportRow?.sold_units === 13);
 assert("reports row keeps manual returns overlay", reportRow?.returns_units === 1);
 assert("reports rows are not editable", reportRow?.editable === false);
-assert("manual-only row remains visible", manualOnly?.sold_units === 5 && manualOnly.editable === true);
+assert("manual-only sold is zeroed; returns/collected kept", manualOnly?.sold_units === 0 && manualOnly?.collected_units === 2 && manualOnly.editable === true);
+assert("unmatched Temu manual sold is zeroed", manualTemu?.sold_units === 0 && manualTemu?.source === "manual");
+assert("TikTok manual sold is zeroed", manualTiktok?.sold_units === 0);
+assert("Units Sold column sums facts only (no 313+225+1 mix)", columnSold === 15);
 assert("headline sold units ignore manual-only rows", sumReportedSoldUnits(unified) === 15);
+assert("Overview period sold matches Daily Sales facts", periodSold.amazon === 13 && periodSold.temu === 2 && periodSold.combined === 15);
+assert("displaySoldUnits is cache-only", displaySoldUnits({ source: "manual", sold_units: 87 }) === 0);
+assert("displaySoldUnits keeps report sold", displaySoldUnits({ source: "reports", sold_units: 13 }) === 13);
+
+const rexoLike = buildUnifiedDailySales({
+  txFacts: [
+    { mappingId: "m-amz", date: "2026-09-01", platform: "amazon", quantity: 1096 },
+  ],
+  manual: [
+    {
+      id: "m1",
+      sku_mapping_id: "m-amz",
+      sale_date: "2026-09-02",
+      platform: "amazon",
+      warehouse_id: null,
+      sold_units: 87,
+      returns_units: 0,
+      collected_units: 0,
+      notes: null,
+      created_at: "2026-09-02T00:00:00.000Z",
+    },
+    {
+      id: "m2",
+      sku_mapping_id: "m-temu",
+      sale_date: "2026-09-02",
+      platform: "temu",
+      warehouse_id: null,
+      sold_units: 225,
+      returns_units: 0,
+      collected_units: 0,
+      notes: null,
+      created_at: "2026-09-02T00:00:00.000Z",
+    },
+    {
+      id: "m3",
+      sku_mapping_id: "m-amz",
+      sale_date: "2026-09-02",
+      platform: "tiktok",
+      warehouse_id: null,
+      sold_units: 1,
+      returns_units: 0,
+      collected_units: 0,
+      notes: null,
+      created_at: "2026-09-02T00:00:00.000Z",
+    },
+  ],
+});
+const rexoColumn = rexoLike.reduce((acc, row) => acc + Number(row.sold_units || 0), 0);
+assert("Rexo-shaped mix: column sold is 1096 not 1389", rexoColumn === 1096);
+assert("Rexo-shaped mix: Amazon column is facts only", rexoLike.filter((r) => r.platform === "amazon").reduce((a, r) => a + r.sold_units, 0) === 1096);
+assert("Rexo-shaped mix: Temu/TikTok sold columns are 0", rexoLike.filter((r) => r.platform !== "amazon").every((r) => r.sold_units === 0));
 
 assert(
   "stuck May watermark walks into June",

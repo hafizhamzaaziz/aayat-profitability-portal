@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { fetchAllRows } from "@/lib/supabase/fetch-all-rows";
-import { buildUnifiedDailySales, mapSalesFactsToTxFacts } from "@/lib/inventory/sales-facts";
+import { buildUnifiedDailySales, displaySoldUnits, mapSalesFactsToTxFacts } from "@/lib/inventory/sales-facts";
 import { renderInventoryDailySalesPdfBuffer } from "@/lib/pdf/inventory-daily-sales-document";
 
 export const runtime = "nodejs";
@@ -144,7 +144,7 @@ export async function GET(request: NextRequest) {
         const sku = mapping?.amazonSku || mapping?.temuSkuId || "-";
         const productName = mapping?.productName || "Unnamed product";
         const cost = cogsByMapping.get(row.sku_mapping_id) || 0;
-        const soldUnits = row.source === "reports" ? Number(row.sold_units || 0) : 0;
+        const soldUnits = displaySoldUnits(row);
         const excl = Number((soldUnits * cost).toFixed(2));
         const incl = Number((excl * (1 + vatRate)).toFixed(2));
         return {
@@ -153,7 +153,7 @@ export async function GET(request: NextRequest) {
           sku,
           platform: row.platform,
           warehouse: row.warehouse_id ? warehouseById.get(String(row.warehouse_id)) || "-" : "-",
-          sold_units: row.sold_units,
+          sold_units: soldUnits,
           returns_units: Number(row.returns_units || 0),
           collected_units: Number(row.collected_units || 0),
           excl_vat: excl,
