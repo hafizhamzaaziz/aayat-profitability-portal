@@ -13,6 +13,8 @@
  */
 
 import type { createClient } from "@/lib/supabase/client";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
+import { buildBridgedCogsLookup } from "@/lib/reports/cogs-lookup";
 import { computeExpenseOccurrencesForPeriod, type ExpenseLedgerRow } from "@/lib/reports/expense-ledger";
 import { computeExpenseTotals } from "@/lib/reports/expense-totals";
 
@@ -252,53 +254,59 @@ export async function recalculateReportsFromEffectiveDate(
   if (accountError) throw accountError;
   const vatRatePct = Number(accountRow?.vat_rate || 0);
 
-  const { data: cogsHistory, error: cogsHistoryError } = await supabase
-    .from("cogs_history")
-    .select("sku, unit_cost, includes_vat, effective_from")
-    .eq("account_id", accountId)
-    .order("effective_from", { ascending: true });
-  if (cogsHistoryError) throw cogsHistoryError;
-  const lookup = new Map<string, CogsVersion[]>();
-  (cogsHistory || []).forEach((row) => {
-    const sku = normalizeSku(row.sku);
-    if (!sku) return;
-    const list = lookup.get(sku) || [];
-    list.push({
-      unitCost: Number(row.unit_cost || 0),
-      includesVat: Boolean(row.includes_vat),
-      effectiveFrom: String(row.effective_from || effectiveFrom),
-    });
-    lookup.set(sku, list);
-  });
-  lookup.forEach((rows, sku) => {
-    lookup.set(
-      sku,
-      rows.sort((a, b) => (a.effectiveFrom < b.effectiveFrom ? -1 : 1))
-    );
-  });
+  const lookup = await buildBridgedCogsLookup(supabase, accountId);
 
-  const { data: reports, error: reportsError } = await supabase
-    .from("reports")
-    .select("id, period_start, platform, output_vat, input_vat, net_profit, total_cogs, breakdown")
-    .eq("account_id", accountId)
-    .gte("period_end", effectiveFrom);
+  const { data: reports, error: reportsError } = await fetchAllRows<{
+    id: string;
+    period_start: string;
+    period_end: string;
+    platform: "amazon" | "temu" | "tiktok";
+    output_vat: number;
+    input_vat: number;
+    net_profit: number;
+    total_cogs: number;
+    breakdown: Record<string, unknown> | null;
+  }>((from, to) =>
+    supabase
+      .from("reports")
+      .select("id, period_start, period_end, platform, output_vat, input_vat, net_profit, total_cogs, breakdown")
+      .eq("account_id", accountId)
+      .gte("period_end", effectiveFrom)
+      .order("period_start", { ascending: true })
+      .range(from, to)
+  );
   if (reportsError) throw reportsError;
 
   let updatedCount = 0;
   for (const rawReport of (reports || []) as unknown as ReportRow[]) {
     const report = rawReport;
-    const { data: txRows, error: txError } = await supabase
-      .from("report_transactions")
-      .select("platform, transaction_date, sku, quantity, raw_row")
-      .eq("report_id", report.id);
+    const { data: txRows, error: txError } = await fetchAllRows<{
+      platform: string | null;
+      transaction_date: string | null;
+      sku: string | null;
+      quantity: number | null;
+      raw_row: Record<string, unknown> | null;
+    }>((from, to) =>
+      supabase
+        .from("report_transactions")
+        .select("platform, transaction_date, sku, quantity, raw_row")
+        .eq("report_id", report.id)
+        .order("sku", { ascending: true })
+        .range(from, to)
+    );
     if (txError) throw txError;
 
-    const { data: expenseLedgerRows, error: expenseError } = await supabase
-      .from("expense_ledger")
-      .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
-      .eq("account_id", accountId)
-      .lte("expense_date", String(report.period_end || report.period_start))
-      .or(`recurring_end_date.is.null,recurring_end_date.gte.${String(report.period_start)}`);
+    const { data: expenseLedgerRows, error: expenseError } = await fetchAllRows<ExpenseLedgerRow>(
+      (from, to) =>
+        supabase
+          .from("expense_ledger")
+          .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
+          .eq("account_id", accountId)
+          .lte("expense_date", String(report.period_end || report.period_start))
+          .or(`recurring_end_date.is.null,recurring_end_date.gte.${String(report.period_start)}`)
+          .order("expense_date", { ascending: true })
+          .range(from, to)
+    );
     if (expenseError) throw expenseError;
     const expenseRows = computeExpenseOccurrencesForPeriod({
       rows: (expenseLedgerRows || []) as ExpenseLedgerRow[],
@@ -314,7 +322,7 @@ export async function recalculateReportsFromEffectiveDate(
     ((txRows || []) as unknown as ReportTxRow[]).forEach((tx) => {
       const platform = tx.platform === "temu" ? "temu" : tx.platform === "tiktok" ? "tiktok" : "amazon";
       if (!isUnitsSaleTx(platform, tx.raw_row || null)) return;
-      const sku = normalizeSku(tx.sku || "");
+      const sku = String(tx.sku || "").trim().toLowerCase();
       const qty = Math.abs(Number(tx.quantity || 0));
       if (!sku || !qty) return;
       const txDate = String(tx.transaction_date || report.period_start || effectiveFrom).slice(0, 10);
@@ -398,6 +406,39 @@ export async function recalculateReportsFromEffectiveDate(
       })
       .eq("id", report.id);
     if (updateError) throw updateError;
+
+    const { data: skuBreakdowns } = await fetchAllRows<{
+      id: string;
+      sku: string | null;
+      units: number | null;
+      cogs: number | null;
+      net_profit: number | null;
+    }>((from, to) =>
+      supabase
+        .from("report_sku_breakdowns")
+        .select("id, sku, units, cogs, net_profit")
+        .eq("report_id", report.id)
+        .order("sku", { ascending: true })
+        .range(from, to)
+    );
+    for (const skuRow of skuBreakdowns || []) {
+      const sku = String(skuRow.sku || "").trim().toLowerCase();
+      if (!sku) continue;
+      const cogs = resolveCogsVersion(lookup, sku, String(report.period_start || effectiveFrom).slice(0, 10));
+      if (!cogs) continue;
+      const qty = Math.abs(Number(skuRow.units || 0));
+      const vatRate = vatRatePct > 0 ? vatRatePct / 100 : 0;
+      const unitNet = cogs.includesVat && vatRate > 0 ? cogs.unitCost / (1 + vatRate) : cogs.unitCost;
+      const nextCogs = round2(unitNet * qty);
+      const oldCogs = Number(skuRow.cogs || 0);
+      const nextNet = round2(Number(skuRow.net_profit || 0) - (nextCogs - oldCogs));
+      const { error: skuUpdateError } = await supabase
+        .from("report_sku_breakdowns")
+        .update({ cogs: nextCogs, net_profit: nextNet, cost_known: qty > 0 })
+        .eq("id", skuRow.id);
+      if (skuUpdateError) throw skuUpdateError;
+    }
+
     updatedCount += 1;
   }
   return updatedCount;

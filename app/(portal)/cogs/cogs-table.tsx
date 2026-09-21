@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { pushClientNotification } from "@/lib/notifications/client";
 import FileDropzone from "@/components/ui/file-dropzone";
 import {
@@ -155,10 +156,15 @@ export default function CogsTable({ accountId, canEdit }: Props) {
     try {
       const supabase = createClient();
       const [{ data: mappingRows, error: mappingError }] = await Promise.all([
-        supabase
-          .from("sku_mappings")
-          .select("id, amazon_sku, sku_catalog:sku_catalog_id(product_name)")
-          .eq("account_id", accountId),
+        fetchAllRows<{ id: string; amazon_sku: string | null; sku_catalog: unknown }>(
+          (from, to) =>
+            supabase
+              .from("sku_mappings")
+              .select("id, amazon_sku, sku_catalog:sku_catalog_id(product_name)")
+              .eq("account_id", accountId)
+              .order("id", { ascending: true })
+              .range(from, to)
+        ),
       ]);
       if (mappingError) throw mappingError;
       const mapByMappingId: Record<string, string> = {};

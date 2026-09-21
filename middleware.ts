@@ -5,11 +5,13 @@ import type { UserRole } from "@/lib/types/auth";
 const publicRoutes = ["/login", "/forbidden", "/amazon-connected"];
 
 const routeRoleMap: Array<{ prefix: string; allowedRoles: UserRole[] }> = [
-  { prefix: "/dashboard", allowedRoles: ["admin", "team", "client"] },
-  { prefix: "/reports", allowedRoles: ["admin", "team", "client"] },
-  { prefix: "/cogs", allowedRoles: ["admin", "team", "client"] },
-  { prefix: "/performance", allowedRoles: ["admin", "team", "client"] },
-  { prefix: "/settings", allowedRoles: ["admin", "team"] },
+      { prefix: "/dashboard", allowedRoles: ["admin", "team", "client"] },
+      { prefix: "/reports", allowedRoles: ["admin", "team", "client"] },
+      { prefix: "/cogs", allowedRoles: ["admin", "team", "client"] },
+      { prefix: "/inventory", allowedRoles: ["admin", "team", "client"] },
+      { prefix: "/expenses", allowedRoles: ["admin", "team", "client"] },
+      { prefix: "/performance", allowedRoles: ["admin", "team", "client"] },
+      { prefix: "/settings", allowedRoles: ["admin", "team"] },
 ];
 
 export async function middleware(request: NextRequest) {

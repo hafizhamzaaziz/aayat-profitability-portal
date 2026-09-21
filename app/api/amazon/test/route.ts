@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { requireStaffAccountAccess } from "@/lib/auth/require-account";
 import { loadSpApiClient, updateMarketplaceIds, updateSyncStatus } from "@/lib/amazon/credentials";
 import { SpApiError } from "@/lib/amazon/spapi";
 
@@ -33,11 +34,8 @@ export async function GET(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-  const { data: userRow } = await supabase.from("users").select("role").eq("id", user.id).single();
-  const role = String(userRow?.role || "client");
-  if (role !== "admin" && role !== "team") {
-    return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
-  }
+  const access = await requireStaffAccountAccess(supabase, user.id, accountId);
+  if (!access.account) return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
 
   try {
     const { client, sellingPartnerId, region } = await loadSpApiClient(accountId);

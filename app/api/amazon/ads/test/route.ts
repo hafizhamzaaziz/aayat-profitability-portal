@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { requireStaffAccountAccess } from "@/lib/auth/require-account";
 import {
   loadAdsApiClient,
   setAdsProfileIds,
@@ -29,10 +30,8 @@ export async function GET(request: NextRequest) {
   const supabase = createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-  const { data: userRow } = await supabase.from("users").select("role").eq("id", user.id).single();
-  if (!["admin", "team"].includes(String(userRow?.role))) {
-    return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
-  }
+  const access = await requireStaffAccountAccess(supabase, user.id, accountId);
+  if (!access.account) return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
 
   // Optional advertiser pin. When the connected credential is an agency that
   // sees many sellers, the caller passes ?advertiser=<exact name> to lock the

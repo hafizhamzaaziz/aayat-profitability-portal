@@ -47,13 +47,18 @@ export async function loadSpApiClient(accountId: string): Promise<{
  */
 export async function updateSyncStatus(
   accountId: string,
-  outcome: { ok: true } | { ok: false; error: string }
+  outcome: { ok: true; financeSyncedThrough?: string } | { ok: false; error: string }
 ): Promise<void> {
   const admin = createAdminClient();
   if (outcome.ok) {
+    const patch: Record<string, string | null> = {
+      last_synced_at: new Date().toISOString(),
+      last_sync_error: null,
+    };
+    if (outcome.financeSyncedThrough) patch.finance_synced_through = outcome.financeSyncedThrough;
     await admin
       .from("account_amazon_credentials")
-      .update({ last_synced_at: new Date().toISOString(), last_sync_error: null })
+      .update(patch)
       .eq("account_id", accountId)
       .eq("provider", "sp-api");
   } else {

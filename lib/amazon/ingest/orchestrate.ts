@@ -28,7 +28,10 @@ import { loadSpApiClient, updateSyncStatus } from "../credentials";
 import { mapFinancialEvents, CSV_HEADER_ORDER, type CsvRow, type MapStats } from "./finance-mapper";
 import { stampPurchaseDatesOnRows } from "./purchase-dates";
 import { buildBridgedCogsLookup } from "@/lib/reports/cogs-lookup";
-import { computeAmazonPnl, deriveTotals } from "@/lib/reports/amazon-pnl";
+import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
+import { adReportFromRows } from "@/lib/reports/ad-report";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
+import type { AdReport, SkuLine } from "@/lib/reports/types";
 import { AMAZON_METHODOLOGY_ID } from "@/lib/reports/methodology";
 import { computePerSku } from "@/lib/reports/per-sku";
 import { computeExpenseTotals } from "@/lib/reports/expense-totals";
@@ -36,7 +39,6 @@ import {
   computeExpenseOccurrencesForPeriod,
   type ExpenseLedgerRow,
 } from "@/lib/reports/expense-ledger";
-import type { SkuLine } from "@/lib/reports/types";
 
 const TX_INSERT_CHUNK = 400;
 
@@ -198,9 +200,42 @@ async function ingestMonth(input: {
 }): Promise<SyncReportResult> {
   const { supabase, accountId, vatRatePct, cogsVatReclaimPct, bucketStart, bucketEnd, rows, cogsLookup } = input;
 
-  // ---- Run the P&L pipeline against the freshly-mapped rows --------------
+  // Reuse an existing SP-API report id so attached ads CSV / Ads-API rows survive re-sync.
+  const { data: existing } = await supabase
+    .from("reports")
+    .select("id, breakdown, cogs_vat_reclaim_pct")
+    .eq("account_id", accountId)
+    .eq("period_start", bucketStart)
+    .eq("period_end", bucketEnd)
+    .eq("platform", "amazon")
+    .eq("source", "sp_api")
+    .maybeSingle();
+
+  let adReport: AdReport | null = null;
+  if (existing?.id) {
+    const { data: adSpendRows } = await fetchAllRows<{ sku: string | null; spend_exvat: number }>(
+      (from, to) =>
+        supabase
+          .from("report_ad_spend")
+          .select("sku, spend_exvat")
+          .eq("report_id", String(existing.id))
+          .order("sku", { ascending: true })
+          .range(from, to),
+    );
+    if (adSpendRows && adSpendRows.length > 0) {
+      adReport = adReportFromRows({
+        rows: adSpendRows.map((r) => ({
+          sku: r.sku,
+          spend_exvat: Number(r.spend_exvat || 0),
+        })),
+        sourceFilename: "attached-ads",
+      });
+    }
+  }
+
   const aoa = buildAoaForMonth(rows);
   const pnl = computeAmazonPnl(aoa);
+  if (adReport) applyAdReportOverride(pnl, adReport.totalSpend, vatRatePct);
 
   const totals = deriveTotals({
     pnl,
@@ -215,21 +250,8 @@ async function ingestMonth(input: {
     cogsLookup,
     vatRatePct,
     defaultDateIso: bucketStart,
-    adReport: null, // Ads spend isn't sourced from SP-API
+    adReport,
   });
-
-  // ---- Upsert the report row ---------------------------------------------
-  // We need to check whether a sp_api report already exists for this period
-  // so we can reuse its id (preserves user edits, attached ads files, etc).
-  const { data: existing } = await supabase
-    .from("reports")
-    .select("id, breakdown, cogs_vat_reclaim_pct")
-    .eq("account_id", accountId)
-    .eq("period_start", bucketStart)
-    .eq("period_end", bucketEnd)
-    .eq("platform", "amazon")
-    .eq("source", "sp_api")
-    .maybeSingle();
 
   // Compute summary fields the existing UI/PDF code already reads from.
   const settlementNet = totals.netSales + totals.fbaReimbursements + totals.totalAmazonFeesExvat;
@@ -243,14 +265,18 @@ async function ingestMonth(input: {
   // fresh sp_api report still includes them.)
   let expensesNet = 0;
   let expensesVat = 0;
-  const { data: expenseRows } = await supabase
-    .from("expense_ledger")
-    .select(
-      "id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date"
-    )
-    .eq("account_id", accountId)
-    .lte("expense_date", bucketEnd)
-    .or(`recurring_end_date.is.null,recurring_end_date.gte.${bucketStart}`);
+  const { data: expenseRows } = await fetchAllRows<ExpenseLedgerRow>((from, to) =>
+    supabase
+      .from("expense_ledger")
+      .select(
+        "id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date"
+      )
+      .eq("account_id", accountId)
+      .lte("expense_date", bucketEnd)
+      .or(`recurring_end_date.is.null,recurring_end_date.gte.${bucketStart}`)
+      .order("expense_date", { ascending: true })
+      .range(from, to)
+  );
   const occurrences = computeExpenseOccurrencesForPeriod({
     rows: (expenseRows || []) as ExpenseLedgerRow[],
     platform: "amazon",
@@ -322,6 +348,9 @@ async function ingestMonth(input: {
       marketplaceNetProfitSum: Number(totals.operatingProfit.toFixed(2)),
       externalExpensesNet: Number(expensesNet.toFixed(2)),
     },
+    ...(((existing?.breakdown || {}) as Record<string, unknown>).adSource
+      ? { adSource: ((existing?.breakdown || {}) as Record<string, unknown>).adSource }
+      : {}),
   };
 
   const reportPayload = {
@@ -463,7 +492,7 @@ export async function syncAmazonFinanceData(input: {
   }
 
   if (rows.length === 0) {
-    await updateSyncStatus(accountId, { ok: true });
+    await updateSyncStatus(accountId, { ok: true, financeSyncedThrough: options.to });
     return {
       ok: true,
       range: { from: options.from, to: options.to },
@@ -554,7 +583,7 @@ export async function syncAmazonFinanceData(input: {
     );
   }
 
-  await updateSyncStatus(accountId, { ok: true });
+  await updateSyncStatus(accountId, { ok: true, financeSyncedThrough: options.to });
 
   // Rebuild inventory velocity cache from order dates (purchase date when
   // stamped). Manual report uploads already refresh this; SP-API sync must too.

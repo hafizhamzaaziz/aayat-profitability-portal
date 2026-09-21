@@ -41,6 +41,7 @@ import {
 import { computeExpenseTotals } from "@/lib/reports/expense-totals";
 import { AMAZON_METHODOLOGY_ID } from "@/lib/reports/methodology";
 import type { SkuLine } from "@/lib/reports/types";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 
 export type AdsSyncOptions = {
   from: string; // YYYY-MM-DD inclusive
@@ -266,10 +267,14 @@ async function recomputeReportTotals(
 ): Promise<void> {
   // 1. Pull raw transactions and rebuild a CSV-style AoA (matches what the
   //    manual recompute flow does in saved-reports-panel.tsx).
-  const { data: txRows } = await supabase
-    .from("report_transactions")
-    .select("raw_row")
-    .eq("report_id", reportId);
+  const { data: txRows } = await fetchAllRows<{ raw_row: Record<string, unknown> | null }>((from, to) =>
+    supabase
+      .from("report_transactions")
+      .select("raw_row")
+      .eq("report_id", reportId)
+      .order("sku", { ascending: true })
+      .range(from, to)
+  );
   if (!txRows || txRows.length === 0) return;
 
   type RawRow = Record<string, unknown>;
@@ -294,10 +299,14 @@ async function recomputeReportTotals(
   const aoa: unknown[][] = [colOrder, ...raw.map((r) => colOrder.map((c) => r[c] ?? ""))];
 
   // 2. Load ads data we just persisted, rebuild an AdReport.
-  const { data: adSpendRows } = await supabase
-    .from("report_ad_spend")
-    .select("sku, spend_exvat")
-    .eq("report_id", reportId);
+  const { data: adSpendRows } = await fetchAllRows<{ sku: string | null; spend_exvat: number }>((from, to) =>
+    supabase
+      .from("report_ad_spend")
+      .select("sku, spend_exvat")
+      .eq("report_id", reportId)
+      .order("sku", { ascending: true })
+      .range(from, to)
+  );
   const adReport = adReportFromRows({
     rows: (adSpendRows || []).map((r) => ({
       sku: (r.sku as string | null) || null,
@@ -322,14 +331,18 @@ async function recomputeReportTotals(
   //    regardless of which sync path produced them).
   let expensesNet = 0;
   let expensesVat = 0;
-  const { data: expenseRows } = await supabase
-    .from("expense_ledger")
-    .select(
-      "id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date"
-    )
-    .eq("account_id", accountId)
-    .lte("expense_date", bucketEnd)
-    .or(`recurring_end_date.is.null,recurring_end_date.gte.${bucketStart}`);
+  const { data: expenseRows } = await fetchAllRows<ExpenseLedgerRow>((from, to) =>
+    supabase
+      .from("expense_ledger")
+      .select(
+        "id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date"
+      )
+      .eq("account_id", accountId)
+      .lte("expense_date", bucketEnd)
+      .or(`recurring_end_date.is.null,recurring_end_date.gte.${bucketStart}`)
+      .order("expense_date", { ascending: true })
+      .range(from, to)
+  );
   const occurrences = computeExpenseOccurrencesForPeriod({
     rows: (expenseRows || []) as ExpenseLedgerRow[],
     platform: "amazon",
@@ -407,6 +420,10 @@ async function recomputeReportTotals(
       windowStart: bucketStart,
       windowEnd: bucketEnd,
       totalSpendExvat: Number(adReport.totalSpend.toFixed(2)),
+    },
+    perSkuRollup: {
+      marketplaceNetProfitSum: Number(totals.operatingProfit.toFixed(2)),
+      externalExpensesNet: Number(expensesNet.toFixed(2)),
     },
   };
 
@@ -601,7 +618,7 @@ export async function startAdsSync(input: {
 }
 
 export type CollectAdsSyncResult = {
-  ok: true;
+  ok: boolean;
   batchId: string | null;
   pending: number;
   completed: number;
@@ -724,10 +741,16 @@ export async function collectAdsSync(input: {
   // 'completed' (not-yet-ingested) jobs. We look across all batches touched —
   // critical for the cron path, which can process jobs from several batches in
   // one tick.
-  const { data: completedJobs } = await supabase
-    .from("ads_report_jobs")
-    .select("batch_id")
-    .eq("status", "completed");
+  const { data: completedJobs } = await fetchAllRows<{ batch_id: string }>((from, to) => {
+    let q = supabase
+      .from("ads_report_jobs")
+      .select("batch_id")
+      .eq("status", "completed")
+      .order("batch_id", { ascending: true })
+      .range(from, to);
+    if (accountId) q = q.eq("account_id", accountId);
+    return q;
+  });
   const candidateBatches = Array.from(
     new Set(((completedJobs || []) as Array<{ batch_id: string }>).map((j) => j.batch_id))
   );
@@ -758,7 +781,7 @@ export async function collectAdsSync(input: {
   const { count: stillPending } = await pendingQuery;
 
   return {
-    ok: true,
+    ok: failed === 0,
     batchId,
     pending: stillPending ?? 0,
     completed,
@@ -816,10 +839,14 @@ export async function finalizeAdsSync(input: {
   for (const [, bucket] of merged) {
     const report = await findOrCreateReport(supabase, accountId, bucket.start, bucket.end);
 
-    const { data: skuRows } = await supabase
-      .from("report_sku_breakdowns")
-      .select("sku")
-      .eq("report_id", report.id);
+    const { data: skuRows } = await fetchAllRows<{ sku: string | null }>((from, to) =>
+      supabase
+        .from("report_sku_breakdowns")
+        .select("sku")
+        .eq("report_id", report.id)
+        .order("sku", { ascending: true })
+        .range(from, to)
+    );
     const matchedSkuSet = new Set<string>((skuRows || []).map((r) => normalizeSku(r.sku)));
 
     const sourceFilename = `amazon-ads-api:${bucket.start}..${bucket.end}`;

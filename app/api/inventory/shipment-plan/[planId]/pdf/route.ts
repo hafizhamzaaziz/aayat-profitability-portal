@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { requireAccountAccess } from "@/lib/auth/require-account";
 import { renderInventoryShipmentPdfBuffer } from "@/lib/pdf/inventory-shipment-document";
 
 export const runtime = "nodejs";
@@ -24,6 +25,9 @@ export async function GET(
     .maybeSingle();
   if (planError) return new Response(planError.message, { status: 500 });
   if (!plan) return new Response("Shipment plan not found.", { status: 404 });
+
+  const access = await requireAccountAccess(supabase, user.id, String(plan.account_id));
+  if (!access.account) return new Response("Forbidden", { status: 403 });
 
   const { data: account, error: accountError } = await supabase
     .from("accounts")

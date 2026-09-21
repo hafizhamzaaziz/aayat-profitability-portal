@@ -38,6 +38,7 @@ type AmazonCredential = {
   connected_at: string;
   last_synced_at: string | null;
   last_sync_error: string | null;
+  finance_synced_through: string | null;
 };
 type AmazonAdsCredential = {
   account_id: string;
@@ -122,7 +123,7 @@ export default function AdminSettingsPanelV2({
         supabase.from("account_client_members").select("account_id, client_id"),
         supabase
           .from("account_amazon_credentials")
-          .select("account_id, provider, selling_partner_id, connected_at, last_synced_at, last_sync_error, ads_profile_ids, ads_advertiser_name")
+          .select("account_id, provider, selling_partner_id, connected_at, last_synced_at, last_sync_error, finance_synced_through, ads_profile_ids, ads_advertiser_name")
           .in("provider", ["sp-api", "ads-api"]),
         supabase
           .from("inventory_defaults")
@@ -396,6 +397,18 @@ export default function AdminSettingsPanelV2({
 
       {view === "all" || view === "accounts" ? (
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+          <p className="font-semibold text-slate-900">Amazon ops</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5 text-xs">
+            <li>Connected Amazon = API primary (hourly cron at :15 UTC, ads collect at :35).</li>
+            <li>Manual Amazon CSV = Reports → Compare Amazon only; it does not replace the live pipeline.</li>
+            <li>Temu / TikTok upload flows are unchanged.</li>
+            <li>
+              Restore: git tag <code>backup/pre-amazon-api-sellerboard-20260921</code>, Vercel{" "}
+              <code>dpl_3Ejf3T4rwJmYWhzPS9mUnp1YWgX2</code>. Details in <code>docs/RESTORE-PRE-AMAZON-API-SELLERBOARD.md</code>.
+            </li>
+          </ul>
+        </div>
         <div className="mb-3 flex items-center justify-between"><h4 className="text-lg font-semibold">Accounts Management</h4><button onClick={openCreateAccount} className="rounded-lg bg-[var(--md-primary)] px-3 py-1.5 text-sm font-semibold text-white">Create</button></div>
         {loading && accounts.length === 0 ? <p className="text-sm text-slate-500">Loading accounts...</p> : <div className="space-y-2">{accounts.map((a) => <div key={a.id} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm"><span>{a.name}</span><div className="flex gap-2"><button onClick={() => openEditAccount(a)} className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-semibold">Edit</button><button onClick={() => void deleteAccount(a.id)} className="rounded-lg bg-red-50 px-3 py-1 text-xs font-semibold text-red-700">Delete</button></div></div>)}</div>}
       </section>
@@ -1019,6 +1032,19 @@ function AmazonConnectionPanel({
           <div>
             <span className="text-slate-500">Last sync: </span>
             {credential.last_synced_at ? new Date(credential.last_synced_at).toLocaleString() : "—"}
+            {credential.last_synced_at && Date.now() - new Date(credential.last_synced_at).getTime() > 2 * 60 * 60 * 1000 ? (
+              <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800">
+                Stale (&gt;2h)
+              </span>
+            ) : credential.last_synced_at ? (
+              <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-800">
+                Hourly cron
+              </span>
+            ) : null}
+          </div>
+          <div>
+            <span className="text-slate-500">Finance watermark: </span>
+            {credential.finance_synced_through || "—"}
           </div>
           {credential.last_sync_error ? (
             <div className="mt-1 rounded bg-red-50 px-2 py-1 text-red-700">

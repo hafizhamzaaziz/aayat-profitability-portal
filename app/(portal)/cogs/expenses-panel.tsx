@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { migrateLegacyExpensesForAccount } from "@/lib/reports/expense-migration";
 
 type ExpenseRow = {
@@ -67,11 +68,14 @@ export default function ExpensesPanel({ accountId, canEdit, currency }: Props) {
     setLoading(true);
     setError(null);
     const supabase = createClient();
-    const { data, error: fetchError } = await supabase
-      .from("expense_ledger")
-      .select("id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
-      .eq("account_id", accountId)
-      .order("expense_date", { ascending: false });
+    const { data, error: fetchError } = await fetchAllRows<ExpenseRow>((from, to) =>
+      supabase
+        .from("expense_ledger")
+        .select("id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
+        .eq("account_id", accountId)
+        .order("expense_date", { ascending: false })
+        .range(from, to)
+    );
     if (fetchError) {
       setError(fetchError.message);
       setLoading(false);

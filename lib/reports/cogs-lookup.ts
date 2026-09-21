@@ -19,6 +19,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import type { CogsLookup, CogsVersion } from "./types";
 
 type CogsRow = {
@@ -81,19 +82,31 @@ export async function buildBridgedCogsLookup(
   accountId: string
 ): Promise<CogsLookup> {
   const [cogsRes, historyRes, mappingsRes] = await Promise.all([
-    supabase
-      .from("cogs")
-      .select("sku, unit_cost, includes_vat, effective_from, sku_mapping_id")
-      .eq("account_id", accountId),
-    supabase
-      .from("cogs_history")
-      .select("sku, unit_cost, includes_vat, effective_from")
-      .eq("account_id", accountId)
-      .order("effective_from", { ascending: true }),
-    supabase
-      .from("sku_mappings")
-      .select("id, amazon_sku, temu_sku_id, tiktok_seller_sku")
-      .eq("account_id", accountId),
+    fetchAllRows<CogsRow>((from, to) =>
+      supabase
+        .from("cogs")
+        .select("sku, unit_cost, includes_vat, effective_from, sku_mapping_id")
+        .eq("account_id", accountId)
+        .order("sku", { ascending: true })
+        .range(from, to)
+    ),
+    fetchAllRows<CogsRow>((from, to) =>
+      supabase
+        .from("cogs_history")
+        .select("sku, unit_cost, includes_vat, effective_from")
+        .eq("account_id", accountId)
+        .order("effective_from", { ascending: true })
+        .order("sku", { ascending: true })
+        .range(from, to)
+    ),
+    fetchAllRows<MappingRow>((from, to) =>
+      supabase
+        .from("sku_mappings")
+        .select("id, amazon_sku, temu_sku_id, tiktok_seller_sku")
+        .eq("account_id", accountId)
+        .order("id", { ascending: true })
+        .range(from, to)
+    ),
   ]);
 
   if (cogsRes.error) throw cogsRes.error;

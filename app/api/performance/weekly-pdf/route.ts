@@ -1,5 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { requireAccountAccess } from "@/lib/auth/require-account";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { renderWeeklyPerformancePdfBuffer } from "@/lib/pdf/performance-weekly-document";
 import { addDays, currentMondayIsoUtc, isMonday } from "@/lib/utils/date";
 import { getClientRecipientsForAccount, isEmailConfigured, sendPdfEmail } from "@/lib/email/mailer";
@@ -59,13 +61,16 @@ async function fetchWeekRowsWithLegacyFallback(input: {
   const { supabase, accountId, weekStart, weekEnd } = input;
   const baseSelect = "recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales";
 
-  const { data: rows, error } = await supabase
-    .from("performance_metrics")
-    .select(baseSelect)
-    .eq("account_id", accountId)
-    .gte("recorded_date", weekStart)
-    .lte("recorded_date", weekEnd)
-    .order("recorded_date", { ascending: true });
+  const { data: rows, error } = await fetchAllRows<RawMetric>((from, to) =>
+    supabase
+      .from("performance_metrics")
+      .select(baseSelect)
+      .eq("account_id", accountId)
+      .gte("recorded_date", weekStart)
+      .lte("recorded_date", weekEnd)
+      .order("recorded_date", { ascending: true })
+      .range(from, to)
+  );
   if (error) throw error;
   if ((rows || []).length > 0) return rows || [];
 
@@ -73,14 +78,17 @@ async function fetchWeekRowsWithLegacyFallback(input: {
   // users entered last week's data during the next week, so recorded_date was next Monday.
   const fallbackStart = addDays(weekStart, 7);
   const fallbackEnd = addDays(weekEnd, 7);
-  const { data: fallbackRows, error: fallbackError } = await supabase
-    .from("performance_metrics")
-    .select(baseSelect)
-    .eq("account_id", accountId)
-    .eq("recorded_date", fallbackStart)
-    .gte("created_at", `${fallbackStart}T00:00:00`)
-    .lte("created_at", `${fallbackEnd}T23:59:59`)
-    .order("recorded_date", { ascending: true });
+  const { data: fallbackRows, error: fallbackError } = await fetchAllRows<RawMetric>((from, to) =>
+    supabase
+      .from("performance_metrics")
+      .select(baseSelect)
+      .eq("account_id", accountId)
+      .eq("recorded_date", fallbackStart)
+      .gte("created_at", `${fallbackStart}T00:00:00`)
+      .lte("created_at", `${fallbackEnd}T23:59:59`)
+      .order("recorded_date", { ascending: true })
+      .range(from, to)
+  );
   if (fallbackError) throw fallbackError;
   return fallbackRows || [];
 }
@@ -105,6 +113,9 @@ export async function GET(request: NextRequest) {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) return new Response("Unauthorized", { status: 401 });
+
+    const access = await requireAccountAccess(supabase, user.id, accountId);
+    if (!access.account) return new Response("Forbidden", { status: 403 });
 
     const weekEnd = addDays(effectiveWeekStart, 6);
     const previousWeekStart = addDays(effectiveWeekStart, -7);

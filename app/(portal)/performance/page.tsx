@@ -72,6 +72,11 @@ export default async function PerformancePage({
     <div className="space-y-4">
       <p className="text-slate-600">
         Account: <span className="font-semibold">{account.name}</span>
+        {canEdit ? (
+          <span className="ml-2 text-sm text-slate-500">
+            Amazon weekly metrics are filled by the Monday hourly snapshot (parent ASINs). Manual rows are overrides.
+          </span>
+        ) : null}
       </p>
       <PerformanceTracker accountId={account.id} canEdit={canEdit} />
     </div>

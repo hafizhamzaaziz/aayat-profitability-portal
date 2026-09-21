@@ -47,6 +47,14 @@ export default async function ReportsPage({
   }
 
   const canProcess = role === "admin" || role === "team";
+  const { data: spCred } = await supabase
+    .from("account_amazon_credentials")
+    .select("account_id")
+    .eq("account_id", account.id)
+    .eq("provider", "sp-api")
+    .not("refresh_token_encrypted", "is", null)
+    .maybeSingle();
+  const amazonApi = Boolean(spCred);
 
   const generate = canProcess ? (
     <ReportWorkbench
@@ -58,6 +66,21 @@ export default async function ReportsPage({
         cogs_vat_reclaim_pct: account.cogs_vat_reclaim_pct,
       }}
       canProcess={canProcess}
+      excludeAmazonUpload={amazonApi}
+    />
+  ) : null;
+
+  const compare = canProcess && amazonApi ? (
+    <ReportWorkbench
+      account={{
+        id: account.id,
+        name: account.name,
+        currency: account.currency,
+        vat_rate: account.vat_rate,
+        cogs_vat_reclaim_pct: account.cogs_vat_reclaim_pct,
+      }}
+      canProcess={canProcess}
+      variant="amazon-compare"
     />
   ) : null;
 
@@ -68,6 +91,7 @@ export default async function ReportsPage({
       canEdit={canProcess}
       currency={account.currency}
       vatRate={account.vat_rate}
+      amazonApi={amazonApi}
     />
   );
 
@@ -76,7 +100,14 @@ export default async function ReportsPage({
       <p className="text-slate-600">
         Account: <span className="font-semibold">{account.name}</span>
       </p>
-      <ReportsTabs generate={generate} saved={saved} showGenerate={canProcess} initialTab="saved" />
+      <ReportsTabs
+        generate={generate}
+        saved={saved}
+        compare={compare}
+        showGenerate={canProcess}
+        showCompare={Boolean(compare)}
+        initialTab="saved"
+      />
     </div>
   );
 }

@@ -1,88 +1,72 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useTransition } from "react";
+import PeriodPresetBar from "@/components/ui/period-preset-bar";
+import { parsePeriodPreset, resolvePeriod, type PeriodPreset } from "@/lib/utils/period-presets";
 
 export default function DashboardFilters() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const [pending, startTransition] = useTransition();
 
-  const [periodStart, setPeriodStart] = useState(searchParams.get("periodStart") || "");
-  const [periodEnd, setPeriodEnd] = useState(searchParams.get("periodEnd") || "");
-  const [platform, setPlatform] = useState(searchParams.get("platform") || "all");
+  const preset = parsePeriodPreset(searchParams.get("period"));
+  const resolved = resolvePeriod({
+    preset: searchParams.get("period"),
+    from: searchParams.get("periodStart"),
+    to: searchParams.get("periodEnd"),
+  });
+  const platform = searchParams.get("platform") || "all";
 
-  const apply = () => {
+  const replace = (next: { period?: PeriodPreset; from?: string; to?: string; platform?: string }) => {
     const params = new URLSearchParams(searchParams.toString());
-    if (periodStart) params.set("periodStart", periodStart);
-    else params.delete("periodStart");
-    if (periodEnd) params.set("periodEnd", periodEnd);
-    else params.delete("periodEnd");
-    if (platform && platform !== "all") params.set("platform", platform);
+    const period = next.period ?? preset;
+    params.set("period", period);
+    if (period === "custom") {
+      const from = next.from ?? resolved.from;
+      const to = next.to ?? resolved.to;
+      params.set("periodStart", from);
+      params.set("periodEnd", to);
+    } else {
+      params.delete("periodStart");
+      params.delete("periodEnd");
+    }
+    const plat = next.platform ?? platform;
+    if (plat && plat !== "all") params.set("platform", plat);
     else params.delete("platform");
-    router.replace(`${pathname}?${params.toString()}`);
-  };
-
-  const clear = () => {
-    const params = new URLSearchParams(searchParams.toString());
-    params.delete("periodStart");
-    params.delete("periodEnd");
-    params.delete("platform");
-    setPeriodStart("");
-    setPeriodEnd("");
-    setPlatform("all");
-    router.replace(`${pathname}?${params.toString()}`);
+    startTransition(() => {
+      router.replace(`${pathname}?${params.toString()}`);
+    });
   };
 
   return (
-    <div className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_180px_auto_auto]">
-      <div>
-        <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Period Start</label>
-        <input
-          type="date"
-          value={periodStart}
-          onChange={(e) => setPeriodStart(e.target.value)}
-          className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+    <div className={`space-y-3 rounded-2xl border border-slate-200 bg-white p-4 ${pending ? "opacity-70" : ""}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <PeriodPresetBar
+          value={preset}
+          from={resolved.from}
+          to={resolved.to}
+          disabled={pending}
+          onPreset={(next) => replace({ period: next })}
+          onCustomChange={(from, to) => replace({ period: "custom", from, to })}
         />
+        <div className="min-w-[160px]">
+          <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Platform</label>
+          <select
+            value={platform}
+            disabled={pending}
+            onChange={(e) => replace({ platform: e.target.value })}
+            className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
+          >
+            <option value="all">All</option>
+            <option value="amazon">Amazon</option>
+            <option value="temu">Temu</option>
+            <option value="tiktok">TikTok</option>
+          </select>
+        </div>
       </div>
-      <div>
-        <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Period End</label>
-        <input
-          type="date"
-          value={periodEnd}
-          onChange={(e) => setPeriodEnd(e.target.value)}
-          className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-        />
-      </div>
-      <div>
-        <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">Platform</label>
-        <select
-          value={platform}
-          onChange={(e) => setPlatform(e.target.value)}
-          className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-        >
-          <option value="all">All</option>
-          <option value="amazon">Amazon</option>
-          <option value="temu">Temu</option>
-          <option value="tiktok">TikTok</option>
-        </select>
-      </div>
-      <div className="sm:col-span-2 lg:col-span-2 flex flex-wrap gap-2 lg:justify-end">
-        <button
-          type="button"
-          onClick={apply}
-          className="flex-1 rounded-xl bg-[var(--md-primary)] px-4 py-2 text-sm font-semibold text-white sm:flex-none"
-        >
-          Apply
-        </button>
-        <button
-          type="button"
-          onClick={clear}
-          className="flex-1 rounded-xl bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-700 sm:flex-none"
-        >
-          Clear
-        </button>
-      </div>
+      {pending ? <p className="text-xs font-medium text-slate-500">Updating period…</p> : null}
     </div>
   );
 }

@@ -1,5 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { requireAccountAccess } from "@/lib/auth/require-account";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { renderReportPdfBuffer } from "@/lib/pdf/report-document";
 import { addDays } from "@/lib/utils/date";
 import { validateBreakdown, validatePeriodRange } from "@/lib/reports/guardrails";
@@ -77,6 +79,10 @@ export async function POST(request: NextRequest) {
 
     const { data: reports, error } = await supabase.from("reports").select("*").in("id", reportIds);
     if (error || !reports || reports.length !== reportIds.length) return new Response("Some reports were not found.", { status: 404 });
+    const accountIds = Array.from(new Set(reports.map((r) => String(r.account_id))));
+    if (accountIds.length !== 1) return new Response("Reports must belong to one account.", { status: 400 });
+    const access = await requireAccountAccess(supabase, user.id, accountIds[0]);
+    if (!access.account) return new Response("Forbidden", { status: 403 });
 
     const first = reports[0];
     if (reports.some((r) => r.platform !== first.platform)) return new Response("Cannot mix Amazon and Temu reports.", { status: 400 });
@@ -100,12 +106,16 @@ export async function POST(request: NextRequest) {
     const combinedStart = sorted[0].period_start;
     const combinedEnd = sorted[sorted.length - 1].period_end;
     const reportIdSet = sorted.map((r) => r.id);
-    const { data: ledgerRows } = await supabase
-      .from("expense_ledger")
-      .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
-      .eq("account_id", first.account_id)
-      .lte("expense_date", combinedEnd)
-      .or(`recurring_end_date.is.null,recurring_end_date.gte.${combinedStart}`);
+    const { data: ledgerRows } = await fetchAllRows<ExpenseLedgerRow>((fromIdx, toIdx) =>
+      supabase
+        .from("expense_ledger")
+        .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
+        .eq("account_id", first.account_id)
+        .lte("expense_date", combinedEnd)
+        .or(`recurring_end_date.is.null,recurring_end_date.gte.${combinedStart}`)
+        .order("expense_date", { ascending: true })
+        .range(fromIdx, toIdx)
+    );
     const expenses = computeExpenseOccurrencesForPeriod({
       rows: (ledgerRows || []) as ExpenseLedgerRow[],
       platform: first.platform,
@@ -144,34 +154,53 @@ export async function POST(request: NextRequest) {
     const [{ data: performance }, { data: performancePrevious }] =
       first.platform === "amazon"
         ? await Promise.all([
-            supabase
-              .from("performance_metrics")
-              .select(performanceFields)
-              .eq("account_id", first.account_id)
-              .gte("recorded_date", combinedStart)
-              .lte("recorded_date", combinedEnd)
-              .order("recorded_date", { ascending: false }),
-            supabase
-              .from("performance_metrics")
-              .select(performanceFields)
-              .eq("account_id", first.account_id)
-              .gte("recorded_date", previousStart)
-              .lte("recorded_date", previousEnd)
-              .order("recorded_date", { ascending: false }),
+            fetchAllRows((fromIdx, toIdx) =>
+              supabase
+                .from("performance_metrics")
+                .select(performanceFields)
+                .eq("account_id", first.account_id)
+                .gte("recorded_date", combinedStart)
+                .lte("recorded_date", combinedEnd)
+                .order("recorded_date", { ascending: false })
+                .range(fromIdx, toIdx)
+            ),
+            fetchAllRows((fromIdx, toIdx) =>
+              supabase
+                .from("performance_metrics")
+                .select(performanceFields)
+                .eq("account_id", first.account_id)
+                .gte("recorded_date", previousStart)
+                .lte("recorded_date", previousEnd)
+                .order("recorded_date", { ascending: false })
+                .range(fromIdx, toIdx)
+            ),
           ])
         : [{ data: [] }, { data: [] }];
 
     // Aggregate per-SKU across all selected reports for the combined PDF
-    const { data: combinedSkuRows } = await supabase
-      .from("report_sku_breakdowns")
-      .select("sku, description, units, net_sales, cogs, advertising_alloc, net_profit")
-      .in("report_id", reportIdSet);
+    const { data: combinedSkuRows } = await fetchAllRows<{
+      sku: string;
+      description: string | null;
+      units: number;
+      net_sales: number;
+      cogs: number;
+      advertising_alloc: number;
+      net_profit: number;
+    }>((fromIdx, toIdx) =>
+      supabase
+        .from("report_sku_breakdowns")
+        .select("sku, description, units, net_sales, cogs, advertising_alloc, net_profit")
+        .in("report_id", reportIdSet)
+        .order("sku", { ascending: true })
+        .range(fromIdx, toIdx)
+    );
     const aggSku = new Map<
       string,
       { sku: string; description: string | null; units: number; netSales: number; cogs: number; advertisingAlloc: number; netProfit: number }
     >();
     for (const row of combinedSkuRows || []) {
-      const key = String(row.sku);
+      const key = String(row.sku || "").trim().toUpperCase();
+      if (!key) continue;
       const existing = aggSku.get(key);
       if (existing) {
         existing.units += Number(row.units || 0);

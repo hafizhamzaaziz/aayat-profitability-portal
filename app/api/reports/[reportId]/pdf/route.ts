@@ -1,5 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { requireAccountAccess } from "@/lib/auth/require-account";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { renderReportPdfBuffer } from "@/lib/pdf/report-document";
 import { computeExpenseOccurrencesForPeriod, type ExpenseLedgerRow } from "@/lib/reports/expense-ledger";
 import { computeExpenseTotals } from "@/lib/reports/expense-totals";
@@ -36,6 +38,9 @@ export async function GET(
     return new Response("Report not found", { status: 404 });
   }
 
+  const access = await requireAccountAccess(supabase, user.id, String(report.account_id));
+  if (!access.account) return new Response("Forbidden", { status: 403 });
+
   const { data: account } = await supabase
     .from("accounts")
     .select("id, name, currency, vat_rate, logo_url")
@@ -46,12 +51,16 @@ export async function GET(
     return new Response("Account not found", { status: 404 });
   }
 
-  const { data: ledgerRows } = await supabase
-    .from("expense_ledger")
-    .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
-    .eq("account_id", report.account_id)
-    .lte("expense_date", report.period_end)
-    .or(`recurring_end_date.is.null,recurring_end_date.gte.${report.period_start}`);
+  const { data: ledgerRows } = await fetchAllRows<ExpenseLedgerRow>((from, to) =>
+    supabase
+      .from("expense_ledger")
+      .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
+      .eq("account_id", report.account_id)
+      .lte("expense_date", report.period_end)
+      .or(`recurring_end_date.is.null,recurring_end_date.gte.${report.period_start}`)
+      .order("expense_date", { ascending: true })
+      .range(from, to)
+  );
   const expenses = computeExpenseOccurrencesForPeriod({
     rows: (ledgerRows || []) as ExpenseLedgerRow[],
     platform: report.platform,
@@ -91,28 +100,45 @@ export async function GET(
   const [{ data: performance }, { data: performancePrevious }] =
     report.platform === "amazon"
       ? await Promise.all([
-          supabase
-            .from("performance_metrics")
-            .select(performanceFields)
-            .eq("account_id", report.account_id)
-            .gte("recorded_date", report.period_start)
-            .lte("recorded_date", report.period_end)
-            .order("recorded_date", { ascending: false }),
-          supabase
-            .from("performance_metrics")
-            .select(performanceFields)
-            .eq("account_id", report.account_id)
-            .gte("recorded_date", previousStart)
-            .lte("recorded_date", previousEnd)
-            .order("recorded_date", { ascending: false }),
+          fetchAllRows((from, to) =>
+            supabase
+              .from("performance_metrics")
+              .select(performanceFields)
+              .eq("account_id", report.account_id)
+              .gte("recorded_date", report.period_start)
+              .lte("recorded_date", report.period_end)
+              .order("recorded_date", { ascending: false })
+              .range(from, to)
+          ),
+          fetchAllRows((from, to) =>
+            supabase
+              .from("performance_metrics")
+              .select(performanceFields)
+              .eq("account_id", report.account_id)
+              .gte("recorded_date", previousStart)
+              .lte("recorded_date", previousEnd)
+              .order("recorded_date", { ascending: false })
+              .range(from, to)
+          ),
         ])
       : [{ data: [] }, { data: [] }];
 
-  const { data: skuRows } = await supabase
-    .from("report_sku_breakdowns")
-    .select("sku, description, units, net_sales, cogs, advertising_alloc, net_profit")
-    .eq("report_id", report.id)
-    .order("net_profit", { ascending: false });
+  const { data: skuRows } = await fetchAllRows<{
+    sku: string;
+    description: string | null;
+    units: number;
+    net_sales: number;
+    cogs: number;
+    advertising_alloc: number;
+    net_profit: number;
+  }>((from, to) =>
+    supabase
+      .from("report_sku_breakdowns")
+      .select("sku, description, units, net_sales, cogs, advertising_alloc, net_profit")
+      .eq("report_id", report.id)
+      .order("net_profit", { ascending: false })
+      .range(from, to)
+  );
 
   const { data: adMeta } =
     report.platform === "amazon"

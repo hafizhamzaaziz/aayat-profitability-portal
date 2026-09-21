@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { addDays, currentMondayIsoUtc, formatUkDate, isMonday, lastCompletedWeekMondayIsoUtc } from "@/lib/utils/date";
 import { pushClientNotification } from "@/lib/notifications/client";
 
@@ -17,6 +18,7 @@ type Metric = {
   ppc_spend: number | null;
   ppc_sales: number | null;
   total_sales: number | null;
+  source?: string | null;
 };
 
 type ActivePlatform = "amazon" | "temu";
@@ -147,6 +149,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [downloadingWeekly, setDownloadingWeekly] = useState(false);
   const [emailingWeekly, setEmailingWeekly] = useState(false);
+  const [fillingAmazon, setFillingAmazon] = useState(false);
   const [reportWeekStart, setReportWeekStart] = useState<string>(lastCompletedWeekMonday());
   const [activePlatform, setActivePlatform] = useState<ActivePlatform>("amazon");
   const [pageOffset, setPageOffset] = useState(0);
@@ -159,12 +162,15 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
     setError(null);
     const supabase = createClient();
 
-    const { data, error: fetchError } = await supabase
-      .from("performance_metrics")
-      .select("id, created_at, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales")
-      .eq("account_id", accountId)
-      .order("recorded_date", { ascending: false })
-      .order("created_at", { ascending: false });
+    const { data, error: fetchError } = await fetchAllRows<Metric>((from, to) =>
+      supabase
+        .from("performance_metrics")
+        .select("id, created_at, recorded_date, product_name, asin, bsr, review_count, rating, ppc_spend, ppc_sales, total_sales, source")
+        .eq("account_id", accountId)
+        .order("recorded_date", { ascending: false })
+        .order("created_at", { ascending: false })
+        .range(from, to)
+    );
 
     if (fetchError) {
       setError(fetchError.message);
@@ -184,12 +190,20 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   }, [accountId]);
 
   const saveMetric = async () => {
-    if (!form.product_name.trim()) {
+    if (activePlatform === "temu" && !form.product_name.trim()) {
       setError("Product name is required.");
       return;
     }
-    if (!form.asin.trim()) {
-      setError(activePlatform === "amazon" ? "ASIN is required." : "Goods ID is required.");
+    if (activePlatform === "amazon" && !form.asin.trim() && !form.product_name.trim()) {
+      setError("Parent ASIN or product name is required for a manual override.");
+      return;
+    }
+    if (activePlatform === "temu" && !form.asin.trim()) {
+      setError("Goods ID is required.");
+      return;
+    }
+    if (activePlatform === "amazon" && !form.asin.trim()) {
+      setError("Parent ASIN is required.");
       return;
     }
 
@@ -224,7 +238,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
       const payload = {
         account_id: accountId,
         recorded_date: recordedDate,
-        product_name: form.product_name.trim(),
+        product_name: form.product_name.trim() || form.asin.trim().toUpperCase(),
         asin: encodeIdentifier(activePlatform, identifierRaw) || null,
         bsr: activePlatform === "amazon" ? (form.bsr ? Number(form.bsr) : null) : null,
         review_count: form.review_count ? Number(form.review_count) : null,
@@ -301,6 +315,40 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
   const cancelEdit = () => {
     setEditingId(null);
     setForm(initialForm());
+  };
+
+  const fillAmazonSnapshot = async () => {
+    if (!canEdit) return;
+    setFillingAmazon(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/performance/snapshot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId }),
+      });
+      const payload = (await response.json()) as {
+        ok?: boolean;
+        upserted?: number;
+        weekStart?: string;
+        warnings?: string[];
+        error?: string;
+      };
+      if (!response.ok || payload.ok === false) {
+        throw new Error(payload.error || `Amazon fill failed (${response.status})`);
+      }
+      const warn = (payload.warnings || []).slice(0, 2).join(" ");
+      setMessage(
+        `Filled ${payload.upserted || 0} parent ASIN row${(payload.upserted || 0) === 1 ? "" : "s"} for week ${payload.weekStart || reportWeekStart}.${warn ? ` ${warn}` : ""}`
+      );
+      if (payload.weekStart) setReportWeekStart(payload.weekStart);
+      await loadRows();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fill Amazon performance.");
+    } finally {
+      setFillingAmazon(false);
+    }
   };
 
   const downloadWeeklyPdf = async (target: ActivePlatform | "all") => {
@@ -523,7 +571,28 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
           </>
         ) : null}
         <p className="w-full text-xs text-slate-500">Use Previous/Next Week to view older weekly comparisons.</p>
+        {activePlatform === "amazon" && canEdit ? (
+          <button
+            type="button"
+            onClick={() => void fillAmazonSnapshot()}
+            disabled={fillingAmazon}
+            className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            {fillingAmazon ? "Filling from Amazon…" : "Fill parent ASINs from Amazon"}
+          </button>
+        ) : null}
       </div>
+
+      {activePlatform === "amazon" ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+          <p className="font-semibold">Amazon Performance is parent ASIN only</p>
+          <p className="mt-1">
+            The hourly cron writes a weekly snapshot (product name, parent ASIN, BSR when Catalog has it, PPC spend/sales,
+            total sales). Review count and star rating are <span className="font-medium">not in SP-API</span> — leave them
+            blank or fill via Keepa (or similar). The grid below is optional overrides, not a blank manual sheet.
+          </p>
+        </div>
+      ) : null}
 
       {canEdit ? (
         <div className="grid gap-2 rounded-2xl border border-slate-200 bg-white p-4 md:grid-cols-4">
@@ -542,20 +611,20 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             </div>
           ) : null}
           <input
-            placeholder="Product name"
+            placeholder={activePlatform === "amazon" ? "Product name (optional override)" : "Product name"}
             value={form.product_name}
             onChange={(e) => setForm((prev) => ({ ...prev, product_name: e.target.value }))}
             className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
           />
           <input
-            placeholder={activePlatform === "amazon" ? "ASIN" : "Goods ID"}
+            placeholder={activePlatform === "amazon" ? "Parent ASIN" : "Goods ID"}
             value={form.asin}
             onChange={(e) => setForm((prev) => ({ ...prev, asin: e.target.value.toUpperCase() }))}
             className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
           />
           {activePlatform === "amazon" ? (
             <input
-              placeholder="BSR"
+              placeholder="BSR (optional / Keepa)"
               value={form.bsr}
               onChange={(e) => setForm((prev) => ({ ...prev, bsr: e.target.value }))}
               type="number"
@@ -565,14 +634,14 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             <div />
           )}
           <input
-            placeholder="Reviews"
+            placeholder={activePlatform === "amazon" ? "Reviews (not in SP-API)" : "Reviews"}
             value={form.review_count}
             onChange={(e) => setForm((prev) => ({ ...prev, review_count: e.target.value }))}
             type="number"
             className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
           />
           <input
-            placeholder="Rating"
+            placeholder={activePlatform === "amazon" ? "Rating (not in SP-API)" : "Rating"}
             value={form.rating}
             onChange={(e) => setForm((prev) => ({ ...prev, rating: e.target.value }))}
             type="number"
@@ -636,7 +705,11 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
         {loading ? (
           <p className="text-sm text-slate-500">Loading performance data...</p>
         ) : pagedWeekRows.length === 0 ? (
-          <p className="text-sm text-slate-500">No performance metrics saved for this account.</p>
+          <p className="text-sm text-slate-500">
+            {activePlatform === "amazon"
+              ? "No parent-ASIN rows for this week. Use Fill parent ASINs from Amazon, or wait for the Monday hourly snapshot."
+              : "No performance metrics saved for this account."}
+          </p>
         ) : (
           <div className="space-y-2">
             {pagedWeekRows.map(({ current, previous }) => {
@@ -648,8 +721,11 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
               return (
                 <div key={current.id} className="rounded-xl border border-slate-200 p-3 text-sm">
                   <p className="font-semibold">{current.product_name}</p>
+                  {current.source === "sp_api" ? (
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">Amazon API</p>
+                  ) : null}
                   <p className="text-xs text-slate-500">{weekRangeLabel(current.recorded_date)}</p>
-                  <p className="mt-1">{activePlatform === "amazon" ? "ASIN" : "Goods ID"}: {identifier || "-"}</p>
+                  <p className="mt-1">{activePlatform === "amazon" ? "Parent ASIN" : "Goods ID"}: {identifier || "-"}</p>
                   {activePlatform === "amazon" ? (
                     <>
                       <p className={metricValueClass("bsr", current.bsr, previous?.bsr ?? null)}>BSR: {current.bsr ?? "-"}</p>
@@ -706,7 +782,7 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             <tr>
               <th className="px-4 py-3">Week</th>
               <th className="px-4 py-3">Product</th>
-              <th className="px-4 py-3">{activePlatform === "amazon" ? "ASIN" : "Goods ID"}</th>
+              <th className="px-4 py-3">{activePlatform === "amazon" ? "Parent ASIN" : "Goods ID"}</th>
               <th className="px-4 py-3">PPC Spend</th>
               <th className="px-4 py-3">PPC Sales</th>
               <th className="px-4 py-3">Total Sales</th>
@@ -728,7 +804,9 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
             ) : pagedWeekRows.length === 0 ? (
               <tr>
                 <td className="px-4 py-4 text-slate-500" colSpan={canEdit ? (activePlatform === "amazon" ? 13 : 12) : activePlatform === "amazon" ? 12 : 11}>
-                  No performance metrics saved for this account.
+                  {activePlatform === "amazon"
+                    ? "No parent-ASIN rows for this week. Use Fill parent ASINs from Amazon, or wait for the Monday hourly snapshot."
+                    : "No performance metrics saved for this account."}
                 </td>
               </tr>
             ) : (
@@ -741,7 +819,14 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
                 return (
                   <tr key={current.id} className="border-t border-slate-100">
                     <td className="px-4 py-3">{weekRangeLabel(current.recorded_date)}</td>
-                    <td className="px-4 py-3">{current.product_name}</td>
+                    <td className="px-4 py-3">
+                      {current.product_name}
+                      {current.source === "sp_api" ? (
+                        <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
+                          API
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="px-4 py-3">
                       {identifier ? (
                         <a

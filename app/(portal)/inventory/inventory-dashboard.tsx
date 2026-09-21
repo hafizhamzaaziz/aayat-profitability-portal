@@ -589,11 +589,20 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
     });
 
     const [mappingRes, defaultsRes, salesFactsRes, levelRes, cogsRes, profilesRes, movementLinksRes, warehousesRes, accountRes, skuDescRes, amazonCredRes] = await Promise.all([
-      supabase
-        .from("sku_mappings")
-        .select("id, amazon_sku, temu_sku_id, lead_time_days, sku_catalog:sku_catalog_id(product_name)")
-        .eq("account_id", accountId)
-        .order("created_at", { ascending: false }),
+      fetchAllRows<{
+        id: string;
+        amazon_sku: string | null;
+        temu_sku_id: string | null;
+        lead_time_days: number | null;
+        sku_catalog: unknown;
+      }>((from, to) =>
+        supabase
+          .from("sku_mappings")
+          .select("id, amazon_sku, temu_sku_id, lead_time_days, sku_catalog:sku_catalog_id(product_name)")
+          .eq("account_id", accountId)
+          .order("created_at", { ascending: false })
+          .range(from, to)
+      ),
       supabase.from("inventory_defaults").select("*").eq("account_id", accountId).maybeSingle(),
       // Pre-aggregated per-day units from `inventory_sales_facts_cache` (refreshed
       // whenever a report is uploaded / recomputed / deleted). Paged through in
@@ -612,11 +621,24 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
             .order("platform", { ascending: true })
             .range(from, to),
       ),
-      supabase
-        .from("inventory_levels")
-        .select("sku_mapping_id, level_date, amazon_units, warehouse_units")
-        .eq("account_id", accountId),
-      supabase.from("cogs").select("sku, unit_cost, sku_mapping_id").eq("account_id", accountId),
+      fetchAllRows<{ sku_mapping_id: string; level_date: string; amazon_units: number; warehouse_units: number }>(
+        (from, to) =>
+          supabase
+            .from("inventory_levels")
+            .select("sku_mapping_id, level_date, amazon_units, warehouse_units")
+            .eq("account_id", accountId)
+            .order("level_date", { ascending: true })
+            .order("sku_mapping_id", { ascending: true })
+            .range(from, to),
+      ),
+      fetchAllRows<{ sku: string; unit_cost: number; sku_mapping_id: string | null }>((from, to) =>
+        supabase
+          .from("cogs")
+          .select("sku, unit_cost, sku_mapping_id")
+          .eq("account_id", accountId)
+          .order("sku", { ascending: true })
+          .range(from, to),
+      ),
       supabase
         .from("pack_profiles")
         .select("id, profile_name, units_per_box, box_length, box_width, box_height, dimension_unit, box_weight, weight_unit")
@@ -624,12 +646,24 @@ export default function InventoryDashboard({ accountId, canEdit, currency }: Pro
         .order("created_at", { ascending: false }),
       // Full movement history (latest first) — drives both the pack-profile
       // link map and the new "Recent Stock Actions" list with edit/delete.
-      supabase
-        .from("inventory_movements")
-        .select("id, sku_mapping_id, movement_date, movement_type, units_delta, boxes, pack_profile_id, notes, created_at")
-        .eq("account_id", accountId)
-        .order("created_at", { ascending: false })
-        .limit(2000),
+      fetchAllRows<{
+        id: string;
+        sku_mapping_id: string;
+        movement_date: string;
+        movement_type: InventoryMovement["movementType"];
+        units_delta: number;
+        boxes: number | null;
+        pack_profile_id: string | null;
+        notes: string | null;
+        created_at: string;
+      }>((from, to) =>
+        supabase
+          .from("inventory_movements")
+          .select("id, sku_mapping_id, movement_date, movement_type, units_delta, boxes, pack_profile_id, notes, created_at")
+          .eq("account_id", accountId)
+          .order("created_at", { ascending: false })
+          .range(from, to),
+      ),
       supabase.from("inventory_warehouses").select("id, name").eq("account_id", accountId).order("name", { ascending: true }),
       supabase.from("accounts").select("vat_rate").eq("id", accountId).maybeSingle(),
       // Paged: a busy account holds several thousand SKU description rows, more

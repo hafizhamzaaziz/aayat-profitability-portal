@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { requireAccountAccess } from "@/lib/auth/require-account";
 import { fetchAllRows } from "@/lib/supabase/fetch-all";
+import { syncAmazonDailySalesFromFacts } from "@/lib/inventory/sync-amazon-daily-sales";
 import { renderInventoryDailySalesPdfBuffer } from "@/lib/pdf/inventory-daily-sales-document";
 
 export const runtime = "nodejs";
@@ -23,6 +25,15 @@ export async function GET(request: NextRequest) {
     } = await supabase.auth.getUser();
     if (!user) return new Response("Unauthorized", { status: 401 });
 
+    const access = await requireAccountAccess(supabase, user.id, accountId);
+    if (!access.account) return new Response("Forbidden", { status: 403 });
+
+    try {
+      await syncAmazonDailySalesFromFacts(supabase, accountId, { from, to });
+    } catch {
+      // PDF still renders stored rows if sync is unavailable.
+    }
+
     const { data: account, error: accountError } = await supabase
       .from("accounts")
       .select("id, name, currency, vat_rate, logo_url")
@@ -41,7 +52,7 @@ export async function GET(request: NextRequest) {
       notes: string | null;
     };
 
-    const [{ data: rowsWithSoldUnits, error: rowsError }, { data: cogsRows }, { data: warehouseRows }, { data: mappingRows }] = await Promise.all([
+    const [{ data: rowsWithSoldUnits, error: rowsError }, cogsRes, warehouseRes, mappingRes] = await Promise.all([
       fetchAllRows<DailySalesPdfRow>((fromIdx, toIdx) => {
         let query = supabase
           .from("inventory_daily_sales")
@@ -57,13 +68,32 @@ export async function GET(request: NextRequest) {
         if (mappingId !== "all") query = query.eq("sku_mapping_id", mappingId);
         return query;
       }),
-      supabase.from("cogs").select("sku, unit_cost, sku_mapping_id").eq("account_id", accountId),
+      fetchAllRows<{ sku: string; unit_cost: number; sku_mapping_id: string | null }>((fromIdx, toIdx) =>
+        supabase
+          .from("cogs")
+          .select("sku, unit_cost, sku_mapping_id")
+          .eq("account_id", accountId)
+          .order("sku", { ascending: true })
+          .range(fromIdx, toIdx)
+      ),
       supabase.from("inventory_warehouses").select("id, name").eq("account_id", accountId),
-      supabase
-        .from("sku_mappings")
-        .select("id, amazon_sku, temu_sku_id, sku_catalog:sku_catalog_id(product_name)")
-        .eq("account_id", accountId),
+      fetchAllRows<{
+        id: string;
+        amazon_sku: string | null;
+        temu_sku_id: string | null;
+        sku_catalog: unknown;
+      }>((fromIdx, toIdx) =>
+        supabase
+          .from("sku_mappings")
+          .select("id, amazon_sku, temu_sku_id, sku_catalog:sku_catalog_id(product_name)")
+          .eq("account_id", accountId)
+          .order("id", { ascending: true })
+          .range(fromIdx, toIdx)
+      ),
     ]);
+    const cogsRows = cogsRes.data;
+    const warehouseRows = warehouseRes.data;
+    const mappingRows = mappingRes.data;
 
     let rows = rowsWithSoldUnits;
     if (rowsError) {
@@ -71,25 +101,26 @@ export async function GET(request: NextRequest) {
       const soldUnitsMissing = message.includes("sold_units") && (message.includes("column") || message.includes("does not exist"));
       if (!soldUnitsMissing) return new Response(rowsError.message, { status: 500 });
 
-      let fallback = supabase
-        .from("inventory_daily_sales")
-        .select("sku_mapping_id, sale_date, platform, warehouse_id, returns_units, collected_units, notes")
-        .eq("account_id", accountId)
-        .gte("sale_date", from)
-        .lte("sale_date", to)
-        .order("sale_date", { ascending: true });
-      if (platform !== "all") fallback = fallback.eq("platform", platform);
-      if (warehouseId !== "all") fallback = fallback.eq("warehouse_id", warehouseId);
-      if (mappingId !== "all") fallback = fallback.eq("sku_mapping_id", mappingId);
-      const fallbackRes = await fallback;
+      const fallbackRes = await fetchAllRows<Omit<DailySalesPdfRow, "sold_units">>((fromIdx, toIdx) => {
+        let fallback = supabase
+          .from("inventory_daily_sales")
+          .select("sku_mapping_id, sale_date, platform, warehouse_id, returns_units, collected_units, notes")
+          .eq("account_id", accountId)
+          .gte("sale_date", from)
+          .lte("sale_date", to)
+          .order("sale_date", { ascending: true })
+          .order("id", { ascending: true })
+          .range(fromIdx, toIdx);
+        if (platform !== "all") fallback = fallback.eq("platform", platform);
+        if (warehouseId !== "all") fallback = fallback.eq("warehouse_id", warehouseId);
+        if (mappingId !== "all") fallback = fallback.eq("sku_mapping_id", mappingId);
+        return fallback;
+      });
       if (fallbackRes.error) return new Response(fallbackRes.error.message, { status: 500 });
       rows = (fallbackRes.data || []).map((row) => ({ ...row, sold_units: 0 }));
     }
 
     const warehouseById = new Map((warehouseRows || []).map((w) => [String((w as { id: string }).id), String((w as { name: string }).name || "")]));
-    const cogsByMapping = new Map(
-      (cogsRows || []).map((c) => [String((c as { sku_mapping_id?: string | null }).sku_mapping_id || ""), Number((c as { unit_cost: number }).unit_cost || 0)])
-    );
     const mappingById = new Map(
       (mappingRows || []).map((m) => [
         String((m as { id: string }).id),
@@ -102,6 +133,23 @@ export async function GET(request: NextRequest) {
         },
       ])
     );
+    const cogsBySku = new Map<string, number>();
+    (cogsRows || []).forEach((c) => {
+      const sku = String((c as { sku?: string }).sku || "").trim().toUpperCase();
+      if (sku) cogsBySku.set(sku, Number((c as { unit_cost: number }).unit_cost || 0));
+    });
+    const cogsByMapping = new Map<string, number>();
+    (cogsRows || []).forEach((c) => {
+      const mappingId = String((c as { sku_mapping_id?: string | null }).sku_mapping_id || "");
+      if (mappingId) cogsByMapping.set(mappingId, Number((c as { unit_cost: number }).unit_cost || 0));
+    });
+    mappingById.forEach((mapping, mappingId) => {
+      if (cogsByMapping.has(mappingId)) return;
+      const cost =
+        cogsBySku.get(mapping.amazonSku.trim().toUpperCase()) ??
+        cogsBySku.get(mapping.temuSkuId.trim().toUpperCase());
+      if (cost != null) cogsByMapping.set(mappingId, cost);
+    });
 
     const vatRate = Number(account.vat_rate || 20) / 100;
     const normalizedRows = (rows || [])

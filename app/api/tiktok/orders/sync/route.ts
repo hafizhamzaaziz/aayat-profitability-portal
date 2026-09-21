@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { requireStaffAccountAccess } from "@/lib/auth/require-account";
 import { loadTiktokClient, updateTiktokSyncStatus } from "@/lib/tiktok/credentials";
 import { fetchTiktokOrderRows } from "@/lib/tiktok/orders";
 
@@ -37,11 +38,6 @@ export async function POST(request: NextRequest) {
     data: { user },
   } = await userClient.auth.getUser();
   if (!user) return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-  const { data: userRow } = await userClient.from("users").select("role").eq("id", user.id).single();
-  const role = String(userRow?.role || "client");
-  if (role !== "admin" && role !== "team") {
-    return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
-  }
 
   let body: SyncBody;
   try {
@@ -51,6 +47,9 @@ export async function POST(request: NextRequest) {
   }
   const accountId = String(body.accountId || "").trim();
   if (!accountId) return Response.json({ ok: false, error: "Missing accountId" }, { status: 400 });
+
+  const access = await requireStaffAccountAccess(userClient, user.id, accountId);
+  if (!access.account) return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
 
   const from = toIsoDate(body.from);
   const to = toIsoDate(body.to);

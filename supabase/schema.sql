@@ -1571,3 +1571,32 @@ $$;
 
 revoke all on function public.sync_amazon_daily_sales_from_facts(uuid, date, date) from public, anon;
 grant execute on function public.sync_amazon_daily_sales_from_facts(uuid, date, date) to authenticated, service_role;
+
+-- Sellerboard-style Amazon dashboard snapshots + catalog identifiers
+alter table public.account_amazon_credentials
+  add column if not exists finance_synced_through date;
+
+alter table public.sku_mappings
+  add column if not exists amazon_asin text,
+  add column if not exists parent_asin text;
+
+alter table public.performance_metrics
+  add column if not exists source text not null default 'manual';
+
+create table if not exists public.amazon_dashboard_snapshots (
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  preset text not null,
+  period_start date not null,
+  period_end date not null,
+  metrics jsonb not null default '{}'::jsonb,
+  computed_at timestamptz not null default now(),
+  primary key (account_id, preset)
+);
+alter table public.amazon_dashboard_snapshots enable row level security;
+drop policy if exists "amazon_dashboard_snapshots_all" on public.amazon_dashboard_snapshots;
+create policy "amazon_dashboard_snapshots_all"
+on public.amazon_dashboard_snapshots
+for all
+using (true)
+with check (true);
+

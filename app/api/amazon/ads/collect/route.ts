@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { requireStaffAccountAccess } from "@/lib/auth/require-account";
+import { requireCronAuth } from "@/lib/auth/cron";
 import { collectAdsSync } from "@/lib/amazon/ads/ingest";
 
 export const runtime = "nodejs";
@@ -29,11 +31,6 @@ export async function POST(request: NextRequest) {
   const userClient = createClient();
   const { data: { user } } = await userClient.auth.getUser();
   if (!user) return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-  const { data: userRow } = await userClient.from("users").select("role").eq("id", user.id).single();
-  const role = String(userRow?.role || "client");
-  if (role !== "admin" && role !== "team") {
-    return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
-  }
 
   let body: { accountId?: string };
   try {
@@ -43,6 +40,9 @@ export async function POST(request: NextRequest) {
   }
   const accountId = String(body.accountId || "").trim();
   if (!accountId) return Response.json({ ok: false, error: "Missing accountId" }, { status: 400 });
+
+  const access = await requireStaffAccountAccess(userClient, user.id, accountId);
+  if (!access.account) return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
 
   try {
     const result = await runForAccount(accountId);
@@ -56,24 +56,21 @@ export async function POST(request: NextRequest) {
 }
 
 /**
- * Cron entry point. Vercel cron requests carry
- * `Authorization: Bearer ${CRON_SECRET}`. If CRON_SECRET isn't set we still
- * allow the call (no secret configured = best-effort), but log a warning.
+ * Cron entry point. Vercel cron requests must carry
+ * `Authorization: Bearer ${CRON_SECRET}`.
  */
 export async function GET(request: NextRequest) {
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret) {
-    const auth = request.headers.get("authorization");
-    if (auth !== `Bearer ${cronSecret}`) {
-      return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-    }
-  }
+  const denied = requireCronAuth(request);
+  if (denied) return denied;
 
   const admin = createAdminClient();
   try {
     // Drain the oldest pending jobs across all accounts/batches. One cron
     // tick processes up to maxToProcess reports; the next tick continues.
     const result = await collectAdsSync({ supabase: admin, maxToProcess: 40 });
+    if (result.failed > 0 && result.completed === 0) {
+      return Response.json(result, { status: 503 });
+    }
     return Response.json(result);
   } catch (err) {
     return Response.json(

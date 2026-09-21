@@ -5,10 +5,14 @@ import { createPortal } from "react-dom";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
+import { refreshInventorySalesAndDailySales } from "@/lib/inventory/refresh-sales";
 import { pushClientNotification } from "@/lib/notifications/client";
 import { applyCogsVersion } from "@/lib/cogs/apply-cogs-version";
 import { deriveReportWarnings, validateBreakdown, validatePeriodRange } from "@/lib/reports/guardrails";
 import FileDropzone from "@/components/ui/file-dropzone";
+import PeriodPresetBar from "@/components/ui/period-preset-bar";
+import { parsePeriodPreset, resolvePeriod, type PeriodPreset } from "@/lib/utils/period-presets";
 import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
 import { computePerSku } from "@/lib/reports/per-sku";
 import { computeTemuPnl, deriveTemuTotals, computeTemuPerSku, type TemuAdOverride } from "@/lib/reports/temu-pnl";
@@ -138,6 +142,10 @@ type Props = {
     cogs_vat_reclaim_pct?: number | null;
   };
   canProcess: boolean;
+  /** Comparison path keeps Amazon CSV upload without making it the live source. */
+  variant?: "generate" | "amazon-compare";
+  /** When SP-API is connected, Amazon CSV lives on Compare Amazon, not New Report. */
+  excludeAmazonUpload?: boolean;
 };
 
 function applyZeroVatPresentation(result: CalculationPreview, vatRatePct: number, expensesNet: number): CalculationPreview {
@@ -733,10 +741,17 @@ async function loadGoodsToSkuIdsMap(
   accountId: string
 ): Promise<Map<string, string[]>> {
   const out = new Map<string, string[]>();
-  const { data, error } = await supabase
-    .from("sku_mappings")
-    .select("temu_sku_id, sku_catalog:sku_catalog_id(temu_goods_id)")
-    .eq("account_id", accountId);
+  const { data, error } = await fetchAllRows<{
+    temu_sku_id: string | null;
+    sku_catalog: unknown;
+  }>((from, to) =>
+    supabase
+      .from("sku_mappings")
+      .select("temu_sku_id, sku_catalog:sku_catalog_id(temu_goods_id)")
+      .eq("account_id", accountId)
+      .order("id", { ascending: true })
+      .range(from, to)
+  );
   if (error) return out;
   (data || []).forEach((row) => {
     const rec = row as unknown as {
@@ -944,10 +959,20 @@ function processAmazon(input: {
   };
 }
 
-export default function ReportWorkbench({ account, canProcess }: Props) {
-  const [platform, setPlatform] = useState<Platform>("amazon");
-  const [periodStart, setPeriodStart] = useState("");
-  const [periodEnd, setPeriodEnd] = useState("");
+export default function ReportWorkbench({ account, canProcess, variant = "generate", excludeAmazonUpload = false }: Props) {
+  const initialPeriod = resolvePeriod({ preset: "mtd" });
+  const [platform, setPlatform] = useState<Platform>(
+    variant === "amazon-compare"
+      ? "amazon"
+      : excludeAmazonUpload
+        ? Number(account.vat_rate || 0) === 0
+          ? "tiktok"
+          : "temu"
+        : "amazon"
+  );
+  const [periodPreset, setPeriodPreset] = useState<PeriodPreset>(variant === "amazon-compare" ? "custom" : "mtd");
+  const [periodStart, setPeriodStart] = useState(variant === "amazon-compare" ? "" : initialPeriod.from);
+  const [periodEnd, setPeriodEnd] = useState(variant === "amazon-compare" ? "" : initialPeriod.to);
   const [tiktokSyncing, setTiktokSyncing] = useState(false);
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<RowData[]>([]);
@@ -1023,7 +1048,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
 
   useEffect(() => {
     if (isZeroVatAccount && platform !== "amazon" && platform !== "tiktok") {
-      setPlatform("amazon");
+      setPlatform(excludeAmazonUpload ? "tiktok" : "amazon");
     }
   }, [isZeroVatAccount, platform]);
 
@@ -1305,12 +1330,16 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       // run on Temu reports.
       const goodsToSkuIds = platform === "temu" ? await loadGoodsToSkuIdsMap(supabase, account.id) : new Map<string, string[]>();
 
-      const { data: ledgerRowsRaw } = await supabase
-        .from("expense_ledger")
-        .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
-        .eq("account_id", account.id)
-        .lte("expense_date", periodEnd)
-        .or(`recurring_end_date.is.null,recurring_end_date.gte.${periodStart}`);
+      const { data: ledgerRowsRaw } = await fetchAllRows<ExpenseLedgerRow>((from, to) =>
+        supabase
+          .from("expense_ledger")
+          .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
+          .eq("account_id", account.id)
+          .lte("expense_date", periodEnd)
+          .or(`recurring_end_date.is.null,recurring_end_date.gte.${periodStart}`)
+          .order("expense_date", { ascending: true })
+          .range(from, to)
+      );
       const expenseOccurrences = computeExpenseOccurrencesForPeriod({
         rows: (ledgerRowsRaw || []) as ExpenseLedgerRow[],
         platform,
@@ -1699,7 +1728,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       // (Overview & Velocity, monthly accumulator) reflects the just-uploaded
       // transactions on its very next load — without re-scanning JSONB.
       try {
-        await supabase.rpc("refresh_inventory_sales_facts", { p_account_id: account.id });
+        await refreshInventorySalesAndDailySales(supabase, account.id);
       } catch {
         /* non-fatal: cache will refresh on next report save */
       }
@@ -1732,18 +1761,49 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
         </p>
       ) : null}
 
+      {variant === "amazon-compare" ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          <p className="font-semibold">Amazon manual upload is for comparison only</p>
+          <p className="mt-1">
+            Live Dashboard, Inventory, and Saved Reports for this account read SP-API + Ads. Save a CSV here as
+            <span className="font-medium"> source = Upload</span> to inspect API vs Seller Central settlement files
+            without replacing the API pipeline.
+          </p>
+        </div>
+      ) : null}
+
       <div className="grid gap-3 rounded-2xl border border-slate-200 bg-white p-4 md:grid-cols-4">
+        <div className="md:col-span-4">
+          <PeriodPresetBar
+            value={periodPreset}
+            from={periodStart}
+            to={periodEnd}
+            disabled={!canProcess}
+            onPreset={(next) => {
+              setPeriodPreset(next);
+              if (next === "custom") return;
+              const resolved = resolvePeriod({ preset: next });
+              setPeriodStart(resolved.from);
+              setPeriodEnd(resolved.to);
+            }}
+            onCustomChange={(from, to) => {
+              setPeriodPreset("custom");
+              setPeriodStart(from);
+              setPeriodEnd(to);
+            }}
+          />
+        </div>
         <div>
           <label className="mb-1 block text-sm font-medium text-slate-700">Platform</label>
           <select
             value={platform}
             onChange={(event) => setPlatform(event.target.value as Platform)}
             className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-            disabled={!canProcess}
+            disabled={!canProcess || variant === "amazon-compare"}
           >
-            <option value="amazon">Amazon</option>
-            {!isZeroVatAccount ? <option value="temu">Temu</option> : null}
-            <option value="tiktok">TikTok</option>
+            {excludeAmazonUpload ? null : <option value="amazon">Amazon</option>}
+            {variant !== "amazon-compare" && !isZeroVatAccount ? <option value="temu">Temu</option> : null}
+            {variant !== "amazon-compare" ? <option value="tiktok">TikTok</option> : null}
           </select>
         </div>
 
@@ -1752,7 +1812,10 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
           <input
             type="date"
             value={periodStart}
-            onChange={(event) => setPeriodStart(event.target.value)}
+            onChange={(event) => {
+              setPeriodPreset("custom");
+              setPeriodStart(event.target.value);
+            }}
             className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
             disabled={!canProcess}
           />
@@ -1763,7 +1826,10 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
           <input
             type="date"
             value={periodEnd}
-            onChange={(event) => setPeriodEnd(event.target.value)}
+            onChange={(event) => {
+              setPeriodPreset("custom");
+              setPeriodEnd(event.target.value);
+            }}
             className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
             disabled={!canProcess}
           />

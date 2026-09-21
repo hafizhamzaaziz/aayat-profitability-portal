@@ -2,7 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
+import { refreshInventorySalesAndDailySales } from "@/lib/inventory/refresh-sales";
 import { addDays, formatUkDate } from "@/lib/utils/date";
+import PeriodPresetBar from "@/components/ui/period-preset-bar";
+import { resolvePeriod, type PeriodPreset } from "@/lib/utils/period-presets";
 import { pushClientNotification } from "@/lib/notifications/client";
 import PerSkuTable, { type PerSkuRow } from "@/components/reports/per-sku-table";
 import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
@@ -144,6 +148,7 @@ type Props = {
   canEdit: boolean;
   currency: string;
   vatRate: number;
+  amazonApi?: boolean;
 };
 
 function money(value: number) {
@@ -175,10 +180,17 @@ async function loadGoodsToSkuIdsMap(
   accountId: string
 ): Promise<Map<string, string[]>> {
   const out = new Map<string, string[]>();
-  const { data, error } = await supabase
-    .from("sku_mappings")
-    .select("temu_sku_id, sku_catalog:sku_catalog_id(temu_goods_id)")
-    .eq("account_id", accountId);
+  const { data, error } = await fetchAllRows<{
+    temu_sku_id: string | null;
+    sku_catalog: unknown;
+  }>((from, to) =>
+    supabase
+      .from("sku_mappings")
+      .select("temu_sku_id, sku_catalog:sku_catalog_id(temu_goods_id)")
+      .eq("account_id", accountId)
+      .order("id", { ascending: true })
+      .range(from, to)
+  );
   if (error) return out;
   (data || []).forEach((row) => {
     const rec = row as unknown as {
@@ -205,12 +217,16 @@ async function loadExpenseOccurrencesForReport(
   supabase: ReturnType<typeof createClient>,
   report: Pick<SavedReport, "account_id" | "platform" | "period_start" | "period_end">
 ): Promise<ExpenseOccurrence[]> {
-  const { data } = await supabase
-    .from("expense_ledger")
-    .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
-    .eq("account_id", report.account_id)
-    .lte("expense_date", report.period_end)
-    .or(`recurring_end_date.is.null,recurring_end_date.gte.${report.period_start}`);
+  const { data } = await fetchAllRows<ExpenseLedgerRow>((from, to) =>
+    supabase
+      .from("expense_ledger")
+      .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
+      .eq("account_id", report.account_id)
+      .lte("expense_date", report.period_end)
+      .or(`recurring_end_date.is.null,recurring_end_date.gte.${report.period_start}`)
+      .order("expense_date", { ascending: true })
+      .range(from, to)
+  );
   return computeExpenseOccurrencesForPeriod({
     rows: (data || []) as ExpenseLedgerRow[],
     platform: report.platform,
@@ -219,7 +235,7 @@ async function loadExpenseOccurrencesForReport(
   });
 }
 
-export default function SavedReportsPanel({ accountId, accountName, canEdit, currency, vatRate }: Props) {
+export default function SavedReportsPanel({ accountId, accountName, canEdit, currency, vatRate, amazonApi = false }: Props) {
   const PAGE_SIZE = 20;
   const [reports, setReports] = useState<SavedReport[]>([]);
   const [selectedForCombine, setSelectedForCombine] = useState<string[]>([]);
@@ -235,6 +251,17 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
 
   const [filterStart, setFilterStart] = useState("");
   const [filterEnd, setFilterEnd] = useState("");
+  const [filterPreset, setFilterPreset] = useState<PeriodPreset>("custom");
+  const [apiRange, setApiRange] = useState<{
+    units: number;
+    totalSales: number;
+    netProfit: number;
+    adsSpend: number;
+    acos: number | null;
+    source: string;
+  } | null>(null);
+  const [apiRangeLoading, setApiRangeLoading] = useState(false);
+  const [savingApiRange, setSavingApiRange] = useState(false);
   const [exportNotes, setExportNotes] = useState("");
   const [pageOffset, setPageOffset] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
@@ -357,10 +384,14 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
       .range(offset, offset + PAGE_SIZE - 1);
     let countQuery = supabase.from("reports").select("id", { count: "exact", head: true }).eq("account_id", accountId);
 
-    if (filterStart) query = query.gte("period_start", filterStart);
-    if (filterStart) countQuery = countQuery.gte("period_start", filterStart);
-    if (filterEnd) query = query.lte("period_end", filterEnd);
-    if (filterEnd) countQuery = countQuery.lte("period_end", filterEnd);
+    if (filterStart) {
+      query = query.gte("period_end", filterStart);
+      countQuery = countQuery.gte("period_end", filterStart);
+    }
+    if (filterEnd) {
+      query = query.lte("period_start", filterEnd);
+      countQuery = countQuery.lte("period_start", filterEnd);
+    }
 
     const [{ data, error: fetchError }, { count }] = await Promise.all([query, countQuery]);
 
@@ -374,12 +405,16 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
     if (nextReports.length > 0) {
       const minStart = nextReports.reduce((a, r) => (r.period_start < a ? r.period_start : a), nextReports[0].period_start);
       const maxEnd = nextReports.reduce((a, r) => (r.period_end > a ? r.period_end : a), nextReports[0].period_end);
-      const { data: ledgerRows } = await supabase
-        .from("expense_ledger")
-        .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
-        .eq("account_id", accountId)
-        .lte("expense_date", maxEnd)
-        .or(`recurring_end_date.is.null,recurring_end_date.gte.${minStart}`);
+      const { data: ledgerRows } = await fetchAllRows<ExpenseLedgerRow>((from, to) =>
+        supabase
+          .from("expense_ledger")
+          .select("id, account_id, description, expense_date, amount, includes_vat, marketplace, expense_type, recurring_end_date")
+          .eq("account_id", accountId)
+          .lte("expense_date", maxEnd)
+          .or(`recurring_end_date.is.null,recurring_end_date.gte.${minStart}`)
+          .order("expense_date", { ascending: true })
+          .range(from, to)
+      );
       const allLedger = (ledgerRows || []) as ExpenseLedgerRow[];
       const computed: Record<string, number> = {};
       for (const report of nextReports) {
@@ -430,11 +465,14 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
   const loadPerSkuAndAds = async (reportId: string) => {
     const supabase = createClient();
     const [{ data: skuData }, { data: metaData }] = await Promise.all([
-      supabase
-        .from("report_sku_breakdowns")
-        .select("*")
-        .eq("report_id", reportId)
-        .order("net_profit", { ascending: false }),
+      fetchAllRows<SavedSkuRow>((from, to) =>
+        supabase
+          .from("report_sku_breakdowns")
+          .select("*")
+          .eq("report_id", reportId)
+          .order("net_profit", { ascending: false })
+          .range(from, to)
+      ),
       supabase
         .from("report_ad_meta")
         .select("source_filename, total_spend_exvat, blank_sku_spend, matched_sku_count, unmatched_sku_count, uploaded_at")
@@ -509,10 +547,20 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
       let adReport: AdReport | null = options.adOverride ?? null;
       let temuAdReport: TemuAdReport | null = options.temuAdOverride ?? null;
       if (!adReport && !temuAdReport) {
-        const { data: adRows } = await supabase
-          .from("report_ad_spend")
-          .select("sku, spend_exvat, temu_goods_id, goods_name, source_kind")
-          .eq("report_id", target.id);
+        const { data: adRows } = await fetchAllRows<{
+          sku: string | null;
+          spend_exvat: number;
+          temu_goods_id: string | null;
+          goods_name: string | null;
+          source_kind: string | null;
+        }>((from, to) =>
+          supabase
+            .from("report_ad_spend")
+            .select("sku, spend_exvat, temu_goods_id, goods_name, source_kind")
+            .eq("report_id", target.id)
+            .order("sku", { ascending: true })
+            .range(from, to)
+        );
         const { data: meta } = await supabase
           .from("report_ad_meta")
           .select("source_filename, total_spend_exvat, blank_sku_spend")
@@ -1379,11 +1427,56 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
   };
 
   useEffect(() => {
+    if (!amazonApi) return;
+    const resolved = resolvePeriod({ preset: "mtd" });
+    setFilterPreset("mtd");
+    setFilterStart(resolved.from);
+    setFilterEnd(resolved.to);
+  }, [amazonApi, accountId]);
+
+  useEffect(() => {
     setPageOffset(0);
     autoMigrationAttemptedRef.current = new Set();
     void loadReports(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId]);
+  }, [accountId, filterStart, filterEnd]);
+
+  useEffect(() => {
+    if (!amazonApi || !filterStart || !filterEnd) {
+      setApiRange(null);
+      return;
+    }
+    let cancelled = false;
+    setApiRangeLoading(true);
+    void fetch(
+      `/api/amazon/range-metrics?accountId=${encodeURIComponent(accountId)}&from=${encodeURIComponent(filterStart)}&to=${encodeURIComponent(filterEnd)}`
+    )
+      .then((res) => res.json())
+      .then((payload) => {
+        if (cancelled) return;
+        if (payload?.ok && payload.metrics) {
+          setApiRange({
+            units: Number(payload.metrics.units || 0),
+            totalSales: Number(payload.metrics.totalSales || 0),
+            netProfit: Number(payload.metrics.netProfit || 0),
+            adsSpend: Number(payload.metrics.adsSpend || 0),
+            acos: payload.metrics.acos ?? null,
+            source: String(payload.metrics.source || "sp_api"),
+          });
+        } else {
+          setApiRange(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setApiRange(null);
+      })
+      .finally(() => {
+        if (!cancelled) setApiRangeLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [amazonApi, accountId, filterStart, filterEnd]);
 
   useEffect(() => {
     if (loading) return;
@@ -1486,7 +1579,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
       // Keep the inventory sales-facts cache in sync so removed transactions
       // disappear from Overview & Velocity immediately.
       try {
-        await supabase.rpc("refresh_inventory_sales_facts", { p_account_id: accountIdForRefresh });
+        await refreshInventorySalesAndDailySales(supabase, accountIdForRefresh);
       } catch {
         /* non-fatal */
       }
@@ -1720,12 +1813,34 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
       ) : null}
 
       <div className="flex flex-wrap items-end gap-2">
+        <div className="w-full">
+          <PeriodPresetBar
+            value={filterPreset}
+            from={filterStart}
+            to={filterEnd}
+            onPreset={(next) => {
+              setFilterPreset(next);
+              if (next === "custom") return;
+              const resolved = resolvePeriod({ preset: next });
+              setFilterStart(resolved.from);
+              setFilterEnd(resolved.to);
+            }}
+            onCustomChange={(from, to) => {
+              setFilterPreset("custom");
+              setFilterStart(from);
+              setFilterEnd(to);
+            }}
+          />
+        </div>
         <div>
           <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">History Start</label>
           <input
             type="date"
             value={filterStart}
-            onChange={(e) => setFilterStart(e.target.value)}
+            onChange={(e) => {
+              setFilterPreset("custom");
+              setFilterStart(e.target.value);
+            }}
             className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
           />
         </div>
@@ -1734,7 +1849,10 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
           <input
             type="date"
             value={filterEnd}
-            onChange={(e) => setFilterEnd(e.target.value)}
+            onChange={(e) => {
+              setFilterPreset("custom");
+              setFilterEnd(e.target.value);
+            }}
             className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
           />
         </div>
@@ -1758,7 +1876,53 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
             {emailing ? "Emailing..." : "Email Combined to Client"}
           </button>
         ) : null}
+        {amazonApi && canEdit && filterStart && filterEnd ? (
+          <button
+            type="button"
+            disabled={savingApiRange || apiRangeLoading}
+            onClick={async () => {
+              setSavingApiRange(true);
+              setError(null);
+              try {
+                const res = await fetch("/api/amazon/range-metrics", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ accountId, from: filterStart, to: filterEnd }),
+                });
+                const payload = (await res.json()) as { ok?: boolean; error?: string };
+                if (!res.ok || payload.ok === false) throw new Error(payload.error || "Failed to save API range");
+                setMessage(`Saved Amazon API report for ${filterStart} to ${filterEnd}.`);
+                await loadReports(0);
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Failed to save API range.");
+              } finally {
+                setSavingApiRange(false);
+              }
+            }}
+            className="rounded-xl bg-emerald-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+          >
+            {savingApiRange ? "Saving…" : "Save API range"}
+          </button>
+        ) : null}
       </div>
+      {amazonApi && (filterStart || filterEnd || apiRangeLoading || apiRange) ? (
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+          <p className="font-semibold text-slate-900">Amazon API period (same facts as Dashboard)</p>
+          {apiRangeLoading ? (
+            <p className="mt-1 text-slate-500">Loading period totals…</p>
+          ) : apiRange ? (
+            <p className="mt-1">
+              Units {apiRange.units.toLocaleString()} · Sales {currency}
+              {apiRange.totalSales.toLocaleString(undefined, { maximumFractionDigits: 2 })} · Profit {currency}
+              {apiRange.netProfit.toLocaleString(undefined, { maximumFractionDigits: 2 })} · Ads {currency}
+              {apiRange.adsSpend.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              {apiRange.acos != null ? ` · ACOS ${(apiRange.acos * 100).toFixed(1)}%` : ""} · {apiRange.source}
+            </p>
+          ) : (
+            <p className="mt-1 text-slate-500">Pick a preset or custom range to view API-backed totals.</p>
+          )}
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center justify-end gap-2">
         <span className="text-xs text-slate-500">
           Page {currentPage} of {totalPages} ({totalCount} items)

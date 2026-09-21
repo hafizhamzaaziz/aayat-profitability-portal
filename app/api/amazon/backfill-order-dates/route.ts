@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { requireStaffAccountAccess } from "@/lib/auth/require-account";
+import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { loadSpApiClient } from "@/lib/amazon/credentials";
 import { fetchPurchaseDatesByOrderId } from "@/lib/amazon/ingest/purchase-dates";
 import { syncAmazonInventorySalesFromOrders } from "@/lib/amazon/ingest/orders-sales";
@@ -40,11 +42,6 @@ export async function POST(request: NextRequest) {
     data: { user },
   } = await userClient.auth.getUser();
   if (!user) return Response.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-  const { data: userRow } = await userClient.from("users").select("role").eq("id", user.id).single();
-  const role = String(userRow?.role || "client");
-  if (role !== "admin" && role !== "team") {
-    return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
-  }
 
   let body: Body;
   try {
@@ -54,6 +51,8 @@ export async function POST(request: NextRequest) {
   }
   const accountId = String(body.accountId || "").trim();
   if (!accountId) return Response.json({ ok: false, error: "Missing accountId" }, { status: 400 });
+  const access = await requireStaffAccountAccess(userClient, user.id, accountId);
+  if (!access.account) return Response.json({ ok: false, error: "Forbidden" }, { status: 403 });
   const from = toIsoDate(body.from);
   const to = toIsoDate(body.to);
   if (from && to && from > to) {
@@ -72,15 +71,21 @@ export async function POST(request: NextRequest) {
     };
 
     if (mode === "stamp" || mode === "both") {
-      let query = admin
-        .from("report_transactions")
-        .select("id, raw_row")
-        .eq("account_id", accountId)
-        .eq("source", "sp_api")
-        .eq("platform", "amazon");
-      if (from) query = query.gte("transaction_date", from);
-      if (to) query = query.lte("transaction_date", to);
-      const { data: rows, error } = await query.limit(50000);
+      const { data: rows, error } = await fetchAllRows<{ id: string; raw_row: Record<string, unknown> | null }>(
+        (fromIdx, toIdx) => {
+          let query = admin
+            .from("report_transactions")
+            .select("id, raw_row")
+            .eq("account_id", accountId)
+            .eq("source", "sp_api")
+            .eq("platform", "amazon")
+            .order("id", { ascending: true })
+            .range(fromIdx, toIdx);
+          if (from) query = query.gte("transaction_date", from);
+          if (to) query = query.lte("transaction_date", to);
+          return query;
+        }
+      );
       if (error) throw new Error(error.message);
 
       const orderRows = (rows || []).filter((r) => {

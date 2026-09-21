@@ -249,6 +249,28 @@ export class SpApiClient {
   }
 
   /**
+   * GET /catalog/2022-04-01/items/{asin}
+   * Title, parent ASIN, and sales ranks when Amazon has them.
+   * Does not return review count or star rating.
+   */
+  async getCatalogItem(
+    asin: string,
+    marketplaceId: string
+  ): Promise<{
+    asin?: string;
+    summaries?: Array<{ itemName?: string; brand?: string }>;
+    relationships?: Array<{ parentAsins?: string[] }>;
+    salesRanks?: Array<{ displayGroupRanks?: Array<{ title?: string; rank?: number }> }>;
+  }> {
+    return this.request(`/catalog/2022-04-01/items/${encodeURIComponent(asin)}`, {
+      query: {
+        marketplaceIds: marketplaceId,
+        includedData: "summaries,relationships,salesRanks",
+      },
+    });
+  }
+
+  /**
    * GET /finances/v0/financialEventGroups
    * Lists settlement-period groups. Use this to discover the IDs of
    * financial-event groups that ended within a date range, then call

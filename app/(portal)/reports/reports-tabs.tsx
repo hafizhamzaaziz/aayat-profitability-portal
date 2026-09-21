@@ -2,18 +2,26 @@
 
 import { useState, type ReactNode } from "react";
 
-type TabId = "generate" | "saved";
+type TabId = "saved" | "generate" | "compare";
 
 type Props = {
   generate: ReactNode;
   saved: ReactNode;
+  compare?: ReactNode;
   initialTab?: TabId;
-  /** When false, the Generate tab is hidden (e.g. client role). */
   showGenerate?: boolean;
+  showCompare?: boolean;
 };
 
-export default function ReportsTabs({ generate, saved, initialTab = "saved", showGenerate = true }: Props) {
-  const [tab, setTab] = useState<TabId>(showGenerate ? initialTab : "saved");
+export default function ReportsTabs({
+  generate,
+  saved,
+  compare,
+  initialTab = "saved",
+  showGenerate = true,
+  showCompare = false,
+}: Props) {
+  const [tab, setTab] = useState<TabId>(showGenerate || showCompare ? initialTab : "saved");
 
   const tabClass = (active: boolean) =>
     `flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition-colors ${
@@ -33,9 +41,15 @@ export default function ReportsTabs({ generate, saved, initialTab = "saved", sho
             New Report
           </button>
         ) : null}
+        {showCompare ? (
+          <button type="button" onClick={() => setTab("compare")} className={tabClass(tab === "compare")}>
+            Compare Amazon
+          </button>
+        ) : null}
       </div>
       <div className={tab === "generate" && showGenerate ? "block" : "hidden"}>{generate}</div>
-      <div className={tab === "saved" || !showGenerate ? "block" : "hidden"}>{saved}</div>
+      <div className={tab === "compare" && showCompare ? "block" : "hidden"}>{compare}</div>
+      <div className={tab === "saved" || (!showGenerate && !showCompare) ? "block" : "hidden"}>{saved}</div>
     </div>
   );
 }

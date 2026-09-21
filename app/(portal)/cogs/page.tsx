@@ -4,6 +4,7 @@ import type { UserRole } from "@/lib/types/auth";
 import { getAccountByIdForRole } from "@/lib/data/accounts";
 import CogsTable from "./cogs-table";
 import SkuMappingsPanel from "./sku-mappings-panel";
+import UnmatchedAmazonSkusPanel from "./unmatched-amazon-skus-panel";
 
 export const metadata: Metadata = {
   title: "COGS",
@@ -53,6 +54,7 @@ export default async function CogsPage({
         Account: <span className="font-semibold">{account.name}</span>
       </p>
       <CogsTable accountId={account.id} canEdit={canEdit} />
+      <UnmatchedAmazonSkusPanel accountId={account.id} canEdit={canEdit} />
       <SkuMappingsPanel accountId={account.id} canEdit={canEdit} />
     </div>
   );
