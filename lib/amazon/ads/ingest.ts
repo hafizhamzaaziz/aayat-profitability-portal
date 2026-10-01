@@ -8,17 +8,18 @@
  *        b. Poll until COMPLETED, download the gzipped JSON, parse rows.
  *   2. Aggregate rows by calendar month + SKU → { month: { sku: spendExvat } }.
  *   3. For each (account, month) bucket:
- *        a. Find OR create the matching `reports` row (preferring source='sp_api'
- *           if one exists, else 'manual', else create a new minimal 'sp_api' shell
- *           that the next sync will fill in).
+ *        a. Find OR create the matching `reports` row with source='sp_api'.
+ *           A manual report for the same month is never updated. If no API
+ *           report exists yet, create a minimal sp_api shell for the next
+ *           Finance sync to fill in.
  *        b. Replace `report_ad_meta` + `report_ad_spend` for that report.
  *        c. Trigger a server-side recompute (computeAmazonPnl + applyAdReportOverride
  *           + computePerSku) so the report's net_profit, breakdown.advertising and
  *           per-SKU rows reflect the new ads data immediately — no manual
  *           "recompute" click needed.
  *
- * Coexistence: when both a manual ad CSV and an Ads-API sync exist for the
- * same month, Ads-API wins (it's more granular and always up-to-date). The
+ * Coexistence: Ads-API spend is stored on the sp_api report. A manual report
+ * for the same month keeps the ads CSV uploaded with it. The
  * `report_ad_meta.source_filename` is set to "amazon-ads-api:{startDate}…
  * {endDate}" so the UI can show the provenance.
  */
@@ -128,28 +129,25 @@ async function findOrCreateReport(
   bucketStart: string,
   bucketEnd: string
 ): Promise<{ id: string; account_id: string; created: boolean }> {
-  // Prefer an existing report — sp_api first (most authoritative), then any.
+  // Ads API data hangs off the API report only. A manual CSV report for the
+  // same month is a comparison copy and must not be recomputed or overwritten.
   const { data: existing, error } = await supabase
     .from("reports")
-    .select("id, account_id, source")
+    .select("id, account_id")
     .eq("account_id", accountId)
     .eq("platform", "amazon")
     .eq("period_start", bucketStart)
-    .eq("period_end", bucketEnd);
+    .eq("period_end", bucketEnd)
+    .eq("source", "sp_api")
+    .maybeSingle();
   if (error) throw error;
 
-  if (existing && existing.length > 0) {
-    const sorted = [...existing].sort((a, b) => {
-      const aw = a.source === "sp_api" ? 0 : a.source === "manual" ? 1 : 2;
-      const bw = b.source === "sp_api" ? 0 : b.source === "manual" ? 1 : 2;
-      return aw - bw;
-    });
-    return { id: sorted[0].id as string, account_id: sorted[0].account_id as string, created: false };
+  if (existing) {
+    return { id: existing.id as string, account_id: existing.account_id as string, created: false };
   }
 
-  // No report yet — create a minimal sp_api shell. The next Finance sync
-  // (or a manual upload) will overwrite the figures; for now the report
-  // exists only to hang ad data off.
+  // No API report yet — create a minimal sp_api shell. The next Finance sync
+  // fills in the figures. A later manual upload inserts its own row.
   const minimalPayload = {
     account_id: accountId,
     period_start: bucketStart,
