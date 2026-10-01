@@ -8,6 +8,7 @@ import DashboardKpis from "./dashboard-kpis";
 import DashboardTopSkus from "./dashboard-top-skus";
 import { formatUkDate } from "@/lib/utils/date";
 import { createNotification } from "@/lib/notifications/server";
+import { officialReportsForTotals, reportOriginLabel } from "@/lib/reports/report-source";
 
 type Search = {
   accountId?: string;
@@ -25,6 +26,7 @@ type ReportRow = {
   platform: string;
   period_start: string;
   period_end: string;
+  source?: string | null;
   gross_sales: number;
   breakdown: { summaryLines?: Array<{ label: string; value: number }> } | null;
   total_cogs: number;
@@ -65,7 +67,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
     let query = supabase
       .from("reports")
       .select(
-        "id, platform, period_start, period_end, gross_sales, breakdown, total_cogs, total_fees, output_vat, input_vat, net_profit"
+        "id, platform, period_start, period_end, source, gross_sales, breakdown, total_cogs, total_fees, output_vat, input_vat, net_profit"
       )
       .eq("account_id", account.id)
       .order("period_start", { ascending: false });
@@ -111,7 +113,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
       const { data: priorData } = await supabase
         .from("reports")
         .select(
-          "id, platform, period_start, period_end, gross_sales, breakdown, total_cogs, total_fees, output_vat, input_vat, net_profit"
+          "id, platform, period_start, period_end, source, gross_sales, breakdown, total_cogs, total_fees, output_vat, input_vat, net_profit"
         )
         .eq("account_id", account.id)
         .in("period_start", priorStarts);
@@ -119,8 +121,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
         wantedKeys.has(`${r.platform}|${r.period_start}`)
       );
 
-      // Top SKUs across selected reports
-      const ids = reports.map((r) => r.id);
+      // Top SKUs follow the same Amazon rule as the KPI totals: when a month
+      // has both an API report and a manual report, only the API report counts.
+      const ids = officialReportsForTotals(reports).map((r) => r.id);
       const { data: skuRows } = await supabase
         .from("report_sku_breakdowns")
         .select("sku, description, units, net_sales, net_profit")
@@ -140,7 +143,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
     }
   }
 
-  const totals = reports.reduce(
+  const countedReports = officialReportsForTotals(reports);
+  const countedPrior = officialReportsForTotals(priorReports);
+  const totals = countedReports.reduce(
     (acc, row) => {
       acc.netProfit += Number(row.net_profit || 0);
       acc.vatPosition += Number((row.output_vat || 0) - (row.input_vat || 0));
@@ -152,7 +157,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
     { netProfit: 0, vatPosition: 0, totalSales: 0, totalCogs: 0, totalFees: 0 }
   );
 
-  const priorTotals = priorReports.reduce(
+  const priorTotals = countedPrior.reduce(
     (acc, row) => {
       acc.netProfit += Number(row.net_profit || 0);
       acc.vatPosition += Number((row.output_vat || 0) - (row.input_vat || 0));
@@ -186,12 +191,12 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
         currency={account?.currency || "£"}
         current={totals}
         prior={priorTotals}
-        hasPrior={priorReports.length > 0}
+        hasPrior={countedPrior.length > 0}
       />
 
       <DashboardCharts
         currency={account?.currency || "£"}
-        reports={reports.map((row) => ({
+        reports={countedReports.map((row) => ({
           id: row.id,
           platform: row.platform,
           period_start: row.period_start,
@@ -208,6 +213,11 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
 
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
         <h4 className="mb-3 text-sm font-semibold text-slate-800">Saved Reports</h4>
+        {countedReports.length < reports.length ? (
+          <p className="mb-3 text-xs text-slate-500">
+            Totals above use the API report when an Amazon month also has a manual report. Both stay in this list.
+          </p>
+        ) : null}
         {reports.length === 0 ? (
           <p className="text-sm text-slate-500">No saved reports for current filter.</p>
         ) : (
@@ -216,6 +226,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
               <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="py-2 pr-4">Platform</th>
+                  <th className="py-2 pr-4">Source</th>
                   <th className="py-2 pr-4">Start</th>
                   <th className="py-2 pr-4">End</th>
                   <th className="py-2 pr-4">Net Profit</th>
@@ -225,6 +236,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
                 {reports.map((report) => (
                   <tr key={report.id} className="border-t border-slate-100">
                     <td className="py-2 pr-4 capitalize">{report.platform}</td>
+                    <td className="py-2 pr-4">{reportOriginLabel(report.source)}</td>
                     <td className="py-2 pr-4">{formatUkDate(report.period_start)}</td>
                     <td className="py-2 pr-4">{formatUkDate(report.period_end)}</td>
                     <td className="py-2 pr-4">{Number(report.net_profit).toFixed(2)}</td>

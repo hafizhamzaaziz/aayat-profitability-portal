@@ -30,6 +30,7 @@ import {
   type ExpenseOccurrence,
 } from "@/lib/reports/expense-ledger";
 import { deriveReportWarnings } from "@/lib/reports/guardrails";
+import { reportOriginLabel } from "@/lib/reports/report-source";
 import type { AdReport } from "@/lib/reports/types";
 
 type SavedReport = {
@@ -201,6 +202,188 @@ function getPrimarySales(report: SavedReport) {
   return Number(line?.value ?? report.gross_sales ?? 0);
 }
 
+function ReportOriginBadge({ source }: { source?: string | null }) {
+  const api = source === "sp_api";
+  return (
+    <span
+      className={
+        api
+          ? "rounded-full bg-[var(--md-primary-container)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--md-secondary)]"
+          : "rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600"
+      }
+      title={api ? "Built from the Amazon SP-API connection" : "Uploaded manually via CSV"}
+    >
+      {reportOriginLabel(source)}
+    </span>
+  );
+}
+
+function formatComparisonValue(value: number | null, currency: string, kind: "money" | "units") {
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (kind === "units") return Math.round(value).toLocaleString();
+  const sign = value < 0 ? "-" : "";
+  return `${sign}${currency}${Math.abs(value).toFixed(2)}`;
+}
+
+function SourceComparisonTable({
+  comparison,
+  currency,
+  openReportId,
+  onOpen,
+}: {
+  comparison: SourceComparison;
+  currency: string;
+  openReportId: string | null;
+  onOpen: (id: string) => void;
+}) {
+  const rows: Array<{ label: string; kind: "money" | "units"; manual: number | null; api: number | null }> = [
+    { label: "Sales", kind: "money", manual: comparison.manual.sales, api: comparison.api.sales },
+    { label: "Units", kind: "units", manual: comparison.manual.units, api: comparison.api.units },
+    { label: "Fees", kind: "money", manual: comparison.manual.fees, api: comparison.api.fees },
+    { label: "Ad spend", kind: "money", manual: comparison.manual.adSpend, api: comparison.api.adSpend },
+    { label: "COGS", kind: "money", manual: comparison.manual.cogs, api: comparison.api.cogs },
+    { label: "Net", kind: "money", manual: comparison.manual.net, api: comparison.api.net },
+  ];
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Manual vs API</p>
+          <p className="mt-1 text-xs text-slate-500">
+            Same period, saved separately. Difference is manual minus API. Figures are the stored headlines.
+          </p>
+        </div>
+        {openReportId ? (
+          <button
+            type="button"
+            onClick={() => onOpen(openReportId)}
+            className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 ring-1 ring-slate-200"
+          >
+            Open {openReportId === comparison.api.id ? "API" : "Manual"} report
+          </button>
+        ) : null}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
+          <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="py-1 pr-4 font-semibold">Figure</th>
+              <th className="py-1 pr-4 font-semibold">Manual</th>
+              <th className="py-1 pr-4 font-semibold">API</th>
+              <th className="py-1 pr-4 font-semibold">Difference</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const delta = row.manual == null || row.api == null ? null : row.manual - row.api;
+              return (
+                <tr key={row.label} className="border-t border-slate-200">
+                  <th className="py-1.5 pr-4 text-left font-medium text-slate-600">{row.label}</th>
+                  <td className="py-1.5 pr-4">{formatComparisonValue(row.manual, currency, row.kind)}</td>
+                  <td className="py-1.5 pr-4">{formatComparisonValue(row.api, currency, row.kind)}</td>
+                  <td className="py-1.5 pr-4">{formatComparisonValue(delta, currency, row.kind)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+type HeadlineSide = {
+  id: string;
+  source: string | null;
+  sales: number;
+  units: number;
+  fees: number;
+  adSpend: number | null;
+  cogs: number;
+  net: number;
+};
+
+type SourceComparison = {
+  manual: HeadlineSide;
+  api: HeadlineSide;
+};
+
+function adSpendFromBreakdown(breakdown: SavedReport["breakdown"]): number | null {
+  const total = breakdown?.adsOverride?.adReportTotal;
+  if (typeof total === "number" && Number.isFinite(total)) return Math.abs(total);
+  return null;
+}
+
+async function sumUnitsByReport(supabase: ReturnType<typeof createClient>, ids: string[]) {
+  const totals = new Map<string, number>();
+  const pageSize = 1000;
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("report_sku_breakdowns")
+      .select("report_id, units")
+      .in("report_id", ids)
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    const batch = data || [];
+    for (const row of batch) {
+      const id = String((row as { report_id: string }).report_id);
+      totals.set(id, (totals.get(id) || 0) + Number((row as { units: number | null }).units || 0));
+    }
+    if (batch.length < pageSize) break;
+  }
+  return totals;
+}
+
+async function loadAmazonSourceComparison(selected: SavedReport): Promise<SourceComparison | null> {
+  if (selected.platform !== "amazon") return null;
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from("reports")
+    .select("id, source, platform, gross_sales, total_cogs, total_fees, net_profit, breakdown")
+    .eq("account_id", selected.account_id)
+    .eq("platform", "amazon")
+    .eq("period_start", selected.period_start)
+    .eq("period_end", selected.period_end);
+  if (error || !data || data.length < 2) return null;
+
+  const rows = data as Array<
+    Pick<SavedReport, "id" | "source" | "platform" | "gross_sales" | "total_cogs" | "total_fees" | "net_profit" | "breakdown">
+  >;
+  const api = rows.find((row) => row.source === "sp_api");
+  const manual = rows.find((row) => row.source !== "sp_api");
+  if (!api || !manual) return null;
+
+  const ids = [manual.id, api.id];
+  const [unitsByReport, adResult] = await Promise.all([
+    sumUnitsByReport(supabase, ids),
+    supabase.from("report_ad_meta").select("report_id, total_spend_exvat").in("report_id", ids),
+  ]);
+  const adByReport = new Map<string, number>();
+  for (const row of adResult.data || []) {
+    adByReport.set(String(row.report_id), Number(row.total_spend_exvat || 0));
+  }
+
+  const side = (
+    row: Pick<SavedReport, "id" | "source" | "gross_sales" | "total_cogs" | "total_fees" | "net_profit" | "breakdown">
+  ): HeadlineSide => ({
+    id: row.id,
+    source: row.source ?? "manual",
+    sales: getPrimarySales({
+      ...selected,
+      gross_sales: row.gross_sales,
+      breakdown: row.breakdown,
+      platform: "amazon",
+    }),
+    units: unitsByReport.get(row.id) || 0,
+    fees: Number(row.total_fees || 0),
+    adSpend: adByReport.has(row.id) ? (adByReport.get(row.id) as number) : adSpendFromBreakdown(row.breakdown),
+    cogs: Number(row.total_cogs || 0),
+    net: Number(row.net_profit || 0),
+  });
+
+  return { manual: side(manual), api: side(api) };
+}
+
 async function loadExpenseOccurrencesForReport(
   supabase: ReturnType<typeof createClient>,
   report: Pick<SavedReport, "account_id" | "platform" | "period_start" | "period_end">
@@ -241,6 +424,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
 
   const [skuRows, setSkuRows] = useState<SavedSkuRow[]>([]);
   const [adMeta, setAdMeta] = useState<SavedAdMeta | null>(null);
+  const [sourceComparison, setSourceComparison] = useState<SourceComparison | null>(null);
   const [recomputing, setRecomputing] = useState(false);
   const [adUpdating, setAdUpdating] = useState(false);
   const [cogsVatPctDraft, setCogsVatPctDraft] = useState<number>(100);
@@ -252,6 +436,11 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
   const currentPage = Math.floor(pageOffset / PAGE_SIZE) + 1;
 
   const selected = useMemo(() => reports.find((r) => r.id === selectedId) || null, [reports, selectedId]);
+  const comparisonOpenId = useMemo(() => {
+    if (!selected || !sourceComparison) return null;
+    const otherId = selected.id === sourceComparison.api.id ? sourceComparison.manual.id : sourceComparison.api.id;
+    return reports.some((report) => report.id === otherId) ? otherId : null;
+  }, [reports, selected, sourceComparison]);
   const getMarketplaceOperatingProfit = (report: SavedReport) => {
     if (
       typeof (report.breakdown as { perSkuRollup?: { marketplaceNetProfitSum?: unknown } } | null)?.perSkuRollup
@@ -354,6 +543,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
       )
       .eq("account_id", accountId)
       .order("period_start", { ascending: false })
+      .order("source", { ascending: false })
       .range(offset, offset + PAGE_SIZE - 1);
     let countQuery = supabase.from("reports").select("id", { count: "exact", head: true }).eq("account_id", accountId);
 
@@ -1406,6 +1596,25 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
     void loadPerSkuAndAds(selected.id);
   }, [selected]);
 
+  useEffect(() => {
+    if (!selected || selected.platform !== "amazon") {
+      setSourceComparison(null);
+      return;
+    }
+    let cancelled = false;
+    setSourceComparison(null);
+    void loadAmazonSourceComparison(selected)
+      .then((pair) => {
+        if (!cancelled) setSourceComparison(pair);
+      })
+      .catch(() => {
+        if (!cancelled) setSourceComparison(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
   const saveChanges = async () => {
     if (!selected) return;
 
@@ -1836,21 +2045,7 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
                     onChange={() => toggleReportForCombine(report.id)}
                   />
                   <p className="font-semibold capitalize">{report.platform}</p>
-                  {report.source === "sp_api" ? (
-                    <span
-                      className="rounded-full bg-[var(--md-primary-container)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--md-secondary)]"
-                      title="Auto-synced from Amazon SP-API"
-                    >
-                      SP-API
-                    </span>
-                  ) : (
-                    <span
-                      className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600"
-                      title="Uploaded manually via CSV"
-                    >
-                      Manual
-                    </span>
-                  )}
+                  <ReportOriginBadge source={report.source} />
                 </div>
                 <p className="text-xs text-slate-500">
                   {formatUkDate(report.period_start)} to {formatUkDate(report.period_end)}
@@ -1871,7 +2066,13 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
             <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
-                  <h5 className="text-sm font-semibold text-slate-800">Report Detail</h5>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h5 className="text-sm font-semibold text-slate-800">Report Detail</h5>
+                    <ReportOriginBadge source={selected.source} />
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {formatUkDate(selected.period_start)} to {formatUkDate(selected.period_end)}
+                  </p>
                   <p className="mt-1 text-xs text-slate-500">
                     {canEdit ? (
                       <>
@@ -1976,6 +2177,15 @@ export default function SavedReportsPanel({ accountId, accountName, canEdit, cur
                 <p className="text-xs uppercase tracking-wide text-slate-300">Net Profit</p>
                 <p className="text-2xl font-semibold">{currency}{liveValues.netProfit.toFixed(2)}</p>
               </div>
+
+              {selected.platform === "amazon" && sourceComparison ? (
+                <SourceComparisonTable
+                  comparison={sourceComparison}
+                  currency={currency}
+                  openReportId={comparisonOpenId}
+                  onOpen={setSelectedId}
+                />
+              ) : null}
 
               {selected.platform === "temu" &&
               typeof (selected.breakdown as { pnl?: { coreOperatingProfit?: unknown; adjustmentsNet?: unknown } } | null)

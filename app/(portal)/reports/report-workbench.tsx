@@ -8,6 +8,7 @@ import { createClient } from "@/lib/supabase/client";
 import { pushClientNotification } from "@/lib/notifications/client";
 import { applyCogsVersion } from "@/lib/cogs/apply-cogs-version";
 import { deriveReportWarnings, validateBreakdown, validatePeriodRange } from "@/lib/reports/guardrails";
+import { decideManualSave } from "@/lib/reports/report-source";
 import FileDropzone from "@/components/ui/file-dropzone";
 import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
 import { computePerSku } from "@/lib/reports/per-sku";
@@ -1437,24 +1438,35 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
 
       const { data: overlaps, error: overlapError } = await supabase
         .from("reports")
-        .select("id, period_start, period_end")
+        .select("id, period_start, period_end, source")
         .eq("account_id", account.id)
         .eq("platform", platform)
         .lte("period_start", periodEnd)
         .gte("period_end", periodStart);
       if (overlapError) throw overlapError;
-      const conflicting = (overlaps || []).filter(
-        (row) => !(String(row.period_start) === periodStart && String(row.period_end) === periodEnd)
-      );
-      if (conflicting.length > 0) {
-        throw new Error("This period overlaps with an existing report. Use non-overlapping dates.");
+      const decision = decideManualSave({
+        platform,
+        periodStart,
+        periodEnd,
+        existing: (overlaps || []) as Array<{
+          id: string;
+          period_start: string;
+          period_end: string;
+          source?: string | null;
+        }>,
+      });
+      if (decision.blockingOverlap) {
+        throw new Error(
+          platform === "amazon"
+            ? "This period overlaps an existing manual Amazon report. Use non-overlapping dates, or match that report's dates to replace it. An API report for the same dates is kept separately."
+            : "This period overlaps with an existing report. Use non-overlapping dates."
+        );
       }
-      const exactMatch = (overlaps || []).find(
-        (row) => String(row.period_start) === periodStart && String(row.period_end) === periodEnd
-      );
-      if (exactMatch) {
+      if (decision.overwriteId) {
         const shouldOverwrite = window.confirm(
-          "A report for this same platform and period already exists. Click OK to overwrite it, or Cancel to stop."
+          platform === "amazon"
+            ? "A manual Amazon report for this period already exists. Click OK to overwrite that manual report. An API report for the same period is left unchanged."
+            : "A report for this same platform and period already exists. Click OK to overwrite it, or Cancel to stop."
         );
         if (!shouldOverwrite) {
           setWarnings((prev) => [
@@ -1465,6 +1477,7 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
           return;
         }
       }
+      const keptApiSibling = decision.keepsApiSibling;
 
       const reportPayload = {
         account_id: account.id,
@@ -1705,10 +1718,13 @@ export default function ReportWorkbench({ account, canProcess }: Props) {
       }
 
       const adsSavedThisRun = (platform === "amazon" && Boolean(adReport)) || (platform === "temu" && Boolean(temuAdReport));
+      const savedBase = adsSavedThisRun
+        ? "Report, per-SKU breakdown, and ads report saved successfully."
+        : "Report and per-SKU breakdown saved successfully.";
       setMessage(
-        adsSavedThisRun
-          ? "Report, per-SKU breakdown, and ads report saved successfully."
-          : "Report and per-SKU breakdown saved successfully."
+        keptApiSibling
+          ? `${savedBase} The API report for this period was left in place, so both reports are saved.`
+          : savedBase
       );
     } catch (err) {
       const text = err instanceof Error ? err.message : "Failed to save report.";

@@ -194,6 +194,7 @@ create table if not exists public.reports (
   net_profit numeric(14,2) not null default 0,
   breakdown jsonb,
   cogs_snapshot jsonb,
+  source text not null default 'manual',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique(account_id, period_start, period_end, platform, source)
@@ -1571,3 +1572,56 @@ $$;
 
 revoke all on function public.sync_amazon_daily_sales_from_facts(uuid, date, date) from public, anon;
 grant execute on function public.sync_amazon_daily_sales_from_facts(uuid, date, date) to authenticated, service_role;
+
+-- ---------------------------------------------------------------------------
+-- 16) Amazon manual vs API report coexistence
+--   A manual CSV upload and an SP-API sync for the same account, platform and
+--   period are two rows. The unique key includes source. Re-runnable; does not
+--   rewrite existing report rows. See
+--   supabase/migrations/20261001154500_reports_manual_api_coexistence.sql.
+-- ---------------------------------------------------------------------------
+alter table public.reports
+  add column if not exists source text not null default 'manual';
+
+create index if not exists idx_reports_account_source
+  on public.reports(account_id, source);
+
+do $$
+declare
+  rel_oid oid;
+  con record;
+  cols text[];
+  has_source_unique boolean := false;
+begin
+  select c.oid into rel_oid
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relname = 'reports';
+
+  if rel_oid is null then
+    return;
+  end if;
+
+  for con in
+    select c.oid, c.conname, c.conkey
+    from pg_constraint c
+    where c.conrelid = rel_oid and c.contype = 'u'
+  loop
+    select array_agg(a.attname::text order by a.attname)
+      into cols
+    from unnest(con.conkey) as u(attnum)
+    join pg_attribute a on a.attrelid = rel_oid and a.attnum = u.attnum;
+
+    if cols = array['account_id', 'period_end', 'period_start', 'platform', 'source']::text[] then
+      has_source_unique := true;
+    elsif cols = array['account_id', 'period_end', 'period_start', 'platform']::text[] then
+      execute format('alter table public.reports drop constraint %I', con.conname);
+    end if;
+  end loop;
+
+  if not has_source_unique then
+    alter table public.reports
+      add constraint reports_account_period_platform_source_key
+      unique (account_id, period_start, period_end, platform, source);
+  end if;
+end $$;
