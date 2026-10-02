@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchAllRows } from "@/lib/supabase/fetch-all";
 import { preferCanonicalReports } from "@/lib/reports/prefer-canonical-reports";
-import { resolvePeriod, type PeriodPreset } from "@/lib/utils/period-presets";
+import { resolvePeriod, priorPeriod, type PeriodPreset } from "@/lib/utils/period-presets";
 
 export type AmazonRangeMetrics = {
   from: string;
@@ -16,6 +16,8 @@ export type AmazonRangeMetrics = {
   acos: number | null;
   source: "sp_api" | "mixed" | "facts_only";
   reportIds: string[];
+  /** Equal-length prior window, stored on preset snapshots so the dashboard skips a live recompute. */
+  prior?: AmazonRangeMetrics;
 };
 
 type ReportRow = {
@@ -57,8 +59,27 @@ async function amazonUnitsInRange(
   supabase: SupabaseClient,
   accountId: string,
   from: string,
-  to: string
+  to: string,
+  cache?: Map<string, number>
 ): Promise<number> {
+  const cacheKey = `${accountId}:${from}:${to}`;
+  if (cache?.has(cacheKey)) return cache.get(cacheKey)!;
+
+  const { data: summed, error: sumError } = await supabase
+    .from("inventory_sales_facts_cache")
+    .select("qty.sum()")
+    .eq("account_id", accountId)
+    .ilike("platform", "amazon%")
+    .gte("sale_date", from)
+    .lte("sale_date", to)
+    .maybeSingle();
+  const aggregate = summed as { sum?: number | string | null } | null;
+  if (!sumError && aggregate && aggregate.sum != null) {
+    const total = Number(aggregate.sum || 0);
+    cache?.set(cacheKey, total);
+    return total;
+  }
+
   const { data } = await fetchAllRows<{ qty: number | string | null }>((start, end) =>
     supabase
       .from("inventory_sales_facts_cache")
@@ -70,7 +91,9 @@ async function amazonUnitsInRange(
       .order("sale_date", { ascending: true })
       .range(start, end)
   );
-  return (data || []).reduce((acc, row) => acc + Number(row.qty || 0), 0);
+  const total = (data || []).reduce((acc, row) => acc + Number(row.qty || 0), 0);
+  cache?.set(cacheKey, total);
+  return total;
 }
 
 function emptyMetrics(from: string, to: string): AmazonRangeMetrics {
@@ -102,7 +125,8 @@ export async function computeAmazonRangeMetrics(
   from: string,
   to: string
 ): Promise<AmazonRangeMetrics> {
-  const units = await amazonUnitsInRange(supabase, accountId, from, to);
+  const unitsCache = new Map<string, number>();
+  const units = await amazonUnitsInRange(supabase, accountId, from, to, unitsCache);
 
   const { data: reportRows } = await supabase
     .from("reports")
@@ -166,8 +190,14 @@ export async function computeAmazonRangeMetrics(
     const overlapFrom = maxIso(report.period_start, from);
     const overlapTo = minIso(report.period_end, to);
     if (overlapFrom > overlapTo) continue;
-    const monthUnits = await amazonUnitsInRange(supabase, accountId, report.period_start, report.period_end);
-    const overlapUnits = await amazonUnitsInRange(supabase, accountId, overlapFrom, overlapTo);
+    const monthUnits = await amazonUnitsInRange(
+      supabase,
+      accountId,
+      report.period_start,
+      report.period_end,
+      unitsCache
+    );
+    const overlapUnits = await amazonUnitsInRange(supabase, accountId, overlapFrom, overlapTo, unitsCache);
     const dayRatio =
       daysInclusive(overlapFrom, overlapTo) / Math.max(1, daysInclusive(report.period_start, report.period_end));
     const ratio = monthUnits > 0 ? overlapUnits / monthUnits : dayRatio;
@@ -203,7 +233,8 @@ export function scaleMetrics(metrics: AmazonRangeMetrics, factor: number): Amazo
   const totalSales = mul(metrics.totalSales);
   const adsSpend = mul(metrics.adsSpend);
   return {
-    ...metrics,
+    from: metrics.from,
+    to: metrics.to,
     units: Number((metrics.units * factor).toFixed(1)),
     totalSales,
     netProfit: mul(metrics.netProfit),
@@ -212,6 +243,8 @@ export function scaleMetrics(metrics: AmazonRangeMetrics, factor: number): Amazo
     vatPosition: mul(metrics.vatPosition),
     adsSpend,
     acos: totalSales > 0 ? adsSpend / totalSales : null,
+    source: metrics.source,
+    reportIds: metrics.reportIds,
   };
 }
 
@@ -273,13 +306,15 @@ export async function refreshAmazonDashboardSnapshots(
     } else {
       metrics = await computeAmazonRangeMetrics(supabase, accountId, period.from, period.to);
     }
+    const priorWin = priorPeriod(period);
+    const priorMetrics = await computeAmazonRangeMetrics(supabase, accountId, priorWin.from, priorWin.to);
     await supabase.from("amazon_dashboard_snapshots").upsert(
       {
         account_id: accountId,
         preset,
         period_start: period.from,
         period_end: period.to,
-        metrics,
+        metrics: { ...metrics, prior: { ...priorMetrics, prior: undefined } },
         computed_at: new Date().toISOString(),
       },
       { onConflict: "account_id,preset" }

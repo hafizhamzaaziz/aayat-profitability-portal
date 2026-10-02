@@ -25,6 +25,20 @@ import type {
 
 export type SpRegion = "eu" | "na" | "fe";
 
+export type CatalogItem = {
+  asin?: string;
+  summaries?: Array<{ itemName?: string; brand?: string }>;
+  relationships?: Array<{
+    marketplaceId?: string;
+    parentAsins?: string[];
+    relationships?: Array<{ parentAsins?: string[]; type?: string }>;
+  }>;
+  salesRanks?: Array<{ displayGroupRanks?: Array<{ title?: string; rank?: number }> }>;
+  identifiers?: Array<{
+    identifiers?: Array<{ identifier?: string; identifierType?: string }>;
+  }>;
+};
+
 const REGION_ENDPOINTS: Record<SpRegion, string> = {
   eu: "https://sellingpartnerapi-eu.amazon.com",
   na: "https://sellingpartnerapi-na.amazon.com",
@@ -189,7 +203,13 @@ export class SpApiClient {
     nextToken?: string;
   }): Promise<{
     payload: {
-      Orders: Array<{ AmazonOrderId: string; PurchaseDate: string; OrderStatus: string }>;
+      Orders: Array<{
+        AmazonOrderId: string;
+        PurchaseDate: string;
+        OrderStatus: string;
+        /** AFN = Fulfilled by Amazon (FBA), MFN = merchant fulfilled (FBM). */
+        FulfillmentChannel?: "AFN" | "MFN" | string;
+      }>;
       NextToken?: string;
     };
   }> {
@@ -213,6 +233,7 @@ export class SpApiClient {
     payload: {
       OrderItems: Array<{
         SellerSKU?: string;
+        ASIN?: string;
         QuantityOrdered?: number;
         QuantityShipped?: number;
         Title?: string;
@@ -249,6 +270,57 @@ export class SpApiClient {
   }
 
   /**
+   * GET /fba/inventory/v1/summaries
+   * Live FBA stock per seller SKU (fulfillable, reserved, inbound working /
+   * shipped / receiving). Requires the "Amazon Fulfillment" (or Product
+   * Listing) role — a 403 means the role has not been granted yet.
+   * Rate: 2 req/sec, burst 2.
+   */
+  async getInventorySummaries(params: {
+    marketplaceId: string;
+    nextToken?: string;
+    startDateTime?: string;
+  }): Promise<{
+    payload?: {
+      granularity?: { granularityType?: string; granularityId?: string };
+      inventorySummaries?: Array<{
+        asin?: string;
+        fnSku?: string;
+        sellerSku?: string;
+        condition?: string;
+        lastUpdatedTime?: string;
+        productName?: string;
+        totalQuantity?: number;
+        inventoryDetails?: {
+          fulfillableQuantity?: number;
+          inboundWorkingQuantity?: number;
+          inboundShippedQuantity?: number;
+          inboundReceivingQuantity?: number;
+          reservedQuantity?: {
+            totalReservedQuantity?: number;
+            pendingCustomerOrderQuantity?: number;
+            pendingTransshipmentQuantity?: number;
+            fcProcessingQuantity?: number;
+          };
+          unfulfillableQuantity?: { totalUnfulfillableQuantity?: number };
+        };
+      }>;
+    };
+    pagination?: { nextToken?: string };
+  }> {
+    return this.request("/fba/inventory/v1/summaries", {
+      query: {
+        details: "true",
+        granularityType: "Marketplace",
+        granularityId: params.marketplaceId,
+        marketplaceIds: [params.marketplaceId],
+        startDateTime: params.startDateTime,
+        nextToken: params.nextToken,
+      },
+    });
+  }
+
+  /**
    * GET /catalog/2022-04-01/items/{asin}
    * Title, parent ASIN, and sales ranks when Amazon has them.
    * Does not return review count or star rating.
@@ -256,16 +328,32 @@ export class SpApiClient {
   async getCatalogItem(
     asin: string,
     marketplaceId: string
-  ): Promise<{
-    asin?: string;
-    summaries?: Array<{ itemName?: string; brand?: string }>;
-    relationships?: Array<{ parentAsins?: string[] }>;
-    salesRanks?: Array<{ displayGroupRanks?: Array<{ title?: string; rank?: number }> }>;
-  }> {
+  ): Promise<CatalogItem> {
     return this.request(`/catalog/2022-04-01/items/${encodeURIComponent(asin)}`, {
       query: {
         marketplaceIds: marketplaceId,
         includedData: "summaries,relationships,salesRanks",
+      },
+    });
+  }
+
+  /**
+   * GET /catalog/2022-04-01/items
+   * Look up items by Seller SKU (requires sellerId) or ASIN list.
+   */
+  async searchCatalogItems(params: {
+    marketplaceId: string;
+    identifiers: string[];
+    identifiersType: "ASIN" | "SKU" | "UPC" | "EAN" | "ISBN" | "JAN";
+    sellerId?: string;
+  }): Promise<{ items?: CatalogItem[]; numberOfResults?: number }> {
+    return this.request("/catalog/2022-04-01/items", {
+      query: {
+        marketplaceIds: params.marketplaceId,
+        identifiers: params.identifiers,
+        identifiersType: params.identifiersType,
+        sellerId: params.sellerId,
+        includedData: "summaries,relationships,salesRanks,identifiers",
       },
     });
   }
@@ -305,6 +393,36 @@ export class SpApiClient {
    *
    * Rate: 0.5 req/sec, burst 30.
    */
+  /**
+   * POST /reports/2021-06-30/reports
+   * Used for the Seller Central "Detail page sales and traffic by parent item" report.
+   */
+  async createReport(body: {
+    reportType: string;
+    marketplaceIds: string[];
+    dataStartTime?: string;
+    dataEndTime?: string;
+    reportOptions?: Record<string, string>;
+  }): Promise<{ reportId: string }> {
+    return this.request("/reports/2021-06-30/reports", { method: "POST", body });
+  }
+
+  async getReport(reportId: string): Promise<{
+    reportId: string;
+    processingStatus: "IN_QUEUE" | "IN_PROGRESS" | "DONE" | "CANCELLED" | "FATAL" | string;
+    reportDocumentId?: string;
+  }> {
+    return this.request(`/reports/2021-06-30/reports/${encodeURIComponent(reportId)}`);
+  }
+
+  async getReportDocument(reportDocumentId: string): Promise<{
+    reportDocumentId: string;
+    url: string;
+    compressionAlgorithm?: "GZIP";
+  }> {
+    return this.request(`/reports/2021-06-30/documents/${encodeURIComponent(reportDocumentId)}`);
+  }
+
   async listFinancialEvents(params: {
     postedAfter?: string;
     postedBefore?: string;

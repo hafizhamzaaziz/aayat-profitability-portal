@@ -12,7 +12,7 @@ import { applyCogsVersion } from "@/lib/cogs/apply-cogs-version";
 import { deriveReportWarnings, validateBreakdown, validatePeriodRange } from "@/lib/reports/guardrails";
 import FileDropzone from "@/components/ui/file-dropzone";
 import PeriodPresetBar from "@/components/ui/period-preset-bar";
-import { parsePeriodPreset, resolvePeriod, type PeriodPreset } from "@/lib/utils/period-presets";
+import { resolvePeriod, type PeriodPreset } from "@/lib/utils/period-presets";
 import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
 import { computePerSku } from "@/lib/reports/per-sku";
 import { computeTemuPnl, deriveTemuTotals, computeTemuPerSku, type TemuAdOverride } from "@/lib/reports/temu-pnl";

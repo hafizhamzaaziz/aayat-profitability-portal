@@ -10,7 +10,9 @@ import {
   type AmazonRangeMetrics,
 } from "@/lib/dashboard/amazon-range-metrics";
 import { parsePeriodPreset, priorPeriod, resolvePeriod } from "@/lib/utils/period-presets";
+import { isParentItemCard, type ParentItemCard } from "@/lib/dashboard/parent-item";
 import DashboardFilters from "./dashboard-filters";
+import ParentItemBoard from "./parent-item-board";
 import DashboardCharts from "./dashboard-charts";
 import DashboardKpis from "./dashboard-kpis";
 import DashboardTopSkus from "./dashboard-top-skus";
@@ -69,6 +71,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
   let reports: ReportRow[] = [];
   let topSkus: Array<{ sku: string; description: string | null; units: number; net_sales: number; net_profit: number }> = [];
   let amazonConnected = false;
+  let parentCards: ParentItemCard[] = [];
   let amazonMetrics: AmazonRangeMetrics | null = null;
   let amazonPrior: AmazonRangeMetrics | null = null;
   let snapshotAge: string | null = null;
@@ -82,6 +85,14 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
       .not("refresh_token_encrypted", "is", null)
       .maybeSingle();
     amazonConnected = Boolean(spCred);
+    if (amazonConnected) {
+      const { data: parentSnaps } = await supabase
+        .from("amazon_dashboard_snapshots")
+        .select("metrics")
+        .eq("account_id", account.id)
+        .in("preset", ["today", "yesterday", "mtd", "this_month_forecast", "last_month"]);
+      parentCards = (parentSnaps || []).map((row) => row.metrics).filter(isParentItemCard);
+    }
 
     let query = supabase
       .from("reports")
@@ -104,23 +115,40 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
           .eq("account_id", account.id)
           .eq("preset", preset)
           .maybeSingle();
-        if (snap?.metrics) {
-          amazonMetrics = snap.metrics as AmazonRangeMetrics;
+        if (
+          snap?.metrics &&
+          String(snap.period_start || "") === period.from &&
+          String(snap.period_end || "") === period.to
+        ) {
+          const snapMetrics = snap.metrics as AmazonRangeMetrics;
+          amazonMetrics = snapMetrics;
+          amazonPrior = snapMetrics.prior ?? null;
           snapshotAge = String(snap.computed_at || "");
         }
       }
-      if (!amazonMetrics) {
-        if (preset === "this_month_forecast" && period.paceFrom && period.paceTo && period.forecastFactor) {
-          const mtd = await computeAmazonRangeMetrics(supabase, account.id, period.paceFrom, period.paceTo);
-          amazonMetrics = { ...scaleMetrics(mtd, period.forecastFactor), from: period.from, to: period.to };
-        } else {
-          amazonMetrics = await computeAmazonRangeMetrics(supabase, account.id, period.from, period.to);
-        }
+      const needCurrent = !amazonMetrics;
+      const needPrior = !amazonPrior;
+      if (needCurrent || needPrior) {
+        const [liveCurrent, livePrior] = await Promise.all([
+          needCurrent
+            ? preset === "this_month_forecast" && period.paceFrom && period.paceTo && period.forecastFactor
+              ? computeAmazonRangeMetrics(supabase, account.id, period.paceFrom, period.paceTo).then((mtd) => ({
+                  ...scaleMetrics(mtd, period.forecastFactor!),
+                  from: period.from,
+                  to: period.to,
+                }))
+              : computeAmazonRangeMetrics(supabase, account.id, period.from, period.to)
+            : Promise.resolve(amazonMetrics),
+          needPrior
+            ? computeAmazonRangeMetrics(supabase, account.id, prior.from, prior.to)
+            : Promise.resolve(amazonPrior),
+        ]);
+        amazonMetrics = liveCurrent;
+        amazonPrior = livePrior;
       }
-      amazonPrior = await computeAmazonRangeMetrics(supabase, account.id, prior.from, prior.to);
     }
 
-    if (reports.length > 0) {
+    if (reports.length > 0 && !(amazonConnected && (platform === "all" || platform === "amazon"))) {
       const ids = reports.map((r) => r.id);
       const { data: skuRows } = await fetchAllRows<{
         sku: string;
@@ -246,9 +274,13 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
         ) : null}
       </div>
 
-      <DashboardFilters />
+      {amazonConnected && account ? (
+        <ParentItemBoard accountId={account.id} currency={account.currency || "£"} cards={parentCards} />
+      ) : (
+        <DashboardFilters />
+      )}
 
-      {amazonConnected && amazonMetrics ? (
+      {!amazonConnected && amazonMetrics ? (
         <p className="text-xs text-slate-500">
           Amazon {formatUkDate(period.from)} – {formatUkDate(period.to)}
           {preset === "this_month_forecast"
@@ -259,13 +291,15 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
         </p>
       ) : null}
 
-      <DashboardKpis
-        currency={account?.currency || "£"}
-        current={kpis}
-        prior={priorKpis}
-        hasPrior={Boolean(amazonPrior) || reports.length > 0}
-        forecast={preset === "this_month_forecast"}
-      />
+      {amazonConnected ? null : (
+        <DashboardKpis
+          currency={account?.currency || "£"}
+          current={kpis}
+          prior={priorKpis}
+          hasPrior={Boolean(amazonPrior) || reports.length > 0}
+          forecast={preset === "this_month_forecast"}
+        />
+      )}
 
       <DashboardCharts
         currency={account?.currency || "£"}

@@ -1,51 +1,27 @@
 import type { Metadata } from "next";
-import { requireAuth } from "@/lib/auth/guards";
-import type { UserRole } from "@/lib/types/auth";
-import { getAccountByIdForRole } from "@/lib/data/accounts";
-import InventoryDashboard from "./inventory-dashboard";
+import { loadInventoryWorkspace } from "@/lib/inventory/workspace";
+import { getInventoryPageContext } from "./_components/page-context";
+import { InventoryShell } from "./_components/inventory-shell";
+import PlannerWorkspace from "./planner-workspace";
 
-export const metadata: Metadata = {
-  title: "Inventory",
-};
+export const metadata: Metadata = { title: "Inventory planner" };
+export const dynamic = "force-dynamic";
 
-export default async function InventoryPage({
-  searchParams,
-}: {
-  searchParams: { accountId?: string };
-}) {
-  const { supabase, user } = await requireAuth();
-
-  const { data: userRow } = await supabase.from("users").select("role").eq("id", user.id).single();
-  const role = ((userRow?.role as UserRole) || "client") as UserRole;
-  const accountId = searchParams.accountId;
-
-  if (!accountId) {
-    return (
-      <div className="space-y-4">
-        <p className="text-slate-600">Select an account from the topbar context switcher to manage inventory.</p>
-      </div>
-    );
-  }
-
-  const account = await getAccountByIdForRole(supabase, accountId, role, user.id);
-  if (!account) {
-    return (
-      <div className="space-y-4">
-        <p className="rounded-2xl bg-red-50 px-3 py-2 text-sm text-red-700">
-          The selected account was not found or you do not have access.
-        </p>
-      </div>
-    );
-  }
-
-  const canEdit = role === "admin" || role === "team";
+export default async function InventoryPage({ searchParams }: { searchParams: { accountId?: string } }) {
+  const page = await getInventoryPageContext(searchParams.accountId);
+  if (!page.ok) return page.element;
+  const { supabase, account, canEdit } = page.ctx;
+  const workspace = await loadInventoryWorkspace(supabase, account.id, account.currency);
 
   return (
-    <div className="space-y-4">
-      <p className="text-slate-600">
-        Account: <span className="font-semibold">{account.name}</span>
-      </p>
-      <InventoryDashboard accountId={account.id} canEdit={canEdit} currency={account.currency} />
-    </div>
+    <InventoryShell
+      accountId={account.id}
+      accountName={account.name}
+      active="planner"
+      title="Inventory planner"
+      description="Every SKU across the whole pipeline — on order at the supplier, at the 3PL, in transit to Amazon and live at FBA — with what to order and what to ship next, worked out from real sales velocity and your lead times."
+    >
+      <PlannerWorkspace workspace={workspace} accountId={account.id} canEdit={canEdit} />
+    </InventoryShell>
   );
 }

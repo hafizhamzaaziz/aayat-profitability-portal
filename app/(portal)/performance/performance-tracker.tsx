@@ -587,9 +587,8 @@ export default function PerformanceTracker({ accountId, canEdit }: Props) {
         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
           <p className="font-semibold">Amazon Performance is parent ASIN only</p>
           <p className="mt-1">
-            The hourly cron writes a weekly snapshot (product name, parent ASIN, BSR when Catalog has it, PPC spend/sales,
-            total sales). Review count and star rating are <span className="font-medium">not in SP-API</span> — leave them
-            blank or fill via Keepa (or similar). The grid below is optional overrides, not a blank manual sheet.
+            Parent ASIN is the (Parent) ASIN from Amazon’s Detail page sales and traffic report. Seller SKUs are not written in that column.
+            Use Fill parent ASINs from Amazon, then download the weekly PDF again. Review count and star rating stay blank.
           </p>
         </div>
       ) : null}

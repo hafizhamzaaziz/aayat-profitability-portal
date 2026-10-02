@@ -17,8 +17,13 @@ Connected **Amazon SP-API + Ads** accounts use the API as the primary source. Te
 
 ## Hourly cron
 
-- `/api/amazon/hourly` at `:15` UTC (`vercel.json`)
-- Ads collect at `:35`
+Scheduled from **Supabase pg_cron**, not Vercel (the Vercel Hobby plan only allows daily crons, so `vercel.json` has no `crons`). Jobs live in `cron.job`; the helper `ops.portal_cron_call(path)` reads the bearer token from Vault secret `portal_cron_secret` (must equal `CRON_SECRET` in Vercel) and calls `https://portal.aayat.co<path>` via pg_net. SQL: `supabase/migrations/20261002_portal_pg_cron.sql`.
+
+- `portal_amazon_hourly` → `/api/amazon/hourly` at `:15` UTC
+- `portal_ads_collect` → `/api/amazon/ads/collect` at `:35`
+- `portal_keepalive` → `/api/amazon/keepalive` Monday 03:00 UTC
+- Check runs: `select * from cron.job_run_details order by start_time desc limit 20;` and HTTP results (kept ~6h): `select id, status_code, left(content::text,200) from net._http_response order by id desc;`
+- Rotate the secret: update the Vercel env var **and** `select vault.update_secret(id, '<new>') from vault.secrets where name='portal_cron_secret'`, then redeploy.
 - Each run: Finance/Orders (order-date stamp) + Ads start, then dashboard snapshots; **Monday** also writes Performance parent-ASIN rows
 - Settings shows last sync, finance watermark (`finance_synced_through`), and last error
 

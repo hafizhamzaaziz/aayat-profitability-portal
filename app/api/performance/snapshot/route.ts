@@ -6,7 +6,7 @@ import { snapshotAmazonPerformance } from "@/lib/amazon/performance/snapshot";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
   const supabase = createClient();

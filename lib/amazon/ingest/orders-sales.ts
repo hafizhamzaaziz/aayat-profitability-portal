@@ -28,7 +28,7 @@ async function listOrderIdsForDay(
   client: SpApiClient,
   marketplaceIds: string[],
   dayIso: string
-): Promise<Array<{ orderId: string; purchaseDate: string }>> {
+): Promise<Array<{ orderId: string; purchaseDate: string; channel: "fba" | "fbm" | null }>> {
   const createdAfter = `${dayIso}T00:00:00Z`;
   let createdBeforeMs = new Date(`${addDaysIso(dayIso, 1)}T00:00:00Z`).getTime();
   // Amazon rejects CreatedBefore later than ~now-2m.
@@ -37,7 +37,7 @@ async function listOrderIdsForDay(
   const afterMs = new Date(createdAfter).getTime();
   if (createdBeforeMs <= afterMs) return [];
   const createdBefore = new Date(createdBeforeMs).toISOString();
-  const out: Array<{ orderId: string; purchaseDate: string }> = [];
+  const out: Array<{ orderId: string; purchaseDate: string; channel: "fba" | "fbm" | null }> = [];
   let nextToken: string | undefined;
   do {
     let attempt = 0;
@@ -56,7 +56,9 @@ async function listOrderIdsForDay(
           if (status === "canceled" || status === "cancelled") continue;
           const orderId = String(o.AmazonOrderId || "").trim();
           const purchaseDate = String(o.PurchaseDate || "").slice(0, 10);
-          if (orderId && purchaseDate) out.push({ orderId, purchaseDate });
+          const fc = String(o.FulfillmentChannel || "").toUpperCase();
+          const channel = fc === "AFN" ? "fba" : fc === "MFN" ? "fbm" : null;
+          if (orderId && purchaseDate) out.push({ orderId, purchaseDate, channel });
         }
         nextToken = resp.payload?.NextToken;
         break;
@@ -73,8 +75,8 @@ async function listOrderIdsForDay(
 async function sumItemsForOrder(
   client: SpApiClient,
   orderId: string
-): Promise<Array<{ sku: string; qty: number }>> {
-  const bySku = new Map<string, number>();
+): Promise<Array<{ sku: string; qty: number; asin: string | null }>> {
+  const bySku = new Map<string, { sku: string; qty: number; asin: string | null }>();
   let nextToken: string | undefined;
   do {
     let attempt = 0;
@@ -85,8 +87,13 @@ async function sumItemsForOrder(
         for (const item of resp.payload?.OrderItems || []) {
           const sku = String(item.SellerSKU || "").trim();
           const qty = Number(item.QuantityOrdered ?? item.QuantityShipped ?? 0);
+          const asin = String(item.ASIN || "").trim().toUpperCase() || null;
           if (!sku || !Number.isFinite(qty) || qty <= 0) continue;
-          bySku.set(sku, (bySku.get(sku) || 0) + qty);
+          const key = sku.toUpperCase();
+          const cur = bySku.get(key) || { sku, qty: 0, asin };
+          cur.qty += qty;
+          if (!cur.asin && asin) cur.asin = asin;
+          bySku.set(key, cur);
         }
         nextToken = resp.payload?.NextToken;
         break;
@@ -97,7 +104,7 @@ async function sumItemsForOrder(
     }
     if (nextToken) await sleep(700);
   } while (nextToken);
-  return Array.from(bySku.entries()).map(([sku, qty]) => ({ sku, qty }));
+  return Array.from(bySku.values());
 }
 
 export type OrdersSalesSyncResult = {
@@ -121,20 +128,24 @@ export async function syncAmazonInventorySalesFromOrders(input: {
   const { client, marketplaceIds } = await loadSpApiClient(accountId);
   const mids = marketplaceIds.length > 0 ? marketplaceIds : ["A1F83G8C2ARO7P"];
 
-  const aggregate = new Map<string, number>(); // `${saleDate}|${sku}` → qty
+  const aggregate = new Map<string, number>(); // `${saleDate}|${channel}|${sku}` → qty
+  const asinBySku = new Map<string, string>();
   const unitsByDay: Record<string, number> = {};
   let orders = 0;
 
   for (let day = from; day <= to; day = addDaysIso(day, 1)) {
     const dayOrders = await listOrderIdsForDay(client, mids, day);
-    for (const { orderId, purchaseDate } of dayOrders) {
+    for (const { orderId, purchaseDate, channel } of dayOrders) {
       orders += 1;
       const items = await sumItemsForOrder(client, orderId);
       await sleep(700);
-      for (const { sku, qty } of items) {
-        const key = `${purchaseDate}|${sku}`;
+      for (const { sku, qty, asin } of items) {
+        const key = `${purchaseDate}|${channel ?? ""}|${sku}`;
         aggregate.set(key, (aggregate.get(key) || 0) + qty);
         unitsByDay[purchaseDate] = (unitsByDay[purchaseDate] || 0) + qty;
+        if (asin && /^[A-Z0-9]{10}$/.test(asin)) {
+          asinBySku.set(sku.trim().toUpperCase(), asin);
+        }
       }
     }
     await sleep(1500);
@@ -151,13 +162,18 @@ export async function syncAmazonInventorySalesFromOrders(input: {
   if (delError) throw new Error(delError.message);
 
   const rows = Array.from(aggregate.entries()).map(([key, qty]) => {
-    const [sale_date, sku] = key.split("|");
+    const firstSep = key.indexOf("|");
+    const secondSep = key.indexOf("|", firstSep + 1);
+    const sale_date = key.slice(0, firstSep);
+    const channel = key.slice(firstSep + 1, secondSep) || null;
+    const sku = key.slice(secondSep + 1);
     return {
       account_id: accountId,
       platform: "amazon",
       sku,
       sale_date,
       qty,
+      channel,
     };
   });
 
@@ -174,6 +190,20 @@ export async function syncAmazonInventorySalesFromOrders(input: {
     await syncAmazonDailySalesFromFacts(supabase, accountId, { from, to });
   } catch {
     // Daily Sales warehouse log is best-effort; Overview facts already wrote.
+  }
+
+  if (asinBySku.size > 0) {
+    const { data: mappings } = await supabase
+      .from("sku_mappings")
+      .select("id, amazon_sku, amazon_asin")
+      .eq("account_id", accountId)
+      .not("amazon_sku", "is", null);
+    for (const row of mappings || []) {
+      const sku = String(row.amazon_sku || "").trim().toUpperCase();
+      const asin = asinBySku.get(sku);
+      if (!asin || String(row.amazon_asin || "").trim().toUpperCase() === asin) continue;
+      await supabase.from("sku_mappings").update({ amazon_asin: asin }).eq("id", row.id);
+    }
   }
 
   return {

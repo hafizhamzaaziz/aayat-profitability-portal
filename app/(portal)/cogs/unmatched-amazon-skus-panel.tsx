@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { fetchAllRows } from "@/lib/supabase/fetch-all";
 
@@ -22,7 +22,7 @@ export default function UnmatchedAmazonSkusPanel({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     const supabase = createClient();
@@ -60,11 +60,11 @@ export default function UnmatchedAmazonSkusPanel({
     }
     setRows(Array.from(agg.values()).sort((a, b) => b.units - a.units).slice(0, 80));
     setLoading(false);
-  };
+  }, [accountId]);
 
   useEffect(() => {
     void load();
-  }, [accountId]);
+  }, [load]);
 
   const linkSku = async (sku: string) => {
     if (!canEdit) return;

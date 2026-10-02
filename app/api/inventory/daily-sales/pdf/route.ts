@@ -14,6 +14,7 @@ export async function GET(request: NextRequest) {
     const from = String(request.nextUrl.searchParams.get("from") || "");
     const to = String(request.nextUrl.searchParams.get("to") || "");
     const platform = String(request.nextUrl.searchParams.get("platform") || "all");
+    const channel = String(request.nextUrl.searchParams.get("channel") || "all"); // fba | fbm | temu | tiktok
     const warehouseId = String(request.nextUrl.searchParams.get("warehouseId") || "all");
     const mappingId = String(request.nextUrl.searchParams.get("mappingId") || "all");
     const skuSearch = String(request.nextUrl.searchParams.get("skuSearch") || "").trim().toLowerCase();
@@ -45,6 +46,7 @@ export async function GET(request: NextRequest) {
       sku_mapping_id: string;
       sale_date: string;
       platform: string;
+      channel?: string | null;
       warehouse_id: string | null;
       sold_units?: number;
       returns_units: number;
@@ -56,7 +58,7 @@ export async function GET(request: NextRequest) {
       fetchAllRows<DailySalesPdfRow>((fromIdx, toIdx) => {
         let query = supabase
           .from("inventory_daily_sales")
-          .select("sku_mapping_id, sale_date, platform, warehouse_id, sold_units, returns_units, collected_units, notes")
+          .select("sku_mapping_id, sale_date, platform, channel, warehouse_id, sold_units, returns_units, collected_units, notes")
           .eq("account_id", accountId)
           .gte("sale_date", from)
           .lte("sale_date", to)
@@ -64,6 +66,8 @@ export async function GET(request: NextRequest) {
           .order("id", { ascending: true })
           .range(fromIdx, toIdx);
         if (platform !== "all") query = query.eq("platform", platform);
+        if (channel === "fba" || channel === "fbm") query = query.eq("platform", "amazon").eq("channel", channel);
+        else if (channel === "temu" || channel === "tiktok") query = query.eq("platform", channel);
         if (warehouseId !== "all") query = query.eq("warehouse_id", warehouseId);
         if (mappingId !== "all") query = query.eq("sku_mapping_id", mappingId);
         return query;
@@ -158,6 +162,7 @@ export async function GET(request: NextRequest) {
           sku_mapping_id: string;
           sale_date: string;
           platform: string;
+          channel?: string | null;
           warehouse_id: string | null;
           sold_units?: number;
           returns_units: number;
@@ -175,7 +180,7 @@ export async function GET(request: NextRequest) {
           sale_date: rec.sale_date,
           product_name: productName,
           sku,
-          platform: rec.platform,
+          platform: rec.platform === "amazon" ? `Amazon ${rec.channel === "fba" ? "FBA" : "FBM"}` : rec.platform,
           warehouse: rec.warehouse_id ? warehouseById.get(String(rec.warehouse_id)) || "-" : "-",
           sold_units: soldUnits,
           returns_units: Number(rec.returns_units || 0),

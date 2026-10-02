@@ -5,6 +5,7 @@ import { syncAmazonFinanceData } from "@/lib/amazon/ingest/orchestrate";
 import { startAdsSync, collectAdsSync } from "@/lib/amazon/ads/ingest";
 import { refreshAmazonDashboardSnapshots } from "@/lib/dashboard/amazon-range-metrics";
 import { snapshotAmazonPerformance } from "@/lib/amazon/performance/snapshot";
+import { syncAmazonListings } from "@/lib/amazon/ingest/listings";
 import { updateSyncStatus } from "@/lib/amazon/credentials";
 import { addDays, todayIsoUtc } from "@/lib/utils/date";
 import { SpApiError } from "@/lib/amazon/spapi";
@@ -31,7 +32,7 @@ export async function GET(request: NextRequest) {
 
   const { data: creds, error } = await admin
     .from("account_amazon_credentials")
-    .select("account_id, finance_synced_through")
+    .select("account_id, finance_synced_through, listings_synced_at")
     .eq("provider", "sp-api")
     .not("refresh_token_encrypted", "is", null);
   if (error) return Response.json({ ok: false, error: error.message }, { status: 502 });
@@ -40,6 +41,10 @@ export async function GET(request: NextRequest) {
   const watermarkByAccount = new Map(
     (creds || []).map((r) => [String(r.account_id), r.finance_synced_through as string | null])
   );
+  const listingsSyncedAt = new Map(
+    (creds || []).map((r) => [String(r.account_id), r.listings_synced_at as string | null])
+  );
+  const LISTINGS_MAX_AGE_MS = 20 * 60 * 60 * 1000;
 
   const { data: adsCreds } = await admin
     .from("account_amazon_credentials")
@@ -92,6 +97,17 @@ export async function GET(request: NextRequest) {
       }
 
       await refreshAmazonDashboardSnapshots(admin, accountId).catch(() => {});
+
+      // Listings catalog (every SKU + ASIN) refreshes once a day per account.
+      let listings: unknown = null;
+      const lastListings = listingsSyncedAt.get(accountId);
+      if (!lastListings || Date.now() - new Date(lastListings).getTime() > LISTINGS_MAX_AGE_MS) {
+        listings = await syncAmazonListings({ supabase: admin, accountId, budgetMs: 90_000 }).catch((err) => ({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+      }
+
       const isMonday = new Date(`${today}T00:00:00Z`).getUTCDay() === 1;
       let performance: unknown = null;
       if (isMonday) {
@@ -108,6 +124,7 @@ export async function GET(request: NextRequest) {
         to: today,
         finance: { reports: finance.reports?.length, warnings: finance.warnings },
         ads,
+        listings,
         performance,
       });
     } catch (err) {

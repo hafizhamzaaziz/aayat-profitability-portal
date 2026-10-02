@@ -28,6 +28,76 @@ import { loadSpApiClient, updateSyncStatus } from "../credentials";
 import { mapFinancialEvents, CSV_HEADER_ORDER, type CsvRow, type MapStats } from "./finance-mapper";
 import { stampPurchaseDatesOnRows } from "./purchase-dates";
 import { buildBridgedCogsLookup } from "@/lib/reports/cogs-lookup";
+
+async function refreshOrderDatedInventory(input: {
+  supabase: SupabaseClient;
+  accountId: string;
+  from: string;
+  to: string;
+  refreshFactsFromFinance: boolean;
+  warnings: string[];
+}): Promise<void> {
+  const { supabase, accountId, from, to, warnings } = input;
+  if (input.refreshFactsFromFinance) {
+    try {
+      const { error: refreshError } = await supabase.rpc("refresh_inventory_sales_facts", {
+        p_account_id: accountId,
+      });
+      if (refreshError) {
+        warnings.push(`Inventory sales facts refresh failed: ${refreshError.message}`);
+      } else {
+        try {
+          const { syncAmazonDailySalesFromFacts } = await import("@/lib/inventory/sync-amazon-daily-sales");
+          await syncAmazonDailySalesFromFacts(supabase, accountId, { from, to });
+        } catch (err) {
+          warnings.push(
+            `Amazon Daily Sales sync skipped: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+    } catch (err) {
+      warnings.push(
+        `Inventory sales facts refresh failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  try {
+    const { syncAmazonInventorySalesFromOrders } = await import("./orders-sales");
+    const today = new Date().toISOString().slice(0, 10);
+    const overlayTo = to < today ? to : today;
+    const overlayFromDate = new Date(`${overlayTo}T00:00:00Z`);
+    overlayFromDate.setUTCDate(overlayFromDate.getUTCDate() - 6);
+    let overlayFrom = overlayFromDate.toISOString().slice(0, 10);
+    if (overlayFrom < from) overlayFrom = from;
+    if (overlayFrom <= overlayTo) {
+      const ordersResult = await syncAmazonInventorySalesFromOrders({
+        supabase,
+        accountId,
+        from: overlayFrom,
+        to: overlayTo,
+      });
+      warnings.push(
+        `Orders API inventory overlay ${overlayFrom}→${overlayTo}: ${ordersResult.orders} orders, ${ordersResult.factRows} fact rows.`
+      );
+    }
+  } catch (err) {
+    warnings.push(
+      `Orders API inventory overlay skipped: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  // Live FBA stock (needs the Amazon Fulfillment role; 403 until granted).
+  try {
+    const { syncFbaInventory } = await import("./fba-inventory");
+    const fba = await syncFbaInventory({ supabase, accountId });
+    warnings.push(
+      fba.ok ? `FBA inventory snapshot: ${fba.skus} SKUs.` : `FBA inventory snapshot skipped: ${fba.error}`
+    );
+  } catch (err) {
+    warnings.push(`FBA inventory snapshot skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 import { computeAmazonPnl, deriveTotals, applyAdReportOverride } from "@/lib/reports/amazon-pnl";
 import { adReportFromRows } from "@/lib/reports/ad-report";
 import { fetchAllRows } from "@/lib/supabase/fetch-all";
@@ -492,6 +562,19 @@ export async function syncAmazonFinanceData(input: {
   }
 
   if (rows.length === 0) {
+    const emptyWarnings = [
+      "No financial events were returned by SP-API in this date range.",
+    ];
+    // Finance can be empty for recent days (settlement lag). Still overlay
+    // Orders-API units so yesterday/today and Daily Sales do not freeze.
+    await refreshOrderDatedInventory({
+      supabase,
+      accountId,
+      from: options.from,
+      to: options.to,
+      refreshFactsFromFinance: false,
+      warnings: emptyWarnings,
+    });
     await updateSyncStatus(accountId, { ok: true, financeSyncedThrough: options.to });
     return {
       ok: true,
@@ -500,7 +583,7 @@ export async function syncAmazonFinanceData(input: {
       totalRows: 0,
       reports: [],
       mapStats,
-      warnings: ["No financial events were returned by SP-API in this date range."],
+      warnings: emptyWarnings,
     };
   }
 
@@ -585,57 +668,14 @@ export async function syncAmazonFinanceData(input: {
 
   await updateSyncStatus(accountId, { ok: true, financeSyncedThrough: options.to });
 
-  // Rebuild inventory velocity cache from order dates (purchase date when
-  // stamped). Manual report uploads already refresh this; SP-API sync must too.
-  try {
-    const { error: refreshError } = await supabase.rpc("refresh_inventory_sales_facts", {
-      p_account_id: accountId,
-    });
-    if (refreshError) {
-      warnings.push(`Inventory sales facts refresh failed: ${refreshError.message}`);
-    } else {
-      try {
-        const { syncAmazonDailySalesFromFacts } = await import("@/lib/inventory/sync-amazon-daily-sales");
-        await syncAmazonDailySalesFromFacts(supabase, accountId, {
-          from: options.from,
-          to: options.to,
-        });
-      } catch (err) {
-        warnings.push(
-          `Amazon Daily Sales sync skipped: ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-      // Overlay recent Orders-API purchase-date units (Finance lags settlement).
-      try {
-        const { syncAmazonInventorySalesFromOrders } = await import("./orders-sales");
-        const today = new Date().toISOString().slice(0, 10);
-        const overlayTo = options.to < today ? options.to : today;
-        const overlayFromDate = new Date(`${overlayTo}T00:00:00Z`);
-        overlayFromDate.setUTCDate(overlayFromDate.getUTCDate() - 6);
-        let overlayFrom = overlayFromDate.toISOString().slice(0, 10);
-        if (overlayFrom < options.from) overlayFrom = options.from;
-        if (overlayFrom <= overlayTo) {
-          const ordersResult = await syncAmazonInventorySalesFromOrders({
-            supabase,
-            accountId,
-            from: overlayFrom,
-            to: overlayTo,
-          });
-          warnings.push(
-            `Orders API inventory overlay ${overlayFrom}→${overlayTo}: ${ordersResult.orders} orders, ${ordersResult.factRows} fact rows.`
-          );
-        }
-      } catch (err) {
-        warnings.push(
-          `Orders API inventory overlay skipped: ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-    }
-  } catch (err) {
-    warnings.push(
-      `Inventory sales facts refresh failed: ${err instanceof Error ? err.message : String(err)}`
-    );
-  }
+  await refreshOrderDatedInventory({
+    supabase,
+    accountId,
+    from: options.from,
+    to: options.to,
+    refreshFactsFromFinance: true,
+    warnings,
+  });
 
   return {
     ok: true,

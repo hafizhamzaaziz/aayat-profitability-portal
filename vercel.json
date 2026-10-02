@@ -1,16 +1,3 @@
 {
-  "crons": [
-    {
-      "path": "/api/amazon/hourly",
-      "schedule": "15 * * * *"
-    },
-    {
-      "path": "/api/amazon/ads/collect",
-      "schedule": "35 * * * *"
-    },
-    {
-      "path": "/api/amazon/keepalive",
-      "schedule": "0 3 * * 1"
-    }
-  ]
+  "crons": []
 }

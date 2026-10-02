@@ -39,11 +39,11 @@ const styles = StyleSheet.create({
   cDate: { width: "10%" },
   cProduct: { width: "16%" },
   cSku: { width: "12%" },
-  cPlatform: { width: "8%" },
+  cPlatform: { width: "10%" },
   cWarehouse: { width: "10%" },
   cNum: { width: "7%", textAlign: "right" },
   cAmt: { width: "10%", textAlign: "right" },
-  cNotes: { width: "13%" },
+  cNotes: { width: "11%" },
   footer: {
     position: "absolute",
     left: 24,
@@ -98,7 +98,7 @@ function DailySalesPdf({ data, footerLogoDataUrl }: { data: Input; footerLogoDat
           <Text style={styles.cDate}>Date</Text>
           <Text style={styles.cProduct}>Product</Text>
           <Text style={styles.cSku}>SKU</Text>
-          <Text style={styles.cPlatform}>Platform</Text>
+          <Text style={styles.cPlatform}>Channel</Text>
           <Text style={styles.cWarehouse}>Warehouse</Text>
           <Text style={styles.cNum}>Sold</Text>
           <Text style={styles.cNum}>Returns</Text>
