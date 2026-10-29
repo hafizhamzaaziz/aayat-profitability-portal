@@ -1,13 +1,14 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-export type InventoryTabKey = "planner" | "purchase-orders" | "fba-shipments" | "stock" | "daily-sales" | "settings";
+export type InventoryTabKey = "planner" | "purchase-orders" | "fba-shipments" | "stock" | "events" | "daily-sales" | "settings";
 
 const TABS: Array<{ key: InventoryTabKey; label: string; path: string; hint: string }> = [
   { key: "planner", label: "Planner", path: "/inventory", hint: "What to order and what to ship" },
   { key: "purchase-orders", label: "Purchase orders", path: "/inventory/purchase-orders", hint: "Supplier orders → 3PL" },
   { key: "fba-shipments", label: "FBA shipments", path: "/inventory/fba-shipments", hint: "3PL → Amazon" },
-  { key: "stock", label: "Stock & ledger", path: "/inventory/stock", hint: "Counts, adjustments, history" },
+  { key: "stock", label: "Stock & ledger", path: "/inventory/stock", hint: "Counts in each location" },
+  { key: "events", label: "Events", path: "/inventory/events", hint: "Who changed stock, when, and why" },
   { key: "daily-sales", label: "Daily sales", path: "/inventory/daily-sales", hint: "FBM / Temu / TikTok dispatch log" },
   { key: "settings", label: "Settings", path: "/inventory/settings", hint: "Suppliers, cartons, lead times" },
 ];
