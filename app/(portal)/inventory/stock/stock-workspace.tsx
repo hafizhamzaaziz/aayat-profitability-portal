@@ -1,57 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, useTransition } from "react";
+import { useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { InventoryWorkspace } from "@/lib/inventory/workspace";
 import { formatUkDate } from "@/lib/utils/date";
-import { deleteMovement, recordAdjustment, recordStockTake, refreshFbaStock, type AdjustmentType } from "../actions";
+import { dedupeStockCountRows, mergedStockMessage, type StockCountRow } from "@/lib/inventory/stock-csv";
+import { recordStockTake, refreshFbaStock, updateSkuPlanning, bulkUpdateSkuPlanning } from "../actions";
 import { inventoryHref } from "../_components/inventory-shell";
-import { Card, EmptyState, Field, Kpi, Modal, Notice, SkuPicker, btn, fmtInt, input, inputSm, td, th, useMoney } from "../_components/ui";
-
-export type LedgerEvent = {
-  id: string;
-  kind: "movement" | "stock_take";
-  mappingId: string;
-  date: string;
-  createdAt: string;
-  type: string;
-  location: string;
-  delta: number;
-  fba?: number;
-  warehouseUnits?: number;
-  warehouse: string | null;
-  reference: { label: string; href: string } | null;
-  notes: string | null;
-  deletable: boolean;
-};
-
-const TYPE_LABEL: Record<string, string> = {
-  po_receipt: "PO received at 3PL",
-  fba_shipment_out: "Shipped to FBA",
-  fba_received: "Amazon checked in",
-  customer_return: "Customer return",
-  b2b_outbound: "B2B / wholesale out",
-  damaged: "Damaged / written off",
-  adjustment: "Manual correction",
-  stock_take: "Stock take",
-  // legacy types
-  inbound: "Inbound (legacy)",
-  outbound: "Outbound (legacy)",
-  transfer: "Transfer (legacy)",
-  reconciliation: "Reconciliation (legacy)",
-};
-
-const ADJUSTMENT_OPTIONS: Array<{ value: AdjustmentType; label: string; hint: string }> = [
-  { value: "customer_return", label: "Customer return (adds stock)", hint: "A sellable unit came back to the 3PL." },
-  { value: "b2b_outbound", label: "B2B / wholesale order (removes stock)", hint: "Units sold outside Amazon, Temu and TikTok." },
-  { value: "damaged", label: "Damaged / written off (removes stock)", hint: "Units that can no longer be sold." },
-  { value: "adjustment", label: "Manual correction (+ / −)", hint: "Enter a negative number to reduce stock." },
-];
+import { Card, EmptyState, Kpi, Notice, SortHeader, BusyOverlay, ProductCell, btn, fmtInt, inputSm, td, th, useMoney } from "../_components/ui";
 
 type Mode = "view" | "count";
+type StockSort = "product" | "fba" | "transit" | "wh" | "onOrder" | "draft" | "value" | "count";
 
-export default function StockWorkspace({ workspace, accountId, canEdit, events }: { workspace: InventoryWorkspace; accountId: string; canEdit: boolean; events: LedgerEvent[] }) {
+export default function StockWorkspace({ workspace, accountId, canEdit }: { workspace: InventoryWorkspace; accountId: string; canEdit: boolean }) {
   const router = useRouter();
   const money = useMoney(workspace.currency);
   const [pending, startTransition] = useTransition();
@@ -62,9 +24,8 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
   const [countDate, setCountDate] = useState(workspace.today);
   const [countNotes, setCountNotes] = useState("");
   const [counts, setCounts] = useState<Record<string, { fba: string; wh: string }>>({});
-  const [adjusting, setAdjusting] = useState(false);
-  const [ledgerSku, setLedgerSku] = useState("");
-  const [ledgerType, setLedgerType] = useState("");
+  const [stockSort, setStockSort] = useState<{ key: StockSort; dir: "asc" | "desc" }>({ key: "product", dir: "asc" });
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const skuById = useMemo(() => new Map(workspace.skus.map((s) => [s.mappingId, s])), [workspace.skus]);
   const rowById = useMemo(() => new Map(workspace.rows.map((r) => [r.mappingId, r])), [workspace.rows]);
@@ -81,8 +42,38 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
         return true;
       })
       .map((s) => ({ sku: s, row: rowById.get(s.mappingId)! }))
-      .sort((a, b) => a.sku.productName.localeCompare(b.sku.productName));
-  }, [workspace.skus, rowById, search, onlyDrift]);
+      .sort((a, b) => {
+        const dir = stockSort.dir === "asc" ? 1 : -1;
+        const num = (v: number | null | undefined) => (v == null ? null : v);
+        const pick = (side: typeof a): string | number | null => {
+          switch (stockSort.key) {
+            case "product":
+              return side.sku.productName.toLowerCase();
+            case "fba":
+              return num(side.row.fbaOnHand);
+            case "transit":
+              return side.row.fbaInTransit;
+            case "wh":
+              return num(side.row.warehouseOnHand);
+            case "onOrder":
+              return side.row.onOrder;
+            case "draft":
+              return side.row.plannedToFba;
+            case "value":
+              return side.row.stockValue;
+            case "count":
+              return side.sku.baselineDate || null;
+          }
+        };
+        const av = pick(a);
+        const bv = pick(b);
+        if (av == null && bv == null) return a.sku.productName.localeCompare(b.sku.productName);
+        if (av == null) return 1;
+        if (bv == null) return -1;
+        if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+        return String(av).localeCompare(String(bv)) * dir;
+      });
+  }, [workspace.skus, rowById, search, onlyDrift, stockSort]);
 
   const totals = useMemo(() => {
     let fba = 0, transit = 0, wh = 0, onOrder = 0, value = 0, uncounted = 0, drift = 0;
@@ -98,10 +89,6 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
     }
     return { fba, transit, wh, onOrder, value, uncounted, drift };
   }, [workspace.rows, skuById]);
-
-  const ledger = useMemo(() => {
-    return events.filter((e) => (!ledgerSku || e.mappingId === ledgerSku) && (!ledgerType || e.type === ledgerType)).slice(0, 400);
-  }, [events, ledgerSku, ledgerType]);
 
   function startCount() {
     const init: Record<string, { fba: string; wh: string }> = {};
@@ -131,6 +118,10 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
       setMode("view");
       return;
     }
+    if (!countNotes.trim()) {
+      setNotice({ kind: "error", text: "Add a reason for this stock take." });
+      return;
+    }
     startTransition(async () => {
       const res = await recordStockTake(accountId, { date: countDate, entries, notes: countNotes || null });
       if (!res.ok) setNotice({ kind: "error", text: res.error });
@@ -152,18 +143,24 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
     });
   }
 
-  function removeMovement(id: string) {
-    if (!confirm("Delete this ledger entry? Stock will be recalculated without it.")) return;
-    startTransition(async () => {
-      const res = await deleteMovement(accountId, id);
-      if (!res.ok) setNotice({ kind: "error", text: res.error });
-      router.refresh();
-    });
-  }
-
   function exportCsv() {
-    const head = ["Product", "Amazon SKU", "ASIN", "FBA on hand", "FBA source", "In transit to FBA", "3PL on hand", "On order", "Stock value", "Last count"];
-    const lines = stockRows.map(({ sku, row }) => [sku.productName, sku.amazonSku || "", sku.asin || "", row.fbaOnHand ?? "", sku.fbaSource, row.fbaInTransit, row.warehouseOnHand ?? "", row.onOrder, row.stockValue.toFixed(2), sku.baselineDate || ""]);
+    const packName = new Map(workspace.packProfiles.map((p) => [p.id, p.profileName]));
+    const head = ["Product ID", "Amazon SKU", "Product", "ASIN", "FBA units", "3PL units", "Carton"];
+    const seen = new Set<string>();
+    const lines: Array<Array<string | number>> = [];
+    for (const { sku, row } of stockRows) {
+      if (seen.has(sku.mappingId)) continue;
+      seen.add(sku.mappingId);
+      lines.push([
+        sku.mappingId,
+        sku.amazonSku || sku.temuSkuId || sku.tiktokSku || "",
+        sku.productName,
+        sku.asin || "",
+        row.fbaOnHand ?? "",
+        row.warehouseOnHand ?? "",
+        sku.defaultPackProfileId ? packName.get(sku.defaultPackProfileId) || "" : "",
+      ]);
+    }
     const csv = [head, ...lines].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
@@ -171,8 +168,200 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
     a.click();
   }
 
+  function toggleStock(key: StockSort) {
+    setStockSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: key === "product" || key === "count" ? "asc" : "desc" }));
+  }
+
+  function saveEntries(entries: Array<{ mappingId: string; fbaUnits: number; warehouseUnits: number }>, note: string, okText: string) {
+    if (entries.length === 0) {
+      setNotice({ kind: "info", text: "Nothing to save." });
+      return;
+    }
+    startTransition(async () => {
+      try {
+        const res = await recordStockTake(accountId, { date: workspace.today, entries, notes: note });
+        if (!res.ok) {
+          setNotice({ kind: "error", text: res.error });
+          return;
+        }
+        setNotice({ kind: "ok", text: okText });
+        setMode("view");
+        router.refresh();
+      } catch (err) {
+        setNotice({ kind: "error", text: err instanceof Error && err.message ? err.message : "Could not save the stock take." });
+      }
+    });
+  }
+
+  function setCarton(mappingId: string, packId: string) {
+    startTransition(async () => {
+      const res = await updateSkuPlanning(accountId, mappingId, { defaultPackProfileId: packId || null });
+      if (!res.ok) setNotice({ kind: "error", text: res.error });
+      else router.refresh();
+    });
+  }
+
+  function zeroAll3pl() {
+    if (!confirm("Set 3PL stock to 0 for every SKU, as of today? FBA numbers stay as they are. This is the fresh starting count.")) return;
+    const entries = workspace.skus.map((s) => ({
+      mappingId: s.mappingId,
+      fbaUnits: rowById.get(s.mappingId)?.fbaOnHand ?? 0,
+      warehouseUnits: 0,
+    }));
+    saveEntries(entries, "Starting 3PL count set to 0", `3PL stock set to 0 for ${entries.length.toLocaleString("en-GB")} SKUs.`);
+  }
+
+  async function uploadCounts(file: File) {
+    const text = await file.text();
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length < 2) {
+      setNotice({ kind: "error", text: "The file needs a header row and at least one SKU." });
+      return;
+    }
+    const cells = (line: string) => {
+      const out: string[] = [];
+      let cur = "";
+      let quoted = false;
+      for (const ch of line) {
+        if (ch === '"') quoted = !quoted;
+        else if (ch === "," && !quoted) {
+          out.push(cur.trim());
+          cur = "";
+        } else cur += ch;
+      }
+      out.push(cur.trim());
+      return out;
+    };
+    const header = cells(lines[0]).map((h) => h.toLowerCase());
+    const idIdx = header.findIndex((h) => h === "product id" || h === "mapping id");
+    const skuIdx = header.findIndex((h) => h === "amazon sku" || h === "sku" || (h.includes("sku") && !h.includes("product")));
+    const whIdx = header.findIndex((h) => h.includes("3pl") || h.includes("warehouse"));
+    const fbaIdx = header.findIndex((h) => h.includes("fba"));
+    const cartonIdx = header.findIndex((h) => h.includes("carton") || h.includes("box"));
+    if ((skuIdx < 0 && idIdx < 0) || whIdx < 0) {
+      setNotice({ kind: "error", text: "Use columns Amazon SKU (or Product ID) and 3PL units. Download the CSV first and edit that." });
+      return;
+    }
+    const knownIds = new Set(workspace.skus.map((s) => s.mappingId));
+    const labelById = new Map(workspace.skus.map((s) => [s.mappingId, s.productName || s.amazonSku || s.temuSkuId || s.tiktokSku || s.mappingId]));
+    const skuIndex = new Map<string, string[]>();
+    for (const s of workspace.skus) {
+      for (const key of [s.amazonSku, s.temuSkuId, s.tiktokSku]) {
+        const norm = String(key || "").trim().toUpperCase();
+        if (!norm) continue;
+        const list = skuIndex.get(norm) || [];
+        if (!list.includes(s.mappingId)) list.push(s.mappingId);
+        skuIndex.set(norm, list);
+      }
+    }
+    const parsed: StockCountRow[] = [];
+    const missing: string[] = [];
+    const ambiguous: string[] = [];
+    for (const line of lines.slice(1)) {
+      const cols = cells(line);
+      const productId = idIdx >= 0 ? String(cols[idIdx] || "").trim() : "";
+      const sku = skuIdx >= 0 ? String(cols[skuIdx] || "").trim() : "";
+      if (!productId && !sku) continue;
+      let mappingId = "";
+      if (productId && knownIds.has(productId)) mappingId = productId;
+      else if (productId) {
+        missing.push(sku || productId);
+        continue;
+      } else {
+        const hits = skuIndex.get(sku.toUpperCase()) || [];
+        if (hits.length === 1) mappingId = hits[0];
+        else if (hits.length > 1) {
+          ambiguous.push(sku);
+          continue;
+        } else {
+          missing.push(sku);
+          continue;
+        }
+      }
+      const current = rowById.get(mappingId);
+      const warehouseUnits = Number(cols[whIdx]);
+      const fbaUnits = fbaIdx >= 0 && cols[fbaIdx] !== "" ? Number(cols[fbaIdx]) : current?.fbaOnHand ?? 0;
+      if (!Number.isFinite(warehouseUnits) || warehouseUnits < 0) continue;
+      parsed.push({
+        mappingId,
+        label: sku || labelById.get(mappingId) || mappingId,
+        fbaUnits: Number.isFinite(fbaUnits) ? Math.max(0, fbaUnits) : 0,
+        warehouseUnits,
+        carton: cartonIdx >= 0 ? String(cols[cartonIdx] || "").trim() || null : null,
+      });
+    }
+    if (ambiguous.length) {
+      const shown = [...new Set(ambiguous)].slice(0, 12).join(", ");
+      setNotice({
+        kind: "error",
+        text: `These SKUs match more than one product, so nothing was saved: ${shown}. Download a fresh CSV (each row has a product id) and upload that file.`,
+      });
+      return;
+    }
+    const deduped = dedupeStockCountRows(parsed);
+    if (deduped.error) {
+      setNotice({ kind: "error", text: deduped.error });
+      return;
+    }
+    const packByName = new Map(workspace.packProfiles.map((p) => [p.profileName.trim().toLowerCase(), p.id]));
+    const entries = deduped.rows.map((row) => ({ mappingId: row.mappingId, fbaUnits: row.fbaUnits, warehouseUnits: row.warehouseUnits }));
+    const packs: Array<{ mappingId: string; defaultPackProfileId: string | null }> = [];
+    const unknownCartons = new Set<string>();
+    if (cartonIdx >= 0) {
+      for (const row of deduped.rows) {
+        const raw = (row.carton || "").trim();
+        if (!raw) continue;
+        const key = raw.toLowerCase();
+        if (key === "none" || key === "-") packs.push({ mappingId: row.mappingId, defaultPackProfileId: null });
+        else {
+          const packId = packByName.get(key);
+          if (!packId) unknownCartons.add(raw);
+          else packs.push({ mappingId: row.mappingId, defaultPackProfileId: packId });
+        }
+      }
+    }
+    if (entries.length === 0 && packs.length === 0) {
+      setNotice({ kind: "error", text: missing.length ? `No rows matched a product. First unknown: ${missing[0]}.` : "No usable rows in the file." });
+      return;
+    }
+    const merged = mergedStockMessage(deduped.mergedLabels);
+    const extra = [
+      merged || "",
+      missing.length ? `${missing.length} SKUs were not recognised.` : "",
+      unknownCartons.size ? `Unknown carton: ${Array.from(unknownCartons).slice(0, 3).join(", ")}. Create it under Inventory → Settings → Carton profiles.` : "",
+    ].filter(Boolean).join(" ");
+    startTransition(async () => {
+      try {
+        if (entries.length) {
+          const res = await recordStockTake(accountId, { date: workspace.today, entries, notes: "Counts uploaded from CSV" });
+          if (!res.ok) {
+            setNotice({ kind: "error", text: res.error });
+            return;
+          }
+        }
+        if (packs.length) {
+          const res = await bulkUpdateSkuPlanning(accountId, packs);
+          if (!res.ok) {
+            setNotice({ kind: "error", text: entries.length ? `Stock counts were saved, but carton sizes were not: ${res.error}` : res.error });
+            if (entries.length) router.refresh();
+            return;
+          }
+        }
+        setNotice({
+          kind: "ok",
+          text: `Saved ${entries.length.toLocaleString("en-GB")} stock row${entries.length === 1 ? "" : "s"}${packs.length ? ` and ${packs.length.toLocaleString("en-GB")} carton${packs.length === 1 ? "" : "s"}` : ""}.${extra ? ` ${extra}` : ""}`,
+        });
+        setMode("view");
+        router.refresh();
+      } catch (err) {
+        setNotice({ kind: "error", text: err instanceof Error && err.message ? err.message : "Could not save the stock take." });
+      }
+    });
+  }
+
   return (
     <div className="space-y-4">
+      <BusyOverlay show={pending} label="Saving stock…" />
       {notice ? <Notice kind={notice.kind}>{notice.text}</Notice> : null}
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
@@ -188,14 +377,15 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
         title={mode === "count" ? "Stock take" : "Stock by location"}
         subtitle={
           mode === "count"
-            ? "Type the physical counts. Only rows you change are saved; leave the rest alone."
-            : "FBA = Amazon's fulfillable units (live when connected). 3PL = units at the warehouse available to ship or sell FBM. Negative drift means more was sold or shipped than the last count allowed — do a stock take to fix it."
+            ? "Type the physical counts. Only rows you change are saved. 3PL is the warehouse. FBA stays manual until Amazon grants the Fulfillment role."
+            : "3PL stock is the same Amazon SKU as COGS. Set the carton on each row, or put the carton name in the CSV. New box sizes are created under Inventory → Settings → Carton profiles."
         }
         actions={
           mode === "count" ? (
             <>
               <input type="date" value={countDate} onChange={(e) => setCountDate(e.target.value)} className={inputSm} style={{ width: 150 }} />
-              <input value={countNotes} onChange={(e) => setCountNotes(e.target.value)} placeholder="Note (optional)" className={inputSm} style={{ width: 180 }} />
+              <input value={countNotes} onChange={(e) => setCountNotes(e.target.value)} placeholder="Why are these counts changing?" className={inputSm} style={{ width: 240 }} />
+              <button type="button" className={btn.small} onClick={() => { setCounts((c) => { const next = { ...c }; for (const s of workspace.skus) next[s.mappingId] = { fba: next[s.mappingId]?.fba ?? "", wh: "0" }; return next; }); }}>Fill 3PL with 0</button>
               <button type="button" className={btn.small} onClick={() => setMode("view")} disabled={pending}>Cancel</button>
               <button type="button" className={btn.smallPrimary} onClick={saveCount} disabled={pending}>{pending ? "Saving…" : "Save stock take"}</button>
             </>
@@ -203,10 +393,12 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
             <>
               <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search…" className={inputSm} style={{ width: 180 }} />
               <label className="flex items-center gap-1 text-xs text-slate-600"><input type="checkbox" checked={onlyDrift} onChange={(e) => setOnlyDrift(e.target.checked)} /> drifted only</label>
-              <button type="button" className={btn.small} onClick={exportCsv}>CSV</button>
+              <button type="button" className={btn.small} onClick={exportCsv}>Download CSV</button>
+              {canEdit ? <button type="button" className={btn.small} onClick={() => fileRef.current?.click()} disabled={pending}>Upload counts</button> : null}
               {canEdit ? <button type="button" className={btn.small} onClick={refreshFba} disabled={pending}>Refresh FBA</button> : null}
-              {canEdit ? <button type="button" className={btn.small} onClick={() => setAdjusting(true)}>Return / adjustment</button> : null}
-              {canEdit ? <button type="button" className={btn.smallPrimary} onClick={startCount}>Stock take</button> : null}
+              {canEdit ? <button type="button" className={btn.small} onClick={zeroAll3pl} disabled={pending}>Set all 3PL to 0</button> : null}
+              {canEdit ? <button type="button" className={btn.smallPrimary} onClick={startCount}>Edit counts</button> : null}
+              <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) void uploadCounts(file); }} />
             </>
           )
         }
@@ -218,14 +410,15 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="bg-slate-50">
-                  <th className={th()}>Product</th>
-                  <th className={th("text-right")}>FBA</th>
-                  <th className={th("text-right")}>In transit</th>
-                  <th className={th("text-right")}>3PL</th>
-                  <th className={th("text-right")}>On order</th>
-                  <th className={th("text-right")}>Draft to FBA</th>
-                  <th className={th("text-right")}>Value</th>
-                  <th className={th()}>Last count</th>
+                  <SortHeader label="Product" active={stockSort.key === "product"} dir={stockSort.dir} onClick={() => toggleStock("product")} />
+                  <SortHeader label="FBA" align="right" active={stockSort.key === "fba"} dir={stockSort.dir} onClick={() => toggleStock("fba")} />
+                  <SortHeader label="In transit" align="right" active={stockSort.key === "transit"} dir={stockSort.dir} onClick={() => toggleStock("transit")} />
+                  <SortHeader label="3PL" align="right" active={stockSort.key === "wh"} dir={stockSort.dir} onClick={() => toggleStock("wh")} />
+                  <th className={th()}>Carton</th>
+                  <SortHeader label="On order" align="right" active={stockSort.key === "onOrder"} dir={stockSort.dir} onClick={() => toggleStock("onOrder")} />
+                  <SortHeader label="Draft to FBA" align="right" active={stockSort.key === "draft"} dir={stockSort.dir} onClick={() => toggleStock("draft")} />
+                  <SortHeader label="Value" align="right" active={stockSort.key === "value"} dir={stockSort.dir} onClick={() => toggleStock("value")} />
+                  <SortHeader label="Last count" active={stockSort.key === "count"} dir={stockSort.dir} onClick={() => toggleStock("count")} />
                 </tr>
               </thead>
               <tbody>
@@ -236,8 +429,7 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
                   return (
                     <tr key={sku.mappingId} className={`border-t border-slate-100 ${!sku.isPlanned ? "opacity-60" : ""}`}>
                       <td className={td()}>
-                        <span className="block font-medium text-slate-900">{sku.productName}</span>
-                        <span className="block text-xs text-slate-500">{sku.amazonSku || sku.temuSkuId || sku.tiktokSku || ""}{sku.asin ? ` · ${sku.asin}` : ""}{!sku.isPlanned ? " · excluded from planning" : ""}</span>
+                        <ProductCell productName={sku.productName} amazonSku={sku.amazonSku} asin={sku.asin} temuSkuId={sku.temuSkuId} tiktokSku={sku.tiktokSku} extra={!sku.isPlanned ? <span className="block text-xs text-slate-400">excluded from planning</span> : null} />
                       </td>
                       <td className={td("text-right")}>
                         {mode === "count" ? (
@@ -257,7 +449,20 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
                           <>
                             <span className={whDrift ? "font-semibold text-rose-700" : ""}>{row.warehouseOnHand == null ? <span className="text-slate-400">—</span> : fmtInt(row.warehouseOnHand)}</span>
                             {whDrift ? <span className="block text-[11px] text-rose-600">drift {sku.warehouseRaw}</span> : null}
+                            {!whDrift && sku.unitsPerBox && row.warehouseOnHand ? <span className="block text-[11px] text-slate-400">{Math.ceil(row.warehouseOnHand / sku.unitsPerBox)} boxes</span> : null}
                           </>
+                        )}
+                      </td>
+                      <td className={td()}>
+                        {workspace.packProfiles.length === 0 ? (
+                          <Link href={inventoryHref("/inventory/settings", accountId, { tab: "cartons" })} className="text-xs text-plum-700 hover:underline">Add a carton</Link>
+                        ) : (
+                          <select value={sku.defaultPackProfileId || ""} onChange={(e) => setCarton(sku.mappingId, e.target.value)} className={inputSm} disabled={!canEdit || pending} style={{ minWidth: 150 }}>
+                            <option value="">No carton</option>
+                            {workspace.packProfiles.map((p) => (
+                              <option key={p.id} value={p.id}>{p.profileName} ({p.unitsPerBox}/box)</option>
+                            ))}
+                          </select>
                         )}
                       </td>
                       <td className={td("text-right")}>{row.onOrder ? fmtInt(row.onOrder) : <span className="text-slate-300">0</span>}</td>
@@ -273,131 +478,6 @@ export default function StockWorkspace({ workspace, accountId, canEdit, events }
         )}
       </Card>
 
-      <Card
-        title="Ledger"
-        subtitle="Every stock-changing event, newest first. Receipts, FBA shipments and stock takes are created from their own pages; manual entries can be deleted here."
-        actions={
-          <>
-            <div style={{ width: 240 }}><SkuPicker options={workspace.skus} value={ledgerSku} onChange={setLedgerSku} placeholder="All SKUs" /></div>
-            <select value={ledgerType} onChange={(e) => setLedgerType(e.target.value)} className={inputSm} style={{ width: 190 }}>
-              <option value="">All types</option>
-              {Object.entries(TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-            </select>
-          </>
-        }
-      >
-        {ledger.length === 0 ? (
-          <EmptyState>No ledger entries yet. Receive a purchase order, ship to FBA or record a stock take to get started.</EmptyState>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead>
-                <tr className="bg-slate-50">
-                  <th className={th()}>Date</th>
-                  <th className={th()}>Product</th>
-                  <th className={th()}>Event</th>
-                  <th className={th()}>Location</th>
-                  <th className={th("text-right")}>Units</th>
-                  <th className={th()}>Reference</th>
-                  <th className={th()}>Notes</th>
-                  <th className={th()}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {ledger.map((e) => {
-                  const sku = skuById.get(e.mappingId);
-                  return (
-                    <tr key={`${e.kind}-${e.id}`} className="border-t border-slate-100">
-                      <td className={td("whitespace-nowrap")}>{formatUkDate(e.date)}</td>
-                      <td className={td()}><span className="font-medium">{sku?.productName || "Unknown SKU"}</span><span className="block text-xs text-slate-500">{sku?.amazonSku || ""}</span></td>
-                      <td className={td()}>{TYPE_LABEL[e.type] || e.type}</td>
-                      <td className={td("text-xs text-slate-600")}>{e.kind === "stock_take" ? "FBA + 3PL" : e.location === "amazon" ? "Amazon FBA" : e.warehouse || "3PL"}</td>
-                      <td className={td("text-right")}>
-                        {e.kind === "stock_take" ? (
-                          <span className="text-xs">FBA {fmtInt(e.fba)} · 3PL {fmtInt(e.warehouseUnits)}</span>
-                        ) : (
-                          <span className={e.delta > 0 ? "text-emerald-700" : "text-rose-700"}>{e.delta > 0 ? "+" : ""}{fmtInt(e.delta)}</span>
-                        )}
-                      </td>
-                      <td className={td("text-xs")}>{e.reference ? <Link href={inventoryHref(e.reference.href, accountId)} className="text-plum-700 hover:underline">{e.reference.label}</Link> : ""}</td>
-                      <td className={td("text-xs text-slate-500")}>{e.notes || ""}</td>
-                      <td className={td("text-right")}>{canEdit && e.deletable ? <button type="button" onClick={() => removeMovement(e.id)} className="text-xs text-rose-600 hover:underline" disabled={pending}>delete</button> : null}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
-      {adjusting ? (
-        <AdjustmentModal
-          workspace={workspace}
-          accountId={accountId}
-          onClose={() => setAdjusting(false)}
-          onDone={(t) => { setAdjusting(false); setNotice({ kind: "ok", text: t }); router.refresh(); }}
-          onError={(t) => setNotice({ kind: "error", text: t })}
-        />
-      ) : null}
     </div>
-  );
-}
-
-function AdjustmentModal({ workspace, accountId, onClose, onDone, onError }: { workspace: InventoryWorkspace; accountId: string; onClose: () => void; onDone: (t: string) => void; onError: (t: string) => void }) {
-  const [pending, startTransition] = useTransition();
-  const [mappingId, setMappingId] = useState("");
-  const [type, setType] = useState<AdjustmentType>("customer_return");
-  const [location, setLocation] = useState<"warehouse" | "amazon">("warehouse");
-  const [units, setUnits] = useState("");
-  const [date, setDate] = useState(workspace.today);
-  const [warehouseId, setWarehouseId] = useState(workspace.defaultWarehouseId || "");
-  const [notes, setNotes] = useState("");
-  const opt = ADJUSTMENT_OPTIONS.find((o) => o.value === type)!;
-
-  function submit() {
-    if (!mappingId) return onError("Pick a SKU first.");
-    if (!Number(units)) return onError("Enter the number of units.");
-    startTransition(async () => {
-      const res = await recordAdjustment(accountId, { mappingId, type, location, units: Number(units), date, warehouseId: location === "warehouse" ? warehouseId || null : null, notes: notes || null });
-      if (!res.ok) onError(res.error);
-      else onDone("Adjustment recorded.");
-    });
-  }
-
-  return (
-    <Modal title="Return / adjustment" onClose={onClose}>
-      <div className="grid gap-3">
-        <Field label="SKU"><SkuPicker options={workspace.skus} value={mappingId} onChange={setMappingId} autoFocus /></Field>
-        <Field label="What happened" hint={opt.hint}>
-          <select value={type} onChange={(e) => setType(e.target.value as AdjustmentType)} className={input}>
-            {ADJUSTMENT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Location">
-            <select value={location} onChange={(e) => setLocation(e.target.value as "warehouse" | "amazon")} className={input}>
-              <option value="warehouse">3PL warehouse</option>
-              <option value="amazon">Amazon FBA</option>
-            </select>
-          </Field>
-          {location === "warehouse" ? (
-            <Field label="Warehouse">
-              <select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)} className={input}>
-                <option value="">—</option>
-                {workspace.warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-              </select>
-            </Field>
-          ) : <div />}
-          <Field label="Units"><input value={units} onChange={(e) => setUnits(e.target.value)} className={input} inputMode="numeric" placeholder={type === "adjustment" ? "e.g. -3 or 12" : "e.g. 5"} /></Field>
-          <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={input} /></Field>
-        </div>
-        <Field label="Notes"><input value={notes} onChange={(e) => setNotes(e.target.value)} className={input} placeholder="Order number, reason…" /></Field>
-      </div>
-      <div className="mt-4 flex justify-end gap-2">
-        <button type="button" className={btn.secondary} onClick={onClose} disabled={pending}>Cancel</button>
-        <button type="button" className={btn.primary} onClick={submit} disabled={pending}>{pending ? "Saving…" : "Record"}</button>
-      </div>
-    </Modal>
   );
 }

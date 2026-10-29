@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { PlannerStatus } from "@/lib/inventory/planner";
 import { STATUS_LABEL } from "@/lib/inventory/planner";
 
@@ -78,9 +79,27 @@ export function DocStatus({ status }: { status: string }) {
   return <span className={`inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold ${DOC_TONE[status] || "bg-slate-100 text-slate-700"}`}>{status.replace(/_/g, " ")}</span>;
 }
 
+const CURRENCY_ALIASES: Record<string, string> = {
+  "£": "GBP",
+  gbp: "GBP",
+  $: "USD",
+  usd: "USD",
+  "€": "EUR",
+  eur: "EUR",
+};
+
+/** Accounts store "£" as well as "GBP". Intl only accepts the three-letter code. */
+export function isoCurrency(value: string | null | undefined) {
+  const raw = String(value || "").trim();
+  const alias = CURRENCY_ALIASES[raw] || CURRENCY_ALIASES[raw.toLowerCase()];
+  if (alias) return alias;
+  if (/^[A-Za-z]{3}$/.test(raw)) return raw.toUpperCase();
+  return "GBP";
+}
+
 export function useMoney(currency: string) {
   return useMemo(() => {
-    const fmt = new Intl.NumberFormat("en-GB", { style: "currency", currency: currency || "GBP", maximumFractionDigits: 2 });
+    const fmt = new Intl.NumberFormat("en-GB", { style: "currency", currency: isoCurrency(currency), maximumFractionDigits: 2 });
     return (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? "—" : fmt.format(v));
   }, [currency]);
 }
@@ -113,18 +132,79 @@ export function Field({ label, children, hint, className = "" }: { label: ReactN
 export type SkuOption = { mappingId: string; productName: string; amazonSku: string | null; temuSkuId: string | null; tiktokSku: string | null };
 
 export function skuLabel(s: SkuOption) {
-  return s.amazonSku || s.temuSkuId || s.tiktokSku || s.productName;
+  return s.productName || s.amazonSku || s.temuSkuId || s.tiktokSku || "Unnamed";
+}
+
+const PLATFORM_CHIP: Record<string, string> = {
+  Amazon: "bg-amber-50 text-amber-800",
+  Temu: "bg-orange-50 text-orange-800",
+  TikTok: "bg-slate-100 text-slate-700",
+};
+
+function sameText(a: string | null | undefined, b: string) {
+  return !!a && a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/** Product name, then each platform's SKU, SKU ID or ASIN. */
+export function ProductCell({
+  productName,
+  amazonSku,
+  asin,
+  temuSkuId,
+  tiktokSku,
+  extra,
+}: {
+  productName: string;
+  amazonSku?: string | null;
+  asin?: string | null;
+  temuSkuId?: string | null;
+  tiktokSku?: string | null;
+  extra?: ReactNode;
+}) {
+  const title = productName?.trim() || amazonSku || temuSkuId || tiktokSku || "Unnamed";
+  const lines: Array<{ platform: "Amazon" | "Temu" | "TikTok"; text: string }> = [];
+  if (amazonSku || asin) {
+    const bits = [amazonSku, asin].filter((v): v is string => !!v && !sameText(v, title));
+    lines.push({ platform: "Amazon", text: bits.join(" · ") });
+  }
+  if (temuSkuId) lines.push({ platform: "Temu", text: sameText(temuSkuId, title) ? "" : temuSkuId });
+  if (tiktokSku) lines.push({ platform: "TikTok", text: sameText(tiktokSku, title) ? "" : tiktokSku });
+  return (
+    <div>
+      <span className="block font-medium text-slate-900">{title}</span>
+      {lines.map((line) => (
+        <span key={line.platform} className="mt-0.5 flex items-baseline gap-1 text-xs text-slate-500">
+          <span className={`rounded px-1 py-px text-[10px] font-semibold uppercase tracking-wide ${PLATFORM_CHIP[line.platform]}`}>{line.platform}</span>
+          {line.text ? <span>{line.text}</span> : null}
+        </span>
+      ))}
+      {extra}
+    </div>
+  );
+}
+
+export function LinkedProduct({
+  sku,
+  fallbackName,
+  fallbackSku,
+}: {
+  sku?: { productName: string; amazonSku: string | null; asin?: string | null; temuSkuId: string | null; tiktokSku: string | null } | null;
+  fallbackName?: string;
+  fallbackSku?: string;
+}) {
+  if (!sku) return <ProductCell productName={fallbackName || fallbackSku || "Unnamed"} amazonSku={fallbackSku} />;
+  return <ProductCell productName={sku.productName} amazonSku={sku.amazonSku} asin={sku.asin} temuSkuId={sku.temuSkuId} tiktokSku={sku.tiktokSku} />;
 }
 
 /** Type-ahead SKU picker: matches on any SKU or product name. */
 export function SkuPicker({ options, value, onChange, placeholder = "Search SKU or product…", disabled, autoFocus }: { options: SkuOption[]; value: string; onChange: (mappingId: string) => void; placeholder?: string; disabled?: boolean; autoFocus?: boolean }) {
   const selected = options.find((o) => o.mappingId === value) || null;
-  const [query, setQuery] = useState(selected ? `${skuLabel(selected)} · ${selected.productName}` : "");
+  const [query, setQuery] = useState(selected ? skuLabel(selected) : "");
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (selected) setQuery(`${skuLabel(selected)} · ${selected.productName}`);
+    if (selected) setQuery(skuLabel(selected));
     else if (!value) setQuery("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
@@ -169,13 +249,15 @@ export function SkuPicker({ options, value, onChange, placeholder = "Search SKU 
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
                   onChange(o.mappingId);
-                  setQuery(`${skuLabel(o)} · ${o.productName}`);
+                  setQuery(skuLabel(o));
                   setOpen(false);
                 }}
                 className="flex w-full flex-col items-start px-3 py-1.5 text-left hover:bg-slate-50"
               >
-                <span className="text-sm font-medium text-slate-900">{skuLabel(o)}</span>
-                <span className="text-xs text-slate-500">{o.productName}{o.temuSkuId && o.amazonSku ? ` · Temu ${o.temuSkuId}` : ""}</span>
+                <span className="text-sm font-medium text-slate-900">{o.productName}</span>
+                <span className="text-xs text-slate-500">
+                  {[o.amazonSku ? `Amazon ${o.amazonSku}` : "", o.temuSkuId ? `Temu ${o.temuSkuId}` : "", o.tiktokSku ? `TikTok ${o.tiktokSku}` : ""].filter(Boolean).join(" · ")}
+                </span>
               </button>
             </li>
           ))}
@@ -186,23 +268,63 @@ export function SkuPicker({ options, value, onChange, placeholder = "Search SKU 
 }
 
 export function Modal({ title, onClose, children, wide }: { title: ReactNode; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  const [mounted, setMounted] = useState(false);
   useEffect(() => {
+    setMounted(true);
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previous;
+      document.removeEventListener("keydown", onKey);
+    };
   }, [onClose]);
-  return (
-    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4 pt-12" onMouseDown={onClose}>
-      <div className={`w-full ${wide ? "max-w-5xl" : "max-w-2xl"} rounded-2xl bg-white shadow-xl`} onMouseDown={(e) => e.stopPropagation()}>
+  if (!mounted) return null;
+  return createPortal(
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        className={`flex max-h-[min(88vh,860px)] w-full ${wide ? "max-w-5xl" : "max-w-lg"} flex-col overflow-hidden rounded-2xl bg-white shadow-2xl`}
+        onClick={(e) => e.stopPropagation()}
+      >
         <header className="flex items-center justify-between border-b border-slate-100 px-5 py-3">
           <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
-          <button type="button" onClick={onClose} className="rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-slate-100">✕</button>
+          <button type="button" onClick={onClose} className="rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-slate-100">Close</button>
         </header>
-        <div className="p-5">{children}</div>
+        <div className="overflow-y-auto p-5">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body
+  );
+}
+
+export function BusyOverlay({ show, label = "Working…" }: { show: boolean; label?: string }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!show || !mounted) return null;
+  return createPortal(
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-white/70" role="status" aria-live="polite">
+      <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-4 shadow-lg">
+        <span className="h-5 w-5 animate-spin rounded-full border-2 border-slate-200 border-t-plum-700" />
+        <span className="text-sm font-medium text-slate-800">{label}</span>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+export function SortHeader({ label, active, dir, onClick, align = "left" }: { label: string; active: boolean; dir: "asc" | "desc"; onClick: () => void; align?: "left" | "right" }) {
+  return (
+    <th className={th(align === "right" ? "text-right" : "")}>
+      <button type="button" onClick={onClick} className={`flex w-full items-center gap-1 hover:text-slate-800 ${align === "right" ? "justify-end" : "justify-start"}`}>
+        {label}
+        <span className="text-[10px]">{active ? (dir === "asc" ? "▲" : "▼") : "↕"}</span>
+      </button>
+    </th>
   );
 }
 

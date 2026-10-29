@@ -36,7 +36,21 @@ function revalidateInventory() {
 }
 
 function fail(err: unknown): { ok: false; error: string } {
-  return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  const message = errorMessage(err);
+  if (message.includes("cannot affect row a second time")) {
+    return { ok: false, error: "Two rows in this save are the same product. Each product can only be saved once." };
+  }
+  return { ok: false, error: message };
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.message.trim()) return err.message;
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  if (typeof err === "string" && err.trim() && err !== "[object Object]") return err;
+  return "Could not save.";
 }
 
 function int(v: unknown, fallback = 0) {
@@ -284,7 +298,9 @@ export async function recordStockTake(
   const s = await staff(accountId);
   if (!s.ok) return s;
   const date = isoDate(input.date) || todayIsoUtc();
-  const rows = input.entries
+  const reason = str(input.notes);
+  if (!reason) return { ok: false, error: "Add a reason for this stock take." };
+  const built = input.entries
     .filter((e) => e.mappingId)
     .map((e) => ({
       account_id: s.ctx.accountId,
@@ -293,9 +309,24 @@ export async function recordStockTake(
       amazon_units: Math.max(0, int(e.fbaUnits)),
       warehouse_units: Math.max(0, int(e.warehouseUnits)),
       source: "manual",
-      notes: str(input.notes),
+      notes: reason,
+      updated_by: s.ctx.userId,
       updated_at: new Date().toISOString(),
     }));
+  const byProduct = new Map<string, (typeof built)[number]>();
+  const conflictIds = new Set<string>();
+  for (const row of built) {
+    const prev = byProduct.get(row.sku_mapping_id);
+    if (prev && (prev.amazon_units !== row.amazon_units || prev.warehouse_units !== row.warehouse_units)) conflictIds.add(row.sku_mapping_id);
+    byProduct.set(row.sku_mapping_id, row);
+  }
+  if (conflictIds.size > 0) {
+    return {
+      ok: false,
+      error: `The same product is listed more than once with different counts (${conflictIds.size} product${conflictIds.size === 1 ? "" : "s"}). Nothing was saved.`,
+    };
+  }
+  const rows = [...byProduct.values()];
   if (rows.length === 0) return { ok: false, error: "Nothing to save." };
   const { error } = await s.ctx.supabase.from("inventory_levels").upsert(rows, { onConflict: "account_id,sku_mapping_id,level_date" });
   if (error) return fail(error);
@@ -321,6 +352,7 @@ export async function recordAdjustment(
   if (!s.ok) return s;
   const units = int(input.units);
   if (units === 0) return { ok: false, error: "Units cannot be zero." };
+  if (!str(input.notes)) return { ok: false, error: "Add a reason for this change." };
   let delta = Math.abs(units);
   if (input.type === "b2b_outbound" || input.type === "damaged") delta = -delta;
   if (input.type === "adjustment") delta = units; // signed as entered
